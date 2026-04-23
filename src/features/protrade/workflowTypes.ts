@@ -1,0 +1,145 @@
+import type { Candle } from '../scanner/ohlcv';
+
+export type WorkflowStage =
+  | 'raw_candidates'
+  | 'pro_watchlist'
+  | 'forming'
+  | 'confirmed'
+  | 'locked'
+  | 'trade_ready'
+  | 'ordered';
+
+export type StrategyId =
+  | 'orb_retest'
+  | 'vwap_pullback'
+  | 'rs_continuation'
+  | 'liquidity_sweep'
+  | 'ob_fvg_retest';
+
+export type MarketDataProviderId = 'yahoo' | 'alpaca' | 'polygon' | 'ibkr';
+
+export interface MarketDataProviderStatus {
+  provider: MarketDataProviderId;
+  mode: 'fallback' | 'live' | 'delayed';
+  lastUpdated: string;
+  stale: boolean;
+  ageSeconds: number;
+  message: string;
+}
+
+export interface StrategyChecklistItem {
+  label: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface TradePlan {
+  entry: number;
+  stop: number;
+  target: number;
+  target1: number;
+  target2: number;
+  rr: number;
+  rr1: number;
+  riskPerShare: number;
+  triggerCandleTime: string;
+  invalidation: string;
+  riskSize: string;
+}
+
+export interface ChartZone {
+  label: string;
+  startTime: string;
+  endTime: string;
+  high: number;
+  low: number;
+}
+
+export interface StrategySignal {
+  strategyId: StrategyId;
+  strategyName: string;
+  stage: WorkflowStage;
+  direction: 'BULL' | 'BEAR' | 'NEUTRAL';
+  confidence: number;
+  reason: string;
+  checklist: StrategyChecklistItem[];
+  missing: string[];
+  tradePlan: TradePlan | null;
+  zones: ChartZone[];
+  canAutoReady: boolean;
+  orderBlockReason: string;
+}
+
+export interface TradeLifecycleEvent {
+  symbol: string;
+  stage: WorkflowStage;
+  event: 'scan' | 'approve' | 'reject' | 'order_submitted' | 'order_failed';
+  note: string;
+  createdAt: string;
+}
+
+export interface StrategyInput {
+  symbol: string;
+  company: string;
+  direction: 'BULL' | 'BEAR' | 'NEUTRAL';
+  price: number;
+  rvol: number;
+  gapPct: number;
+  atr20: number;
+  atrPct: number;
+  rsVsBenchmark: number;
+  vwap: number;
+  vwapAligned: boolean;
+  trend5m: 'UP' | 'DOWN' | 'FLAT';
+  trend15m: 'UP' | 'DOWN' | 'FLAT';
+  trendAligned: boolean;
+  trend15mAligned: boolean;
+  score: number;
+  dataStatus: MarketDataProviderStatus;
+  candles: {
+    one: Candle[];
+    five: Candle[];
+    fifteen: Candle[];
+    daily: Candle[];
+  };
+}
+
+export const WORKFLOW_STAGE_LABELS: Record<WorkflowStage, string> = {
+  raw_candidates: 'Raw Candidates',
+  pro_watchlist: 'Pro Watchlist',
+  forming: 'Trading Setup Forming',
+  confirmed: 'Confirmed',
+  locked: 'Locked',
+  trade_ready: 'Trade Ready',
+  ordered: 'Ordered',
+};
+
+export const STRATEGY_LABELS: Record<StrategyId, string> = {
+  orb_retest: 'ORB Retest',
+  vwap_pullback: 'VWAP Pullback',
+  rs_continuation: 'RS Continuation',
+  liquidity_sweep: 'Liquidity Sweep',
+  ob_fvg_retest: 'OB/FVG Retest',
+};
+
+export const STRATEGY_CODES: Record<StrategyId, string> = {
+  orb_retest: 'S1',
+  vwap_pullback: 'S2',
+  rs_continuation: 'S3',
+  liquidity_sweep: 'S4',
+  ob_fvg_retest: 'S5',
+};
+
+export const WORKFLOW_STAGE_ORDER: WorkflowStage[] = [
+  'raw_candidates',
+  'pro_watchlist',
+  'forming',
+  'confirmed',
+  'locked',
+  'trade_ready',
+  'ordered',
+];
+
+export function workflowStageRank(stage: WorkflowStage) {
+  return WORKFLOW_STAGE_ORDER.indexOf(stage);
+}
