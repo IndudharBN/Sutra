@@ -1,6 +1,8 @@
-import { ema, vwapLatest } from '../scanner/indicators';
+import { detectFvg } from '../scanner/fvg';
+import { ema } from '../scanner/indicators';
 import type { Candle } from '../scanner/ohlcv';
 import { closes, last, round } from '../scanner/ohlcv';
+import { findOrderBlockZone, rejectionCandle } from '../scanner/smc';
 import type { StrategyChecklistItem, StrategyId, StrategyInput, StrategySignal, TradePlan, WorkflowStage } from './workflowTypes';
 import { STRATEGY_LABELS, workflowStageRank } from './workflowTypes';
 
@@ -45,6 +47,17 @@ function planFromLevels(input: StrategyInput, entry: number, stop: number, targe
   };
 }
 
+// Returns 'closed' outside 9:30–16:00 ET, 'blackout' during 9:30–10:00 (first 30m), 'open' otherwise.
+function sessionGate(): 'open' | 'blackout' | 'closed' {
+  const now = new Date();
+  const day = now.getUTCDay();
+  if (day === 0 || day === 6) return 'closed';
+  const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
+  if (utcMins < 13 * 60 + 30 || utcMins >= 20 * 60) return 'closed';
+  if (utcMins < 14 * 60) return 'blackout';
+  return 'open';
+}
+
 function stageFromChecklist(checklist: StrategyChecklistItem[], tradePlan: TradePlan | null, input: StrategyInput, manualOnly = false): WorkflowStage {
   const passed = checklist.filter((item) => item.passed).length;
   if (passed < 2) return 'pro_watchlist';
@@ -52,7 +65,9 @@ function stageFromChecklist(checklist: StrategyChecklistItem[], tradePlan: Trade
   if (!tradePlan) return 'confirmed';
   if (tradePlan.rr < MIN_RR) return 'confirmed';
   if (manualOnly) return 'confirmed';
+  // locked = data/session not ready; setup quality is confirmed but execution is blocked.
   if (input.dataStatus.mode !== 'live' || input.dataStatus.stale) return 'locked';
+  if (sessionGate() !== 'open') return 'locked';
   return 'trade_ready';
 }
 
@@ -71,6 +86,9 @@ function missing(checklist: StrategyChecklistItem[], tradePlan: TradePlan | null
   if (manualOnly) output.push('Manual review required');
   if (input.dataStatus.mode !== 'live') output.push('Live data provider required for Trade Ready');
   if (input.dataStatus.stale) output.push('Fresh market data required');
+  const gate = sessionGate();
+  if (gate === 'closed') output.push('Market closed — trade window 10:00 AM–4:00 PM ET');
+  if (gate === 'blackout') output.push('Opening blackout — wait until 10:00 AM ET');
   return output;
 }
 
@@ -122,8 +140,8 @@ function openingRange(candles: Candle[], bars = 3) {
   const slice = candles.slice(0, bars);
   if (slice.length < bars) return null;
   return {
-    high: Math.max(...slice.map((candle) => candle.high)),
-    low: Math.min(...slice.map((candle) => candle.low)),
+    high: Math.max(...slice.map((c) => c.high)),
+    low: Math.min(...slice.map((c) => c.low)),
     startTime: slice[0].time,
     endTime: last(slice).time,
   };
@@ -134,8 +152,20 @@ function recentRetest(input: StrategyInput, level: number) {
   if (!recent.length) return false;
   const tolerance = Math.max(input.atr20 * 0.08, input.price * 0.0015);
   return input.direction === 'BULL'
-    ? recent.some((candle) => candle.low <= level + tolerance && candle.close >= level)
-    : recent.some((candle) => candle.high >= level - tolerance && candle.close <= level);
+    ? recent.some((c) => c.low <= level + tolerance && c.close >= level)
+    : recent.some((c) => c.high >= level - tolerance && c.close <= level);
+}
+
+// 1m EMA alignment — soft refinement check. Passes when data is unavailable so it never blocks on missing feeds.
+function ema1mCheck(input: StrategyInput): StrategyChecklistItem {
+  const one = input.candles.one;
+  if (one.length < 25) return pass('1m entry timing', '1m feed not available — using 5m structure');
+  const e9 = last(ema(closes(one), 9));
+  const e21 = last(ema(closes(one), 21));
+  if (!Number.isFinite(e9) || !Number.isFinite(e21)) return pass('1m entry timing', '1m EMA unavailable — using 5m structure');
+  return (input.direction === 'BULL' ? e9 > e21 : e9 < e21)
+    ? pass('1m entry timing', '1m EMA9/21 aligned — entry window open')
+    : fail('1m entry timing', '1m micro-structure not aligned yet — wait');
 }
 
 export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
@@ -144,19 +174,24 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const rangeBreak = range ? directionalBreak(input, input.price, range.high, range.low) : false;
   const retest = range ? recentRetest(input, input.direction === 'BULL' ? range.high : range.low) : false;
   const entry = input.price;
-  const stop = input.direction === 'BULL' ? Math.min(range?.high ?? entry, trigger?.low ?? entry) - input.atr20 * 0.12 : Math.max(range?.low ?? entry, trigger?.high ?? entry) + input.atr20 * 0.12;
-  const target = input.direction === 'BULL' ? entry + Math.max(input.atr20, Math.abs(entry - stop) * PREFERRED_RR) : entry - Math.max(input.atr20, Math.abs(stop - entry) * PREFERRED_RR);
+  const stop = input.direction === 'BULL'
+    ? Math.min(range?.high ?? entry, trigger?.low ?? entry) - input.atr20 * 0.12
+    : Math.max(range?.low ?? entry, trigger?.high ?? entry) + input.atr20 * 0.12;
+  const target = input.direction === 'BULL'
+    ? entry + Math.max(input.atr20, Math.abs(entry - stop) * PREFERRED_RR)
+    : entry - Math.max(input.atr20, Math.abs(stop - entry) * PREFERRED_RR);
   const tradePlan = directionOk(input) && range ? planFromLevels(input, entry, stop, target, trigger) : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
-    range ? pass('Opening range formed', `${round(range.low, 2)}-${round(range.high, 2)}`) : fail('Opening range formed', 'Need first 15 minutes of 5m candles'),
+    range ? pass('Opening range formed', `${round(range.low, 2)}–${round(range.high, 2)}`) : fail('Opening range formed', 'Need first 15 min of 5m candles'),
     rangeBreak ? pass('Opening range break', 'Price broke the range in direction') : fail('Opening range break', 'Waiting for breakout'),
-    retest ? pass('Retest hold', 'Breakout level was retested and held') : fail('Retest hold', 'Waiting for controlled retest'),
-    input.rvol >= 1.2 ? pass('RVOL confirmation', `${round(input.rvol, 2)}x`) : fail('RVOL confirmation', 'Need stronger volume'),
-    input.vwapAligned ? pass('VWAP alignment', 'Price is aligned with VWAP') : fail('VWAP alignment', 'VWAP does not support direction'),
+    retest ? pass('Retest hold', 'Breakout level retested and held') : fail('Retest hold', 'Waiting for controlled retest'),
+    input.rvol >= 1.2 ? pass('RVOL confirmation', `${round(input.rvol, 2)}x`) : fail('RVOL confirmation', 'Need 1.2x RVOL for ORB'),
+    input.vwapAligned ? pass('VWAP alignment', 'Price is on correct VWAP side') : fail('VWAP alignment', 'VWAP does not support direction'),
+    ema1mCheck(input),
   ];
-  return signal('orb_retest', input, checklist, tradePlan, 'Opening range breakout with controlled retest and VWAP/RVOL confirmation.', false, range ? [{
+  return signal('orb_retest', input, checklist, tradePlan, 'Opening range breakout with controlled retest, VWAP, RVOL, and 1m timing.', false, range ? [{
     label: 'Opening Range',
     startTime: range.startTime,
     endTime: range.endTime,
@@ -169,60 +204,71 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const trigger = last(input.candles.five);
   const recent = input.candles.five.slice(-6);
   const tolerance = Math.max(input.atr20 * 0.12, input.price * 0.0015);
-  const touchedVwap = recent.some((candle) => input.direction === 'BULL' ? candle.low <= input.vwap + tolerance : candle.high >= input.vwap - tolerance);
+  const touchedVwap = recent.some((c) => input.direction === 'BULL' ? c.low <= input.vwap + tolerance : c.high >= input.vwap - tolerance);
   const reclaimed = trigger ? directionalAbove(input, trigger.close, input.vwap) : false;
   const entry = input.price;
-  const swing = input.direction === 'BULL' ? Math.min(...recent.map((candle) => candle.low)) : Math.max(...recent.map((candle) => candle.high));
+  const swing = input.direction === 'BULL' ? Math.min(...recent.map((c) => c.low)) : Math.max(...recent.map((c) => c.high));
   const stop = input.direction === 'BULL' ? Math.min(swing, input.vwap) - input.atr20 * 0.1 : Math.max(swing, input.vwap) + input.atr20 * 0.1;
-  const target = input.direction === 'BULL' ? entry + Math.max(input.atr20 * 0.9, Math.abs(entry - stop) * PREFERRED_RR) : entry - Math.max(input.atr20 * 0.9, Math.abs(stop - entry) * PREFERRED_RR);
+  const target = input.direction === 'BULL'
+    ? entry + Math.max(input.atr20 * 0.9, Math.abs(entry - stop) * PREFERRED_RR)
+    : entry - Math.max(input.atr20 * 0.9, Math.abs(stop - entry) * PREFERRED_RR);
   const tradePlan = directionOk(input) && recent.length >= 4 ? planFromLevels(input, entry, stop, target, trigger) : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
-    input.vwapAligned ? pass('VWAP side', 'Price is on correct VWAP side') : fail('VWAP side', 'Price is not aligned with VWAP'),
+    input.vwapAligned ? pass('VWAP side', 'Price is on correct VWAP side') : fail('VWAP side', 'Price not aligned with VWAP'),
     input.trendAligned ? pass('5m trend aligned', input.trend5m) : fail('5m trend aligned', 'EMA9/EMA21 not aligned'),
     touchedVwap ? pass('Pullback into value', 'Recent candles tested VWAP/EMA zone') : fail('Pullback into value', 'Waiting for pullback'),
     reclaimed ? pass('Reclaim candle', 'Latest candle reclaimed direction') : fail('Reclaim candle', 'Waiting for reclaim'),
-    input.rvol >= 0.8 ? pass('Volume acceptable', `${round(input.rvol, 2)}x`) : fail('Volume acceptable', 'Volume too low'),
+    input.rvol >= 1.0 ? pass('Volume confirmation', `${round(input.rvol, 2)}x`) : fail('Volume confirmation', 'Need 1x RVOL — below average is a trap'),
+    ema1mCheck(input),
   ];
-  return signal('vwap_pullback', input, checklist, tradePlan, 'VWAP pullback continuation with trend alignment and reclaim confirmation.');
+  return signal('vwap_pullback', input, checklist, tradePlan, 'VWAP pullback continuation with trend alignment, reclaim, and 1m entry timing.');
 }
 
 export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
   const trigger = last(input.candles.five);
   const recent = input.candles.five.slice(-8);
-  const highs = recent.map((candle) => candle.high);
-  const lows = recent.map((candle) => candle.low);
+  const highs = recent.map((c) => c.high);
+  const lows = recent.map((c) => c.low);
   const microHigh = highs.length ? Math.max(...highs.slice(0, -1)) : 0;
   const microLow = lows.length ? Math.min(...lows.slice(0, -1)) : 0;
   const breakout = trigger ? directionalBreak(input, trigger.close, microHigh, microLow) : false;
   const rsEdge = input.direction === 'BULL' ? input.rsVsBenchmark >= 1.02 : input.rsVsBenchmark <= 0.98;
   const entry = input.price;
-  const stop = input.direction === 'BULL' ? microLow - input.atr20 * 0.08 : microHigh + input.atr20 * 0.08;
-  const target = input.direction === 'BULL' ? entry + Math.max(input.atr20, Math.abs(entry - stop) * PREFERRED_RR) : entry - Math.max(input.atr20, Math.abs(stop - entry) * PREFERRED_RR);
+  const stop = input.direction === 'BULL' ? microLow - input.atr20 * 0.1 : microHigh + input.atr20 * 0.1;
+  const target = input.direction === 'BULL'
+    ? entry + Math.max(input.atr20, Math.abs(entry - stop) * PREFERRED_RR)
+    : entry - Math.max(input.atr20, Math.abs(stop - entry) * PREFERRED_RR);
   const tradePlan = directionOk(input) && recent.length >= 6 ? planFromLevels(input, entry, stop, target, trigger) : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
-    rsEdge ? pass('Relative strength edge', `${round(input.rsVsBenchmark, 3)} vs SPY`) : fail('Relative strength edge', 'No clear RS edge'),
+    rsEdge ? pass('Relative strength edge', `${round(input.rsVsBenchmark, 3)} vs SPY`) : fail('Relative strength edge', 'No clear RS edge vs SPY'),
     input.vwapAligned ? pass('VWAP hold', 'Stock holds VWAP direction') : fail('VWAP hold', 'Stock not holding VWAP'),
     input.trendAligned ? pass('Trend alignment', input.trend5m) : fail('Trend alignment', '5m trend not aligned'),
     breakout ? pass('Micro range break', 'Latest candle broke the local range') : fail('Micro range break', 'Waiting for micro breakout'),
+    input.rvol >= 1.2 ? pass('RVOL on breakout', `${round(input.rvol, 2)}x — volume confirmed`) : fail('RVOL on breakout', 'Breakout without volume is a trap — need 1.2x'),
+    ema1mCheck(input),
   ];
-  return signal('rs_continuation', input, checklist, tradePlan, 'Relative strength continuation after local range break.');
+  return signal('rs_continuation', input, checklist, tradePlan, 'Relative strength continuation after local range break with RVOL confirmation.');
 }
 
 export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   const range = openingRange(input.candles.five, 3);
   const recent = input.candles.five.slice(-5);
   const trigger = last(recent);
-  const swept = Boolean(range && recent.some((candle) => input.direction === 'BULL' ? candle.low < range.low : candle.high > range.high));
+  const swept = Boolean(range && recent.some((c) => input.direction === 'BULL' ? c.low < range.low : c.high > range.high));
   const reclaimed = Boolean(range && trigger && (input.direction === 'BULL' ? trigger.close > range.low : trigger.close < range.high));
   const entry = input.price;
+  // Stop below/above the specific sweep candle, not arbitrary min of all recent candles.
+  const sweepCandle = range ? recent.find((c) => input.direction === 'BULL' ? c.low < range.low : c.high > range.high) || null : null;
   const stop = input.direction === 'BULL'
-    ? Math.min(...recent.map((candle) => candle.low)) - input.atr20 * 0.08
-    : Math.max(...recent.map((candle) => candle.high)) + input.atr20 * 0.08;
-  const target = input.direction === 'BULL' ? entry + Math.abs(entry - stop) * PREFERRED_RR : entry - Math.abs(stop - entry) * PREFERRED_RR;
+    ? (sweepCandle ? sweepCandle.low : Math.min(...recent.map((c) => c.low))) - input.atr20 * 0.08
+    : (sweepCandle ? sweepCandle.high : Math.max(...recent.map((c) => c.high))) + input.atr20 * 0.08;
+  const target = input.direction === 'BULL'
+    ? entry + Math.abs(entry - stop) * PREFERRED_RR
+    : entry - Math.abs(stop - entry) * PREFERRED_RR;
   const tradePlan = directionOk(input) && range ? planFromLevels(input, entry, stop, target, trigger) : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
@@ -230,33 +276,70 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     range ? pass('Reference liquidity level', 'Opening range available') : fail('Reference liquidity level', 'Need opening range'),
     swept ? pass('Liquidity swept', 'Price swept the reference level') : fail('Liquidity swept', 'No sweep yet'),
     reclaimed ? pass('Reclaim', 'Price reclaimed the swept level') : fail('Reclaim', 'Waiting for reclaim'),
-    input.rvol >= 1 ? pass('Volume confirmation', `${round(input.rvol, 2)}x`) : fail('Volume confirmation', 'Need better volume'),
+    input.rvol >= 1.0 ? pass('Volume confirmation', `${round(input.rvol, 2)}x`) : fail('Volume confirmation', 'Need 1x RVOL on sweep'),
+    ema1mCheck(input),
   ];
-  return signal('liquidity_sweep', input, checklist, tradePlan, 'Liquidity sweep and reclaim. Manual review required until demo evidence is strong.', true);
+  return signal('liquidity_sweep', input, checklist, tradePlan, 'Liquidity sweep and reclaim with structure-based stop and 1m timing.');
 }
 
 export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const five = input.candles.five;
   const trigger = last(five);
-  const values = closes(five);
-  const ema9 = last(ema(values, 9));
-  const ema21 = last(ema(values, 21));
-  const nearEmaZone = Number.isFinite(ema9) && Number.isFinite(ema21) && Math.abs(input.price - ((ema9 + ema21) / 2)) <= Math.max(input.atr20 * 0.18, input.price * 0.002);
-  const displacement = five.length >= 3 && trigger ? Math.abs(trigger.close - five[five.length - 3].close) >= input.atr20 * 0.35 : false;
-  const reaction = nearEmaZone && input.vwapAligned && displacement;
+
+  if (!directionOk(input)) {
+    return signal('ob_fvg_retest', input, [fail('Directional bias', 'No BULL/BEAR bias')], null, 'No directional bias.');
+  }
+  const dir = input.direction as 'BULL' | 'BEAR';
+
+  // Real order block detection via smc.ts
+  const ob = findOrderBlockZone(five, dir, 1.1, 100);
+  const atOb = ob
+    ? (dir === 'BULL'
+      ? input.price <= ob.high + input.atr20 * 0.1 && input.price >= ob.low - input.atr20 * 0.1
+      : input.price >= ob.low - input.atr20 * 0.1 && input.price <= ob.high + input.atr20 * 0.1)
+    : false;
+  const obReject = ob ? rejectionCandle(five, dir, ob) : false;
+
+  // Real FVG detection via fvg.ts
+  const fvgResult = detectFvg(five, 8);
+  const gap = fvgResult.latestGap;
+  const fvgAligned = gap && !gap.filled &&
+    ((dir === 'BULL' && gap.direction === 'BULLISH') || (dir === 'BEAR' && gap.direction === 'BEARISH'));
+  const atFvg = fvgAligned && gap
+    ? (dir === 'BULL'
+      ? input.price >= gap.gapLow - input.atr20 * 0.1 && input.price <= gap.gapHigh + input.atr20 * 0.1
+      : input.price <= gap.gapHigh + input.atr20 * 0.1 && input.price >= gap.gapLow - input.atr20 * 0.1)
+    : false;
+
+  const hasStructure = atOb || atFvg;
+  const structureLow = ob && atOb ? ob.low : gap && atFvg ? gap.gapLow : null;
+  const structureHigh = ob && atOb ? ob.high : gap && atFvg ? gap.gapHigh : null;
   const entry = input.price;
-  const stop = input.direction === 'BULL' ? entry - input.atr20 * 0.45 : entry + input.atr20 * 0.45;
-  const target = input.direction === 'BULL' ? entry + input.atr20 * 0.95 : entry - input.atr20 * 0.95;
-  const tradePlan = directionOk(input) ? planFromLevels(input, entry, stop, target, trigger) : null;
+  const stop = structureLow !== null && structureHigh !== null
+    ? (dir === 'BULL' ? structureLow - input.atr20 * 0.1 : structureHigh + input.atr20 * 0.1)
+    : (dir === 'BULL' ? entry - input.atr20 * 0.45 : entry + input.atr20 * 0.45);
+  const target = dir === 'BULL'
+    ? entry + Math.abs(entry - stop) * PREFERRED_RR
+    : entry - Math.abs(stop - entry) * PREFERRED_RR;
+  const tradePlan = hasStructure ? planFromLevels(input, entry, stop, target, trigger) : null;
+
   const checklist = [
-    directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
+    pass('Directional bias', dir),
     htfTrendCheck(input),
-    nearEmaZone ? pass('OB/FVG proxy zone', 'Price near EMA value zone') : fail('OB/FVG proxy zone', 'No clean retest zone'),
+    atOb
+      ? pass('Order block', ob ? `OB ${ob.low.toFixed(2)}–${ob.high.toFixed(2)}` : 'OB at price')
+      : fail('Order block', 'No active unmitigated OB at current price'),
+    obReject
+      ? pass('OB rejection candle', 'Rejection confirmed at order block')
+      : fail('OB rejection candle', 'No rejection candle — wait for confirmation'),
+    atFvg
+      ? pass('FVG confluence', gap ? `Gap ${gap.gapLow.toFixed(2)}–${gap.gapHigh.toFixed(2)}` : 'FVG present')
+      : fail('FVG confluence', 'No aligned unfilled FVG near price'),
     input.vwapAligned ? pass('VWAP confluence', 'VWAP supports direction') : fail('VWAP confluence', 'VWAP does not support direction'),
-    displacement ? pass('Reaction candle', 'Recent displacement confirms reaction') : fail('Reaction candle', 'Waiting for reaction candle'),
-    reaction ? pass('Retest confirmed', 'Zone reaction confirmed') : fail('Retest confirmed', 'Need confluence reaction'),
+    input.rvol >= 1.0 ? pass('Volume', `${round(input.rvol, 2)}x`) : fail('Volume', 'Need 1x RVOL at structure'),
+    ema1mCheck(input),
   ];
-  return signal('ob_fvg_retest', input, checklist, tradePlan, 'OB/FVG retest confluence using existing price-action concepts. Manual review required.', true);
+  return signal('ob_fvg_retest', input, checklist, tradePlan, 'OB/FVG retest with real structure detection, VWAP, RVOL, 1m timing.');
 }
 
 export function evaluateStrategies(input: StrategyInput): StrategySignal[] {
