@@ -1160,7 +1160,14 @@ export function ProTradeScannerScreen() {
 
     if (!autoTrades.length) return;
     setPaperTrades((current) => [...autoTrades, ...current]);
-    setApprovalMessage(`Auto paper opened ${autoTrades.length} locked setup(s): ${autoTrades.map((trade) => trade.symbol).join(', ')}.`);
+    setApprovalMessage(`Auto paper opened ${autoTrades.length} trade(s): ${autoTrades.map((trade) => trade.symbol).join(', ')}.`);
+    // Mirror each auto-trade to Alpaca paper account (fire-and-forget)
+    autoTrades.forEach((trade) => {
+      const row = lockedRows.find((r) => baseSymbol(r.symbol) === baseSymbol(trade.symbol));
+      if (!row) return;
+      placePaperBracketOrder({ symbol: trade.symbol, direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL', entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional })
+        .catch((err: unknown) => console.warn(`Auto Alpaca paper skipped for ${trade.symbol}:`, err instanceof Error ? err.message : err));
+    });
   }, [snapshot?.rows, orderedSymbols, paperTrades, settings]);
 
   async function approve(row: ProTradeRow) {
