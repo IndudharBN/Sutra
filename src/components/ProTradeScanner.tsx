@@ -1,6 +1,7 @@
 import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, X } from 'lucide-react';
-import { fetchTrading212Snapshot, placeTrading212DemoBracketOrder } from '../features/brokers/trading212LiveApi';
+import { fetchTrading212Snapshot } from '../features/brokers/trading212LiveApi';
+import { placePaperBracketOrder } from '../lib/alpacaBroker';
 import { fetchProTradeScannerSnapshot, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
 import {
   STRATEGY_CODES,
@@ -1143,7 +1144,7 @@ export function ProTradeScannerScreen() {
 
   React.useEffect(() => {
     if (!snapshot?.rows.length) return;
-    const lockedRows = snapshot.rows.filter((row) => row.workflowStage === 'locked' && canPaperTradeRow(row, settings, paperTrades));
+    const lockedRows = snapshot.rows.filter((row) => row.workflowStage === 'trade_ready' && canPaperTradeRow(row, settings, paperTrades));
     if (!lockedRows.length) return;
     const tradedSymbols = new Set(paperTrades.map((trade) => baseSymbol(trade.symbol)));
     const openedAt = new Date().toISOString();
@@ -1168,16 +1169,15 @@ export function ProTradeScannerScreen() {
     try {
       setApprovalBusy(true);
       setApprovalMessage('');
-      const result = await placeTrading212DemoBracketOrder({
+      const order = await placePaperBracketOrder({
         symbol: row.symbol,
-        side: row.direction === 'BEAR' ? 'SELL' : 'BUY',
+        direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL',
         entry: plan.entry,
-        stopLoss: plan.stop,
-        target1: plan.target,
+        stop: plan.stop,
+        target: plan.target,
         notional: settings.maxPerOrder || PAPER_NOTIONAL,
-        dryRun: false,
       });
-      setApprovalMessage(result.ok ? `Demo bracket submitted: ${result.orderId || 'order accepted'}` : result.error || 'Order failed');
+      setApprovalMessage(`Alpaca paper bracket submitted: ${order.id.slice(0, 8)} · ${row.symbol} ${order.side.toUpperCase()} ${order.qty} shares`);
       await load(true);
     } catch (err) {
       setApprovalMessage(err instanceof Error ? err.message : String(err));
@@ -1206,6 +1206,9 @@ export function ProTradeScannerScreen() {
     }
     setPaperTrades((current) => [trade, ...current]);
     setApprovalMessage(`Paper trade opened for ${row.symbol}: entry ${fmtMoney(trade.entry)}, stop ${fmtMoney(trade.stop)}, T1 ${fmtMoney(trade.target1)}, T2 ${fmtMoney(trade.target2)}.`);
+    // Mirror to Alpaca paper account for realistic fill tracking (fire-and-forget)
+    placePaperBracketOrder({ symbol: row.symbol, direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL', entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional })
+      .catch((err: unknown) => console.warn('Alpaca paper order skipped:', err instanceof Error ? err.message : err));
   }
 
   function manualClosePaperTrade(trade: PaperTrade, price: number) {
@@ -1220,7 +1223,7 @@ export function ProTradeScannerScreen() {
         <div>
           <h2 className="text-xl font-bold text-white tracking-tight">ProTrade Workflow</h2>
           <p className="mt-2 text-xs text-slate-500 max-w-4xl leading-relaxed">
-            Tickers move from raw candidates into strategy forming, confirmed, locked, trade ready, and ordered. Yahoo is used as fallback screening data; Trade Ready remains blocked until a live provider is configured. Paper trading auto-opens when a setup reaches Locked.
+            Tickers move from raw candidates → forming → confirmed → trade ready → ordered. Data from Alpaca IEX (live). Paper trades auto-open when a setup reaches Trade Ready and are mirrored to your Alpaca paper account.
           </p>
           <div className="mt-3 flex flex-wrap gap-2 text-[10px] uppercase tracking-widest font-black">
             <span className={`px-3 py-1 rounded-full border ${stale ? 'border-amber-500/30 text-amber-300 bg-amber-500/10' : 'border-emerald-500/20 text-emerald-300 bg-emerald-500/10'}`}>

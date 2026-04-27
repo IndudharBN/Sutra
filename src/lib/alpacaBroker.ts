@@ -1,0 +1,111 @@
+import { env } from './env';
+
+// Alpaca paper trading base — same API key/secret as data feed
+const PAPER_BASE = 'https://paper-api.alpaca.markets';
+
+async function paperFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const { alpacaKey, alpacaSecret } = env;
+  if (!alpacaKey || !alpacaSecret) throw new Error('Alpaca API keys not configured. Add VITE_ALPACA_KEY and VITE_ALPACA_SECRET to .env');
+  const res = await fetch(`${PAPER_BASE}${path}`, {
+    ...init,
+    headers: {
+      'APCA-API-KEY-ID': alpacaKey,
+      'APCA-API-SECRET-KEY': alpacaSecret,
+      'Content-Type': 'application/json',
+      ...init.headers,
+    },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { message?: string };
+    throw new Error(`Alpaca paper ${path} → ${res.status}: ${body.message || res.statusText}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+export interface AlpacaOrderResult {
+  id: string;
+  client_order_id: string;
+  symbol: string;
+  qty: string;
+  side: string;
+  type: string;
+  status: string;
+  order_class: string;
+  filled_avg_price: string | null;
+}
+
+export interface AlpacaPosition {
+  symbol: string;
+  side: 'long' | 'short';
+  qty: string;
+  avg_entry_price: string;
+  current_price: string | null;
+  market_value: string | null;
+  unrealized_pl: string | null;
+  unrealized_plpc: string | null;
+}
+
+export interface AlpacaAccount {
+  equity: string;
+  cash: string;
+  portfolio_value: string;
+  buying_power: string;
+  currency: string;
+}
+
+// ── Orders ────────────────────────────────────────────────────────────────────
+
+export async function placePaperBracketOrder(params: {
+  symbol: string;
+  direction: 'BULL' | 'BEAR';
+  stop: number;
+  target: number;
+  notional: number;
+  entry: number;
+}): Promise<AlpacaOrderResult> {
+  const { symbol, direction, entry, stop, target, notional } = params;
+  const side = direction === 'BULL' ? 'buy' : 'sell';
+  // whole shares only — avoids fractional share requirements on paper account
+  const qty = Math.max(1, Math.floor(notional / entry));
+  // stop-limit buffer: 0.1% beyond stop to ensure fill on fast moves
+  const buff = Number((entry * 0.001).toFixed(2));
+  const stopLimitPrice = direction === 'BULL'
+    ? Number((stop - buff).toFixed(2))
+    : Number((stop + buff).toFixed(2));
+
+  return paperFetch<AlpacaOrderResult>('/v2/orders', {
+    method: 'POST',
+    body: JSON.stringify({
+      symbol,
+      qty: String(qty),
+      side,
+      type: 'market',
+      time_in_force: 'day',
+      order_class: 'bracket',
+      take_profit: { limit_price: target.toFixed(2) },
+      stop_loss: { stop_price: stop.toFixed(2), limit_price: stopLimitPrice.toFixed(2) },
+    }),
+  });
+}
+
+export async function cancelPaperOrder(orderId: string): Promise<void> {
+  await fetch(`${PAPER_BASE}/v2/orders/${orderId}`, {
+    method: 'DELETE',
+    headers: {
+      'APCA-API-KEY-ID': env.alpacaKey,
+      'APCA-API-SECRET-KEY': env.alpacaSecret,
+    },
+  });
+}
+
+// ── Account & Positions ───────────────────────────────────────────────────────
+
+export async function getPaperAccount(): Promise<AlpacaAccount> {
+  return paperFetch<AlpacaAccount>('/v2/account');
+}
+
+export async function getPaperPositions(): Promise<AlpacaPosition[]> {
+  return paperFetch<AlpacaPosition[]>('/v2/positions');
+}
