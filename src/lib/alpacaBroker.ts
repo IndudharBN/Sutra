@@ -109,3 +109,55 @@ export async function getPaperAccount(): Promise<AlpacaAccount> {
 export async function getPaperPositions(): Promise<AlpacaPosition[]> {
   return paperFetch<AlpacaPosition[]>('/v2/positions');
 }
+
+export interface AlpacaFilledOrder {
+  symbol: string;
+  side: string;
+  status: string;
+  filled_avg_price: string | null;
+  filled_at: string | null;
+  order_class: string;
+}
+
+// Returns the most recent filled (not cancelled) orders for a symbol.
+// Used to reconcile localStorage paper trades when Alpaca closes a bracket leg.
+export async function getRecentFilledOrders(symbol: string): Promise<AlpacaFilledOrder[]> {
+  const orders = await paperFetch<AlpacaFilledOrder[]>(
+    `/v2/orders?status=closed&symbols=${encodeURIComponent(symbol)}&limit=20&direction=desc`
+  );
+  return orders.filter((o) => o.status === 'filled' && o.filled_avg_price !== null);
+}
+
+// ── Float (shares outstanding) — cached 24h in localStorage ──────────────────
+
+const FLOAT_CACHE_KEY = 'sutra.assetFloat.v1';
+const FLOAT_TTL_MS = 24 * 60 * 60 * 1000;
+
+interface FloatEntry { v: number; at: number; }
+
+function readFloatCache(): Record<string, FloatEntry> {
+  try { return JSON.parse(localStorage.getItem(FLOAT_CACHE_KEY) || '{}') as Record<string, FloatEntry>; } catch { return {}; }
+}
+
+export function getFloatFromCache(symbol: string): number {
+  const entry = readFloatCache()[symbol];
+  return entry && Date.now() - entry.at < FLOAT_TTL_MS ? entry.v : 0;
+}
+
+export async function fetchSharesOutstanding(symbols: string[]): Promise<void> {
+  const cache = readFloatCache();
+  const now = Date.now();
+  const toFetch = symbols.filter((s) => !cache[s] || now - cache[s].at >= FLOAT_TTL_MS);
+  if (!toFetch.length) return;
+  await Promise.allSettled(
+    toFetch.map(async (sym) => {
+      try {
+        const asset = await paperFetch<{ shares_outstanding?: number }>(`/v2/assets/${encodeURIComponent(sym)}`);
+        cache[sym] = { v: asset.shares_outstanding ?? 0, at: now };
+      } catch {
+        cache[sym] = { v: 0, at: now };
+      }
+    })
+  );
+  try { localStorage.setItem(FLOAT_CACHE_KEY, JSON.stringify(cache)); } catch { /* storage full */ }
+}

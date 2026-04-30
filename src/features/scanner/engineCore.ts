@@ -6,7 +6,7 @@ import { CandleSet, closes, last, round } from './ohlcv';
 import { findOrderBlockZone, rejectionCandle } from './smc';
 import { structuralTp } from './targets';
 
-const TICK_ATR = 0.08;
+const TICK_ATR = 0.2;
 const OB_IMPULSE_15M = 1.3;
 const OB_IMPULSE_5M = 1.1;
 const OB_MAX_AGE_15M = 130;

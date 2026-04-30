@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShoppingCart, Briefcase, BarChart3, Settings, Activity, User, PanelLeftClose, PanelLeftOpen, Radar } from 'lucide-react';
+import { ShoppingCart, Briefcase, BarChart3, Settings, User, PanelLeftClose, PanelLeftOpen, Radar, FlaskConical } from 'lucide-react';
 import { Screen } from '../types';
 
 interface SidebarProps {
@@ -11,11 +11,11 @@ interface SidebarProps {
 
 export function Sidebar({ activeScreen, setActiveScreen, collapsed, onToggleCollapsed }: SidebarProps) {
   const items = [
-    { id: 'scanner', label: 'Live Scanner', icon: Activity },
     { id: 'protrade', label: 'ProTrade Scanner', icon: Radar },
     { id: 'orders', label: 'Orders', icon: ShoppingCart },
     { id: 'positions', label: 'Positions', icon: Briefcase },
     { id: 'performance', label: 'Performance', icon: BarChart3 },
+    { id: 'backtest', label: 'Backtesting', icon: FlaskConical },
     { id: 'settings', label: 'Settings', icon: Settings },
   ];
 

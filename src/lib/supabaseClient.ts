@@ -1,6 +1,3 @@
-import { createClient } from '@supabase/supabase-js';
-import { env, hasSupabaseConfig } from './env';
-
-export const supabase = hasSupabaseConfig()
-  ? createClient(env.supabaseUrl, env.supabaseAnonKey)
-  : null;
+import type { SupabaseClient } from '@supabase/supabase-js';
+// Supabase removed — stub keeps trading212LiveApi type-safe; calls throw at runtime guard
+export const supabase: SupabaseClient | null = null;

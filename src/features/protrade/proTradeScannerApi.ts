@@ -1,11 +1,18 @@
-import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols } from '../../lib/alpacaClient';
+import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNewsFlags, fetchSectorTrends, SYMBOL_SECTOR, type CatalystTier } from '../../lib/alpacaClient';
 import type { SymbolMeta } from '../../lib/alpacaClient';
 import { ema, vwapLatest } from '../scanner/indicators';
 import type { Candle, CandleSet } from '../scanner/ohlcv';
 import { closes, last, round } from '../scanner/ohlcv';
 import { evaluateStrategies } from './strategyEngine';
 import type { MarketDataProviderStatus, StrategySignal, WorkflowStage } from './workflowTypes';
-import { DEFAULT_LIVE_UNIVERSE } from '../scanner/liveScannerApi';
+import { getRiskSettings } from '../../lib/riskManager';
+import { fetchSharesOutstanding, getFloatFromCache } from '../../lib/alpacaBroker';
+import { fetchEarningsCalendar, getEarningsDays } from '../../lib/finnhubClient';
+
+const DEFAULT_LIVE_UNIVERSE = [
+  'LITE', 'VIAV', 'CIEN', 'SNDK', 'MRVL', 'GLW', 'DOCN', 'STX', 'CAVA', 'PL', 'ON', 'GFS', 'ESI', 'RSI', 'HPE', 'ATI', 'FLEX', 'SMTC', 'CAT', 'CENX', 'AVGO', 'ADI', 'RVMD', 'ALGM', 'ANET', 'AMAT', 'BTSG', 'STT', 'HWM', 'TPR', 'NET', 'C', 'APG', 'TWLO', 'ALLY', 'MU', 'MRNA', 'ROKU', 'GTES', 'DECK', 'XYZ', 'LEVI', 'VFC', 'ABNB', 'MCHP', 'NVDA', 'MS', 'DD', 'AMD', 'NRG', 'FLR', 'DAL', 'IBKR', 'AMZN', 'GE', 'ARWR', 'ALB', 'GS', 'SYF', 'GOOGL', 'PPG', 'GOOG', 'CCL', 'META', 'NXT', 'APH', 'GAP', 'BBIO', 'COF', 'LNC', 'EQH', 'CRBG', 'CMG', 'IP', 'SARO', 'SNOW', 'KTOS', 'FLUT', 'GM', 'EXPE', 'ORCL', 'EMR', 'DDOG', 'RCL', 'IR', 'TRMB', 'ELAN', 'CRH', 'NCLH', 'BAM', 'MP', 'BKNG', 'AFRM', 'APO', 'TRU', 'VNO', 'SNPS', 'UAL', 'DASH', 'SGI', 'PYPL', 'CHWY', 'BROS', 'TECH', 'IVZ', 'AXTA', 'TEM', 'TOST', 'CG', 'PLTR', 'KKR', 'CVNA', 'RBLX', 'BRKR', 'UEC', 'GH', 'ARES', 'JEF', 'KRMN', 'RDDT', 'SOFI', 'IQV', 'BLDR', 'FOUR', 'LMND', 'TPG', 'FND', 'ASTS', 'Z', 'SAIL', 'EL', 'U', 'HL',
+  'TSLA', 'AAPL', 'MSFT', 'NFLX', 'UBER', 'LYFT', 'COIN', 'SQ', 'SHOP', 'CRWD', 'ZS', 'PANW', 'OKTA', 'SPLK', 'PATH', 'AI', 'SOUN', 'BBAI', 'IONQ', 'RGTI', 'QBTS', 'DJT', 'SMCI', 'WOLF', 'LUNR', 'SPCE', 'RKT', 'HIMS', 'ACHR',
+];
 
 export interface ProTradeRow {
   symbol: string;
@@ -20,6 +27,8 @@ export interface ProTradeRow {
   atrPct: number;
   dollarVolM: number;
   mktCapB: number | null;
+  sharesOutstanding: number;
+  catalyst: CatalystTier;
   beta: number;
   betaMax: number;
   rsVsBenchmark: number;
@@ -37,6 +46,11 @@ export interface ProTradeRow {
   trend15m: 'UP' | 'DOWN' | 'FLAT';
   trendAligned: boolean;
   trend15mAligned: boolean;
+  prevDayHigh: number;
+  prevDayLow: number;
+  premarketHigh: number;
+  premarketLow: number;
+  premarketVolume: number;
   sourceBucket: 'pro' | 'scored' | 'raw' | 'filtered';
   workflowStage: WorkflowStage;
   strategySignals: StrategySignal[];
@@ -100,6 +114,44 @@ function computeAtr20(daily: Candle[]): number {
   return count > 0 ? total / count : 0;
 }
 
+function computePrevDay(daily: Candle[]): { high: number; low: number } {
+  const bar = daily.length >= 2 ? daily[daily.length - 2] : null;
+  return { high: bar?.high ?? 0, low: bar?.low ?? 0 };
+}
+
+function etHour(isoTime: string): number {
+  return parseInt(new Date(isoTime).toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
+}
+
+function etMinute(isoTime: string): number {
+  return parseInt(new Date(isoTime).toLocaleString('en-US', { timeZone: 'America/New_York', minute: '2-digit' }), 10);
+}
+
+function isPremarket(isoTime: string): boolean {
+  const h = etHour(isoTime);
+  const m = etMinute(isoTime);
+  return h < 9 || (h === 9 && m < 30);
+}
+
+function computePremarket(one: Candle[]): { high: number; low: number; volume: number } {
+  const bars = one.filter((c) => c.time && isPremarket(c.time));
+  if (!bars.length) return { high: 0, low: 0, volume: 0 };
+  return {
+    high: Math.max(...bars.map((c) => c.high)),
+    low: Math.min(...bars.map((c) => c.low)),
+    volume: bars.reduce((sum, c) => sum + c.volume, 0),
+  };
+}
+
+function computeRsVsBenchmark(h1: Candle[], spyChangePct: number): number {
+  if (h1.length < 2) return 1;
+  const last1 = h1[h1.length - 1].close;
+  const prev1 = h1[h1.length - 2].close;
+  if (prev1 <= 0) return 1;
+  const stockChangePct = (last1 - prev1) / prev1;
+  return 1 + (stockChangePct - spyChangePct);
+}
+
 function scoreRow(input: {
   rvol: number;
   gapPct: number;
@@ -108,35 +160,43 @@ function scoreRow(input: {
   vwapAligned: boolean;
   trendAligned: boolean;
   trend15mAligned: boolean;
+  catalyst: CatalystTier;
+  sectorAligned: boolean;
+  smallFloat: boolean;
 }) {
   let score = 0;
   const reasons: string[] = [];
 
-  if (input.rvol >= 1.5) { score += 25; reasons.push('RVOL strong'); }
-  else if (input.rvol >= 1) { score += 15; reasons.push('RVOL acceptable'); }
+  if (input.rvol >= 1.5) { score += 22; reasons.push('RVOL strong'); }
+  else if (input.rvol >= 1) { score += 13; reasons.push('RVOL acceptable'); }
   else reasons.push('RVOL weak');
 
   const gapAbs = Math.abs(input.gapPct);
-  if (gapAbs >= 2) { score += 15; reasons.push('active gap'); }
-  else if (gapAbs >= 1) { score += 8; reasons.push('small gap'); }
+  if (gapAbs >= 2) { score += 12; reasons.push('active gap'); }
+  else if (gapAbs >= 1) { score += 6; reasons.push('small gap'); }
   else reasons.push('no meaningful gap');
 
-  if (input.vwapAligned) { score += 15; reasons.push('VWAP aligned'); }
+  if (input.vwapAligned) { score += 13; reasons.push('VWAP aligned'); }
   else reasons.push('VWAP not aligned');
 
-  if (input.trendAligned) { score += 15; reasons.push('5m trend aligned'); }
+  if (input.trendAligned) { score += 13; reasons.push('5m trend aligned'); }
   else reasons.push('5m trend not aligned');
 
-  if (input.trend15mAligned) { score += 15; reasons.push('15m directional'); }
+  if (input.trend15mAligned) { score += 13; reasons.push('15m directional'); }
   else reasons.push('15m not directional');
 
-  if (input.atrPct >= 3.5) { score += 8; reasons.push('high intraday range potential'); }
-  else if (input.atrPct >= 2.5) { score += 5; reasons.push('range acceptable'); }
+  if (input.atrPct >= 3.5) { score += 7; reasons.push('high intraday range potential'); }
+  else if (input.atrPct >= 2.5) { score += 4; reasons.push('range acceptable'); }
   else reasons.push('range low');
 
-  if (input.dollarVolM >= 25) { score += 7; reasons.push('liquid'); }
-  else if (input.dollarVolM >= 3) { score += 4; reasons.push('liquidity acceptable'); }
+  if (input.dollarVolM >= 25) { score += 6; reasons.push('liquid'); }
+  else if (input.dollarVolM >= 3) { score += 3; reasons.push('liquidity acceptable'); }
   else reasons.push('liquidity weak');
+
+  if (input.catalyst === 'hard') { score += 12; reasons.push('hard catalyst'); }
+  else if (input.catalyst === 'soft') { score += 4; reasons.push('soft catalyst'); }
+  if (input.sectorAligned) { score += 6; reasons.push('sector aligned'); }
+  if (input.smallFloat) { score += 5; reasons.push('small float'); }
 
   return { score: Math.min(100, score), reason: reasons.join(' | ') };
 }
@@ -144,13 +204,17 @@ function scoreRow(input: {
 function dataProviderStatus(fetchedAt?: string): MarketDataProviderStatus {
   const lastUpdated = fetchedAt || new Date().toISOString();
   const ageSeconds = Math.max(0, Math.round((Date.now() - new Date(lastUpdated).getTime()) / 1000));
+  const utcMins = new Date().getUTCHours() * 60 + new Date().getUTCMinutes();
+  const dow = new Date().getUTCDay();
+  const marketClosed = dow === 0 || dow === 6 || utcMins < 13 * 60 + 30 || utcMins >= 20 * 60;
+  const stale = ageSeconds > 90 || marketClosed;
   return {
     provider: 'alpaca',
     mode: 'live',
     lastUpdated,
-    stale: ageSeconds > 45,
+    stale,
     ageSeconds,
-    message: ageSeconds > 45 ? `Alpaca data stale (${ageSeconds}s)` : `Alpaca IEX ${ageSeconds}s old`,
+    message: marketClosed ? 'Market closed — no new trades' : ageSeconds > 90 ? `Alpaca data stale (${ageSeconds}s)` : `Alpaca IEX ${ageSeconds}s old`,
   };
 }
 
@@ -159,6 +223,10 @@ function buildRowFromAlpaca(
   meta: SymbolMeta,
   candleSet: CandleSet,
   providerStatus: MarketDataProviderStatus,
+  catalyst: CatalystTier,
+  sectorTrends: Record<string, 'UP' | 'DOWN' | 'FLAT'>,
+  earningsDays: number | null,
+  spyChangePct: number,
 ): ProTradeRow {
   const one = (candleSet['1m'] || []).slice(-120);
   const five = (candleSet['5m'] || []).slice(-120);
@@ -167,7 +235,7 @@ function buildRowFromAlpaca(
   const daily = (candleSet['1d'] || []).slice(-80);
 
   const price = meta.price;
-  const direction = computeDirection(h1);
+  const direction = computeDirection(five); // matches backtest: intraday 5m bias, not flat 1h
   const atr20 = computeAtr20(daily);
   const atrPct = price > 0 ? (atr20 / price) * 100 : 0;
   const dollarVolM = (price * meta.todayVolume) / 1_000_000;
@@ -179,17 +247,38 @@ function buildRowFromAlpaca(
   const trendAligned = direction === 'BULL' ? trend5m === 'UP' : direction === 'BEAR' ? trend5m === 'DOWN' : false;
   const trend15mAligned = direction === 'BULL' ? trend15m === 'UP' : direction === 'BEAR' ? trend15m === 'DOWN' : false;
 
+  const smallFloat = meta.todayVolume > 0 && meta.todayVolume < 50_000_000;
+  const sectorEtf = SYMBOL_SECTOR[symbol];
+  const sectorTrend = sectorEtf ? sectorTrends[sectorEtf] : undefined;
+  const sectorAligned = direction === 'BULL' ? sectorTrend === 'UP' : direction === 'BEAR' ? sectorTrend === 'DOWN' : false;
+
+  const rsVsBenchmark = computeRsVsBenchmark(h1, spyChangePct);
+
+  const prevDay = computePrevDay(daily);
+  const premarket = computePremarket(one);
+
+  // Earnings status string
+  let earningsStatus = 'Not checked';
+  if (earningsDays !== null) {
+    if (earningsDays === 0) earningsStatus = 'Earnings TODAY';
+    else if (earningsDays === 1) earningsStatus = 'Earnings tomorrow';
+    else if (earningsDays === -1) earningsStatus = 'Earnings yesterday';
+    else if (earningsDays > 0) earningsStatus = `Earnings in ${earningsDays}d`;
+    else earningsStatus = `Earnings ${Math.abs(earningsDays)}d ago`;
+  }
+
   const failures: string[] = [];
-  if (price < 1 || price > 500) failures.push('Price outside $1–$500');
-  if (atrPct < 1.5) failures.push('ADR% below 1.5%');
+  if (price < 1 || price > 1500) failures.push('Price outside $1–$1500');
+  if (atrPct < 1.5 || atrPct > 12) failures.push(`ATR% ${atrPct.toFixed(1)}% outside 1.5–12% range`);
   if (dollarVolM < 3) failures.push('Dollar volume below $3M');
   const basePass = failures.length === 0;
-  const baseReason = failures.length ? failures.join(' | ') : 'Price OK, ADR% OK, dollar vol OK';
+  const baseReason = failures.length ? failures.join(' | ') : 'Price OK, ATR% OK, dollar vol OK';
 
-  const scored = scoreRow({ rvol: meta.rvolEst, gapPct: meta.gapPct, atrPct, dollarVolM, vwapAligned, trendAligned, trend15mAligned });
+  const scored = scoreRow({ rvol: meta.rvolEst, gapPct: meta.gapPct, atrPct, dollarVolM, vwapAligned, trendAligned, trend15mAligned, catalyst, sectorAligned, smallFloat });
 
   const candles = { one, five, fifteen, daily };
-  const strategySignals = evaluateStrategies({
+  const { disabledStrategies } = getRiskSettings();
+  const allSignals = evaluateStrategies({
     symbol,
     company: symbol,
     direction,
@@ -199,23 +288,21 @@ function buildRowFromAlpaca(
     gapPct: meta.gapPct,
     atr20: round(atr20, 3),
     atrPct: round(atrPct, 2),
-    rsVsBenchmark: 1,
+    rsVsBenchmark,
     vwap,
     vwapAligned,
     trend5m,
     trend15m,
     trendAligned,
     trend15mAligned,
+    earningsDays,
     dataStatus: providerStatus,
     candles,
   });
+  const strategySignals = allSignals.filter((s) => !disabledStrategies.includes(s.strategyId));
 
   const primaryStrategy = strategySignals[0] || null;
-  const workflowStage: WorkflowStage = primaryStrategy?.stage && primaryStrategy.stage !== 'pro_watchlist'
-    ? primaryStrategy.stage
-    : basePass
-      ? 'pro_watchlist'
-      : 'raw_candidates';
+  const workflowStage: WorkflowStage = primaryStrategy?.stage ?? 'raw_candidates';
 
   return {
     symbol,
@@ -230,14 +317,16 @@ function buildRowFromAlpaca(
     atrPct: round(atrPct, 2),
     dollarVolM: round(dollarVolM, 1),
     mktCapB: null,
+    sharesOutstanding: getFloatFromCache(symbol),
+    catalyst,
     beta: 0,
     betaMax: 2.8,
-    rsVsBenchmark: 1,
+    rsVsBenchmark: round(rsVsBenchmark, 3),
     basePass,
     baseReason,
-    earningsChecked: false,
-    earningsDays: null,
-    earningsStatus: 'Not checked',
+    earningsChecked: earningsDays !== null,
+    earningsDays,
+    earningsStatus,
     gapPct: round(meta.gapPct, 2),
     dayChangePct: round(meta.intradayChangePct, 2),
     rvol: round(meta.rvolEst, 2),
@@ -247,6 +336,11 @@ function buildRowFromAlpaca(
     trend15m,
     trendAligned,
     trend15mAligned,
+    prevDayHigh: round(prevDay.high, 2),
+    prevDayLow: round(prevDay.low, 2),
+    premarketHigh: round(premarket.high, 2),
+    premarketLow: round(premarket.low, 2),
+    premarketVolume: premarket.volume,
     sourceBucket: 'scored',
     workflowStage,
     strategySignals,
@@ -258,24 +352,59 @@ function buildRowFromAlpaca(
   };
 }
 
+// ── Hot-set refresh (20s) — re-evaluates only forming/confirmed/locked stocks ──
+
+export async function fetchHotSetSnapshot(symbols: string[], spyChangePct: number): Promise<ProTradeRow[]> {
+  if (!symbols.length) return [];
+  const metas = await fetchUniverseMeta(symbols);
+  const [bars1m, bars5m, bars15m, bars1h, bars1d, sectorTrends] = await Promise.all([
+    fetchBars(symbols, '1m'),
+    fetchBars(symbols, '5m'),
+    fetchBars(symbols, '15m'),
+    fetchBars(symbols, '1h'),
+    fetchBars(symbols, '1d'),
+    fetchSectorTrends(),
+  ]);
+  const fetchedAt = new Date().toISOString();
+  const providerStatus = dataProviderStatus(fetchedAt);
+  const metaMap = new Map(metas.map((m) => [m.symbol, m]));
+  return symbols.flatMap((sym) => {
+    const meta = metaMap.get(sym);
+    if (!meta) return [];
+    const candleSet = buildCandleSet(sym, { '1m': bars1m, '5m': bars5m, '15m': bars15m, '1h': bars1h, '1d': bars1d });
+    const earningsDays = getEarningsDays(sym);
+    return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, 'none', sectorTrends, earningsDays, spyChangePct)];
+  });
+}
+
 // ── Main fetch ────────────────────────────────────────────────────────────────
 
 export async function fetchProTradeScannerSnapshot(): Promise<ProTradeSnapshot> {
-  // US-only symbols (Alpaca IEX doesn't support LSE)
   const candidates = DEFAULT_LIVE_UNIVERSE.filter((s) => !s.endsWith('.L'));
 
-  // Step 1: snapshot → filter to top 60 most active
   const metas = await fetchUniverseMeta(candidates);
-  const top = selectTopSymbols(metas, 60);
+  const top = selectTopSymbols(metas, 100);
 
-  // Step 2: fetch all timeframes in parallel (TTL-cached)
-  const [bars1m, bars5m, bars15m, bars1h, bars1d] = await Promise.all([
+  const [bars1m, bars5m, bars15m, bars1h, bars1d, newsFlags, sectorTrends, spyBars] = await Promise.all([
     fetchBars(top, '1m'),
     fetchBars(top, '5m'),
     fetchBars(top, '15m'),
     fetchBars(top, '1h'),
     fetchBars(top, '1d'),
+    fetchNewsFlags(top),
+    fetchSectorTrends(),
+    fetchBars(['SPY'], '1h'),
   ]);
+
+  // Warm earnings + float caches in background — never block the scan
+  void fetchEarningsCalendar();
+  void fetchSharesOutstanding(top);
+
+  // Compute SPY hourly change for RS vs benchmark
+  const spyH1 = (spyBars['SPY'] || []).slice(-5);
+  const spyLast = spyH1.length >= 2 ? spyH1[spyH1.length - 1].close : 0;
+  const spyPrev = spyH1.length >= 2 ? spyH1[spyH1.length - 2].close : spyLast;
+  const spyChangePct = spyPrev > 0 ? (spyLast - spyPrev) / spyPrev : 0;
 
   const fetchedAt = new Date().toISOString();
   const providerStatus = dataProviderStatus(fetchedAt);
@@ -286,7 +415,8 @@ export async function fetchProTradeScannerSnapshot(): Promise<ProTradeSnapshot> 
       const meta = metaMap.get(sym);
       if (!meta) return [];
       const candleSet = buildCandleSet(sym, { '1m': bars1m, '5m': bars5m, '15m': bars15m, '1h': bars1h, '1d': bars1d });
-      return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus)];
+      const earningsDays = getEarningsDays(sym);
+      return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct)];
     })
     .sort((a, b) => b.confidence - a.confidence || b.score - a.score);
 

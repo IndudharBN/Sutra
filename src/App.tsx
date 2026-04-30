@@ -10,11 +10,11 @@ import { OrdersTable, PositionsTable } from './components/Execution';
 import { PerformanceScreen, SettingsScreen } from './components/Configuration';
 import { TradingViewChartModal, type TradingViewInterval } from './components/TradingViewChart';
 import { ProTradeScannerScreen } from './components/ProTradeScanner';
+import { BacktestPanel } from './components/BacktestPanel';
 import { Position, Screen, Signal, Trading212Snapshot } from './types';
 import { AnimatePresence, motion } from 'motion/react';
 import { Bell, RefreshCcw, X } from 'lucide-react';
 import { closeTrading212DemoPositions, fetchTrading212Snapshot, placeTrading212DemoBracketOrder } from './features/brokers/trading212LiveApi';
-import { fetchLiveScannerSnapshot, type LiveScannerSnapshot } from './features/scanner/liveScannerApi';
 import { classifyMarketRegime } from './features/marketRegime/marketRegimeLogic';
 import { getTradingSession } from './features/session/sessionLogic';
 import { baseSymbol } from './lib/symbols';
@@ -104,7 +104,7 @@ function playTriggerSound() {
   window.setTimeout(() => void context.close().catch(() => undefined), 900);
 }
 
-function buildEmptyLiveSnapshot(now = new Date()): LiveScannerSnapshot {
+function buildEmptyLiveSnapshot(now = new Date()) {
   return {
     signals: [],
     summary: {
@@ -154,7 +154,7 @@ function scannerFilterLabel(filter: ScannerMetricFilter) {
 
 export default function App() {
   const emptySnapshot = React.useMemo(() => buildEmptyLiveSnapshot(), []);
-  const [scannerSnapshot, setScannerSnapshot] = React.useState<LiveScannerSnapshot | null>(null);
+  const [scannerSnapshot, setScannerSnapshot] = React.useState<ReturnType<typeof buildEmptyLiveSnapshot> | null>(null);
   const [scannerError, setScannerError] = React.useState('');
   const [scannerLoading, setScannerLoading] = React.useState(true);
   const [manualRefreshing, setManualRefreshing] = React.useState(false);
@@ -172,7 +172,7 @@ export default function App() {
   const [triggerMeta, setTriggerMeta] = React.useState<Record<string, TriggerMeta>>(() => loadTriggerMeta());
   const alertedSignalsRef = React.useRef<Set<string>>(loadAlertedSignals());
   const [triggerAlert, setTriggerAlert] = React.useState<Signal | null>(null);
-  const [activeScreen, setActiveScreen] = useState<Screen>('scanner');
+  const [activeScreen, setActiveScreen] = useState<Screen>('protrade');
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
   const [scannerExpanded, setScannerExpanded] = React.useState(false);
   const [scannerMetricFilter, setScannerMetricFilter] = useState<ScannerMetricFilter>('all');
@@ -224,18 +224,8 @@ export default function App() {
     openPositions: livePositions.length,
     todaysPnl: brokerSnapshot ? livePnl : 0,
   };
-  const brokerStatus = !brokerEnabled
-    ? 'Trading212 Demo Disconnected'
-    : brokerSnapshot
-    ? `Trading212 Demo Connected (${brokerSnapshot.source === 'local-bridge' ? 'Local' : 'Supabase'})`
-    : brokerLoading
-      ? 'Trading212 Demo Loading'
-      : `Trading212 Demo Offline${brokerError ? ` - ${brokerError}` : ''}`;
-  const scannerStatus = scannerLoading
-    ? 'Yahoo Screening'
-    : scannerSnapshot
-      ? `Yahoo Live (${snapshot.signals.length} screened)`
-      : `Yahoo Offline${scannerError ? ` - ${scannerError}` : ''}`;
+  const brokerStatus = 'Alpaca Paper';
+  const scannerStatus = 'ProTrade • Alpaca IEX';
 
   function handleScannerMetricFilter(nextFilter: ScannerMetricFilter) {
     setScannerMetricFilter(nextFilter);
@@ -298,39 +288,11 @@ export default function App() {
     };
   }, [brokerEnabled]);
 
+  // C3: Live scanner removed from nav — no background polling
   React.useEffect(() => {
-    let cancelled = false;
-    async function loadScanner() {
-      try {
-        setScannerLoading(true);
-        const data = await fetchLiveScannerSnapshot({
-          lockedSymbols: lockedBrokerSymbols ? lockedBrokerSymbols.split('|') : [],
-        });
-        if (!cancelled) {
-          setScannerSnapshot(data);
-          setScannerError('');
-          setSelectedSignalId((current) => current && data.signals.some((signal) => signal.id === current)
-            ? current
-            : data.signals[0]?.id || null);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setScannerSnapshot(null);
-          setSelectedSignalId(null);
-          setScannerError(error instanceof Error ? error.message : String(error));
-        }
-      } finally {
-        if (!cancelled) setScannerLoading(false);
-      }
-    }
-
-    loadScanner();
-    const timer = window.setInterval(loadScanner, 120000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [lockedBrokerSymbols]);
+    setScannerSnapshot(emptySnapshot);
+    setScannerLoading(false);
+  }, [emptySnapshot]);
 
   React.useEffect(() => {
     if (!scannerSnapshot) return;
@@ -360,36 +322,18 @@ export default function App() {
   async function handleManualRefresh() {
     if (manualRefreshing) return;
     setManualRefreshing(true);
-    setScannerLoading(true);
     if (brokerEnabled) setBrokerLoading(true);
     try {
-      const lockedSymbols = lockedBrokerSymbols ? lockedBrokerSymbols.split('|') : [];
-      const [scannerResult, brokerResult] = await Promise.allSettled([
-        fetchLiveScannerSnapshot({ lockedSymbols }),
-        brokerEnabled ? fetchTrading212Snapshot({ force: true }) : Promise.resolve(null),
-      ]);
-
-      if (scannerResult.status === 'fulfilled') {
-        setScannerSnapshot(scannerResult.value);
-        setScannerError('');
-        setSelectedSignalId((current) => current && scannerResult.value.signals.some((signal) => signal.id === current)
-          ? current
-          : scannerResult.value.signals[0]?.id || null);
-      } else {
-        setScannerSnapshot(null);
-        setSelectedSignalId(null);
-        setScannerError(scannerResult.reason instanceof Error ? scannerResult.reason.message : String(scannerResult.reason));
-      }
-
-      if (brokerResult.status === 'fulfilled' && brokerResult.value) {
-        setBrokerSnapshot(brokerResult.value);
+      const brokerResult = await (brokerEnabled ? fetchTrading212Snapshot({ force: true }) : Promise.resolve(null));
+      if (brokerResult) {
+        setBrokerSnapshot(brokerResult);
         setBrokerError('');
-      } else if (brokerResult.status === 'rejected') {
-        setBrokerError(brokerResult.reason instanceof Error ? brokerResult.reason.message : String(brokerResult.reason));
       }
+    } catch (err) {
+      setBrokerError(err instanceof Error ? err.message : String(err));
     } finally {
-      setScannerLoading(false);
       setBrokerLoading(false);
+      setScannerLoading(false);
       setManualRefreshing(false);
     }
   }
@@ -555,6 +499,12 @@ export default function App() {
             <PerformanceScreen />
           </div>
         );
+      case 'backtest':
+        return (
+          <div className="flex-1 overflow-auto pr-1">
+            <BacktestPanel />
+          </div>
+        );
       case 'settings':
         return (
           <div className="flex-1 overflow-auto pr-1">
@@ -588,11 +538,11 @@ export default function App() {
           <header className="mb-6 shrink-0 flex justify-between items-center">
             <div>
               <h1 className="text-xl font-bold text-white tracking-tight">
-                {activeScreen === 'scanner' ? 'Live Scanner' : 
-                 activeScreen === 'protrade' ? 'ProTrade Scanner' :
-                 activeScreen === 'orders' ? 'Orders Lifecycle' : 
-                 activeScreen === 'positions' ? 'Broker Positions' : 
-                 activeScreen === 'performance' ? 'Performance Analytics' : 'System Settings'}
+                {activeScreen === 'protrade' ? 'ProTrade Scanner' :
+                 activeScreen === 'orders' ? 'Orders Lifecycle' :
+                 activeScreen === 'positions' ? 'Broker Positions' :
+                 activeScreen === 'performance' ? 'Performance Analytics' :
+                 activeScreen === 'backtest' ? 'Backtesting' : 'System Settings'}
               </h1>
             </div>
             

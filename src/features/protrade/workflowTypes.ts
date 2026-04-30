@@ -14,7 +14,8 @@ export type StrategyId =
   | 'vwap_pullback'
   | 'rs_continuation'
   | 'liquidity_sweep'
-  | 'ob_fvg_retest';
+  | 'ob_fvg_retest'
+  | 'mss_breakout';
 
 export type MarketDataProviderId = 'yahoo' | 'alpaca' | 'polygon' | 'ibkr';
 
@@ -95,6 +96,7 @@ export interface StrategyInput {
   trendAligned: boolean;
   trend15mAligned: boolean;
   score: number;
+  earningsDays?: number | null;
   dataStatus: MarketDataProviderStatus;
   candles: {
     one: Candle[];
@@ -120,6 +122,7 @@ export const STRATEGY_LABELS: Record<StrategyId, string> = {
   rs_continuation: 'RS Continuation',
   liquidity_sweep: 'Liquidity Sweep',
   ob_fvg_retest: 'OB/FVG Retest',
+  mss_breakout: 'MSS Breakout',
 };
 
 export const STRATEGY_CODES: Record<StrategyId, string> = {
@@ -128,11 +131,11 @@ export const STRATEGY_CODES: Record<StrategyId, string> = {
   rs_continuation: 'S3',
   liquidity_sweep: 'S4',
   ob_fvg_retest: 'S5',
+  mss_breakout: 'S6',
 };
 
 export const WORKFLOW_STAGE_ORDER: WorkflowStage[] = [
   'raw_candidates',
-  'pro_watchlist',
   'forming',
   'confirmed',
   'locked',

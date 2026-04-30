@@ -1,4 +1,4 @@
-export type Screen = 'scanner' | 'protrade' | 'orders' | 'positions' | 'performance' | 'settings';
+export type Screen = 'scanner' | 'protrade' | 'orders' | 'positions' | 'performance' | 'settings' | 'backtest';
 
 export type SignalStatus = 'Confirmed' | 'Forming' | 'Cold' | 'Locked' | 'Open Position';
 

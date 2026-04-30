@@ -1,8 +1,9 @@
 import React from 'react';
-import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, X } from 'lucide-react';
+import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
 import { fetchTrading212Snapshot } from '../features/brokers/trading212LiveApi';
-import { placePaperBracketOrder } from '../lib/alpacaBroker';
-import { fetchProTradeScannerSnapshot, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
+import { placePaperBracketOrder, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
+import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance } from '../lib/riskManager';
+import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
 import {
   STRATEGY_CODES,
   STRATEGY_LABELS,
@@ -20,7 +21,47 @@ type StageFilter = WorkflowStage;
 
 const PAPER_TRADES_STORAGE_KEY = 'sutra.protrade.paperTrades.v1';
 const PROTRADE_SETTINGS_STORAGE_KEY = 'sutra.protrade.settings.v1';
+const WATCHLIST_KEY = 'sutra.dayWatchlist.v1';
+const WATCHLIST_ARCHIVE_KEY = 'sutra.watchlistArchive.v1';
 const PAPER_NOTIONAL = 100;
+
+interface DayWatchlist { date: string; symbols: string[]; }
+
+function loadWatchlist(): DayWatchlist {
+  try {
+    const raw = JSON.parse(localStorage.getItem(WATCHLIST_KEY) || '{}') as Partial<DayWatchlist>;
+    return { date: raw.date || '', symbols: raw.symbols || [] };
+  } catch { return { date: '', symbols: [] }; }
+}
+
+function saveWatchlist(w: DayWatchlist) {
+  localStorage.setItem(WATCHLIST_KEY, JSON.stringify(w));
+}
+
+interface WatchlistStockResult {
+  symbol: string;
+  closingPrice: number;
+  pnl: number;
+  outcome: string;
+}
+
+interface WatchlistDayRecord {
+  date: string;
+  archivedAt: string;
+  symbols: string[];
+  results: WatchlistStockResult[];
+}
+
+function loadArchive(): WatchlistDayRecord[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(WATCHLIST_ARCHIVE_KEY) || '[]') as WatchlistDayRecord[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+
+function saveArchive(records: WatchlistDayRecord[]) {
+  localStorage.setItem(WATCHLIST_ARCHIVE_KEY, JSON.stringify(records.slice(0, 30)));
+}
 
 interface ProTradeSettings {
   maxPerOrder: number;
@@ -316,7 +357,7 @@ function effectiveTradePlan(row: ProTradeRow, settings: ProTradeSettings) {
 
 function availablePaperNotional(settings: ProTradeSettings, trades: PaperTrade[]) {
   const maxPerOrder = settings.maxPerOrder > 0 ? settings.maxPerOrder : PAPER_NOTIONAL;
-  if (settings.tradingAmount <= 0) return maxPerOrder;
+  if (settings.tradingAmount <= 0) return Infinity; // no cap — computePositionSize (5% risk) governs
   const usablePct = settings.tradingAmountPct > 0 ? Math.min(settings.tradingAmountPct, 100) : 100;
   const usableAmount = settings.tradingAmount * usablePct / 100;
   const openNotional = trades
@@ -327,16 +368,21 @@ function availablePaperNotional(settings: ProTradeSettings, trades: PaperTrade[]
 
 function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT_PROTRADE_SETTINGS, trades: PaperTrade[] = []) {
   const plan = effectiveTradePlan(row, settings);
-  return Boolean(plan && plan.rr >= 1.8 && availablePaperNotional(settings, trades) > 0);
+  return Boolean(plan && plan.rr >= 1.5 && availablePaperNotional(settings, trades) > 0);
 }
 
-function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString()): PaperTrade | null {
+function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000): PaperTrade | null {
   const plan = effectiveTradePlan(row, settings);
-  if (!plan || plan.rr < 1.8) return null;
-  const notional = availablePaperNotional(settings, currentTrades);
+  if (!plan || plan.rr < 1.5) return null;
+  const budgetCap = settings.tradingAmount > 0
+    ? availablePaperNotional(settings, currentTrades)
+    : accountBalance * 0.05; // 5% of account balance per trade when no explicit budget set
+  const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop);
+  const riskNotional = riskQty * plan.entry;
+  const notional = Math.min(budgetCap, riskNotional);
   if (notional <= 0) return null;
   const strategyId = row.primaryStrategy?.strategyId || null;
-  const quantity = notional / plan.entry;
+  const quantity = Math.max(1, Math.floor(notional / plan.entry));
   return {
     id: `paper-${row.symbol}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     symbol: row.symbol,
@@ -415,6 +461,7 @@ function StrategyCard({
         {strategy === 'rs_continuation' && 'Leadership while SPY/QQQ pauses.'}
         {strategy === 'liquidity_sweep' && 'Sweep and reclaim, manual review.'}
         {strategy === 'ob_fvg_retest' && 'OB/FVG confluence, manual review.'}
+        {strategy === 'mss_breakout' && 'Market structure shift, structural break.'}
       </p>
     </button>
   );
@@ -432,10 +479,16 @@ function DetailPanel({ row }: { row: ProTradeRow }) {
               ['Gap', row.gapPct ? fmtPct(row.gapPct) : '--'],
               ['ATR20', fmtMoney(row.atr20)],
               ['ADR%', row.atrPct ? `${row.atrPct.toFixed(2)}%` : '--'],
-              ['Beta', row.beta ? `${row.beta.toFixed(2)} / ${row.betaMax.toFixed(1)}` : '--'],
-              ['Mkt Cap', row.mktCapB ? `$${row.mktCapB.toFixed(1)}B` : 'N/A'],
               ['$ Vol', row.dollarVolM ? `$${row.dollarVolM.toFixed(1)}M` : '--'],
-              ['RS', row.rsVsBenchmark ? row.rsVsBenchmark.toFixed(3) : '--'],
+              ['RS vs SPY', row.rsVsBenchmark ? row.rsVsBenchmark.toFixed(3) : '--'],
+              ['Prev D Hi', row.prevDayHigh > 0 ? fmtMoney(row.prevDayHigh) : '--'],
+              ['Prev D Lo', row.prevDayLow > 0 ? fmtMoney(row.prevDayLow) : '--'],
+              ['PM High', row.premarketHigh > 0 ? fmtMoney(row.premarketHigh) : '--'],
+              ['PM Low', row.premarketLow > 0 ? fmtMoney(row.premarketLow) : '--'],
+              ['PM Vol', row.premarketVolume > 0 ? `${(row.premarketVolume / 1000).toFixed(1)}K` : '--'],
+              ['Float', row.sharesOutstanding > 0 ? `${(row.sharesOutstanding / 1e6).toFixed(1)}M` : '--'],
+              ['Catalyst', row.catalyst === 'hard' ? '🔥 Hard' : row.catalyst === 'soft' ? 'Soft' : '--'],
+              ['Earnings', row.earningsChecked ? row.earningsStatus : 'Not checked'],
             ].map(([label, value]) => (
               <div key={label} className="rounded-lg border border-white/10 bg-white/5 p-2">
                 <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">{label}</p>
@@ -530,26 +583,42 @@ function WorkflowTable({
   onSelect,
   reasonMode = 'strategy',
   orderedTrades = [],
+  watchlistSet = new Set<string>(),
 }: {
   rows: ProTradeRow[];
   selected: ProTradeRow | null;
   onSelect: (row: ProTradeRow) => void;
   reasonMode?: 'strategy' | 'base';
   orderedTrades?: PaperTrade[];
+  watchlistSet?: Set<string>;
 }) {
+  const PAGE = 25;
   const [expandedSymbol, setExpandedSymbol] = React.useState<string | null>(null);
+  const [showAll, setShowAll] = React.useState(false);
+  const [minimized, setMinimized] = React.useState(false);
+  const displayRows = showAll ? rows : rows.slice(0, PAGE);
   const orderedTradeBySymbol = new Map(orderedTrades.map((trade) => [baseSymbol(trade.symbol), trade]));
   const orderedMode = orderedTrades.length > 0;
   return (
-    <div className="glass rounded-xl overflow-hidden min-h-[420px]">
+    <div className="glass rounded-xl overflow-hidden">
       <div className="p-3 border-b border-white/5 bg-white/5 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <div className="w-1 h-4 bg-emerald-500 rounded-full" />
           <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200">Workflow Results</h2>
-          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{rows.length} tickers</span>
+          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
+            {minimized ? rows.length : Math.min(displayRows.length, rows.length)}/{rows.length} tickers
+          </span>
         </div>
+        <button
+          type="button"
+          onClick={() => setMinimized((m) => !m)}
+          className="h-7 px-3 rounded-lg border border-white/10 bg-white/5 text-slate-400 hover:text-white text-[10px] font-black uppercase tracking-widest flex items-center gap-1.5"
+        >
+          {minimized ? <ChevronDown size={11} /> : <ChevronDown size={11} className="rotate-180" />}
+          {minimized ? 'Expand' : 'Minimize'}
+        </button>
       </div>
-      <div className="overflow-auto">
+      {!minimized && <div className="overflow-auto max-h-[60vh]">
         <table className="w-full min-w-[1180px] text-left border-collapse">
           <thead className="text-[9px] uppercase text-slate-500 font-bold tracking-widest bg-slate-900/50 sticky top-0 z-10">
             <tr>
@@ -581,7 +650,7 @@ function WorkflowTable({
             </tr>
           </thead>
           <tbody className="font-mono text-[11px]">
-            {rows.map((row) => {
+            {displayRows.map((row) => {
               const rowKey = `${row.sourceBucket}-${row.symbol}-${row.workflowStage}`;
               const expanded = expandedSymbol === rowKey;
               const orderedTrade = orderedTradeBySymbol.get(baseSymbol(row.symbol));
@@ -591,7 +660,18 @@ function WorkflowTable({
                 <React.Fragment key={rowKey}>
                   <tr className={`border-b border-white/5 hover:bg-white/5 ${selected?.symbol === row.symbol ? 'bg-indigo-500/10' : ''}`}>
                     <td className="py-3 px-3 border-r border-white/5 min-w-[230px]">
-                      <div className="font-black text-white text-[13px]">{row.symbol}</div>
+                      <div className="flex items-center gap-1.5">
+                        {watchlistSet.has(row.symbol) && (
+                          <span title="Day Watchlist" className="text-amber-400 text-[11px] font-black">★</span>
+                        )}
+                        <span className="font-black text-white text-[13px]">{row.symbol}</span>
+                        {row.catalyst === 'hard' && (
+                          <span title="Hard catalyst today" className="text-orange-400 text-[10px] font-black">🔥</span>
+                        )}
+                        {row.earningsDays !== null && Math.abs(row.earningsDays) <= 1 && (
+                          <span title={row.earningsStatus} className="text-amber-400 text-[11px] font-black">⚠</span>
+                        )}
+                      </div>
                       <div className="text-[10px] text-slate-500 uppercase tracking-tight truncate max-w-[210px]">{row.company}</div>
                       <button
                         type="button"
@@ -665,7 +745,21 @@ function WorkflowTable({
         {!rows.length && (
           <div className="p-8 text-center text-sm text-slate-500">No tickers in this workflow stage.</div>
         )}
-      </div>
+        {rows.length > PAGE && (
+          <div className="p-3 border-t border-white/5 flex items-center justify-between">
+            <span className="text-[10px] text-slate-500">
+              Showing {displayRows.length} of {rows.length} · Top by confidence
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowAll((v) => !v)}
+              className="h-7 px-3 rounded-lg border border-white/10 bg-white/5 text-slate-300 hover:text-white text-[10px] font-black uppercase tracking-widest"
+            >
+              {showAll ? 'Show Top 25' : `Show All ${rows.length}`}
+            </button>
+          </div>
+        )}
+      </div>}
     </div>
   );
 }
@@ -690,7 +784,7 @@ function DecisionPanel({
   if (!row) return null;
   const signal = row.primaryStrategy;
   const canApprove = row.workflowStage === 'trade_ready' && Boolean(row.tradePlan);
-  const canPaperTrade = Boolean(row.tradePlan && row.tradePlan.rr >= 1.8);
+  const canPaperTrade = Boolean(row.tradePlan && row.tradePlan.rr >= 1.5);
   return (
     <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-end">
       <section className="h-full w-full max-w-[720px] bg-[#080b12] border-l border-white/10 shadow-2xl overflow-y-auto">
@@ -804,7 +898,7 @@ function DecisionPanel({
               disabled={!canPaperTrade || busy}
               onClick={() => onPaperTrade(row)}
               className="h-11 rounded-xl border border-cyan-500/30 bg-cyan-500/15 text-cyan-200 hover:bg-cyan-500/25 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-              title={canPaperTrade ? 'Create simulated paper bracket' : 'Paper trade needs a valid trade plan and R:R >= 1.8'}
+              title={canPaperTrade ? 'Create simulated paper bracket' : 'Paper trade needs a valid trade plan and R:R >= 1.5'}
             >
               <ShieldCheck size={15} />
               <span className="text-[10px] uppercase tracking-widest font-black">Paper</span>
@@ -1062,8 +1156,248 @@ function ProTradeSettingsPanel({
   );
 }
 
+// ── Watchlist History (P9) ────────────────────────────────────────────────────
+
+function WatchlistHistoryPanel() {
+  const [open, setOpen] = React.useState(false);
+  const archive = React.useMemo(() => loadArchive(), []);
+  if (!archive.length) return null;
+  return (
+    <div className="glass rounded-xl overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full p-3 border-b border-white/5 bg-white/5 flex items-center justify-between gap-3 text-left"
+      >
+        <div className="flex items-center gap-2">
+          <div className="w-1 h-4 bg-amber-500 rounded-full" />
+          <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200">Watchlist History</h2>
+          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{archive.length} day{archive.length !== 1 ? 's' : ''}</span>
+        </div>
+        <ChevronDown size={14} className={`text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="overflow-auto max-h-[340px]">
+          <table className="w-full min-w-[640px] text-left border-collapse">
+            <thead className="text-[9px] uppercase text-slate-500 font-bold tracking-widest bg-slate-900/50 sticky top-0 z-10">
+              <tr>
+                <th className="py-2 px-3 border-r border-white/5">Date</th>
+                <th className="py-2 px-3 border-r border-white/5">Symbol</th>
+                <th className="py-2 px-3 border-r border-white/5 text-right">Closing Price</th>
+                <th className="py-2 px-3 border-r border-white/5">Outcome</th>
+                <th className="py-2 px-3 text-right">Paper P&amp;L</th>
+              </tr>
+            </thead>
+            <tbody className="font-mono text-[11px]">
+              {archive.map((record) =>
+                record.results.map((r, i) => (
+                  <tr key={`${record.date}-${r.symbol}`} className="border-b border-white/5 hover:bg-white/5">
+                    <td className="py-2 px-3 border-r border-white/5 text-slate-500">{i === 0 ? record.date : ''}</td>
+                    <td className="py-2 px-3 border-r border-white/5 font-black text-white">{r.symbol}</td>
+                    <td className="py-2 px-3 border-r border-white/5 text-right text-slate-300">{r.closingPrice > 0 ? `$${r.closingPrice.toFixed(2)}` : '--'}</td>
+                    <td className={`py-2 px-3 border-r border-white/5 font-black ${r.outcome === 'Target' ? 'text-emerald-300' : r.outcome === 'Stop' ? 'text-rose-300' : 'text-slate-500'}`}>{r.outcome}</td>
+                    <td className={`py-2 px-3 text-right font-black ${r.pnl > 0 ? 'text-emerald-300' : r.pnl < 0 ? 'text-rose-300' : 'text-slate-500'}`}>
+                      {r.pnl !== 0 ? `${r.pnl >= 0 ? '+' : ''}$${r.pnl.toFixed(2)}` : '--'}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Premarket Gap Scan ────────────────────────────────────────────────────────
+
+// S4: Premarket strategy pre-score — which setups are likely at open
+function pmSetups(row: ProTradeRow): StrategyId[] {
+  const setups: StrategyId[] = [];
+  const bull = row.direction === 'BULL';
+  const bear = row.direction === 'BEAR';
+  const gap = Math.abs(row.gapPct);
+
+  // S1 ORB: large gap + strong RVOL → primed for opening range breakout
+  if (gap >= 2 && row.rvol >= 1.5) setups.push('orb_retest');
+
+  // S2 VWAP pullback: moderate gap on high-ATR liquid name
+  if (gap >= 1 && row.atrPct >= 3 && row.rvol >= 1.2 && !setups.includes('orb_retest')) setups.push('vwap_pullback');
+
+  // S3 RS continuation: outpacing SPY premarket in the right direction
+  if (bull && row.rsVsBenchmark >= 1.01 && row.gapPct >= 0.5) setups.push('rs_continuation');
+  if (bear && row.rsVsBenchmark <= 0.99 && row.gapPct <= -0.5) setups.push('rs_continuation');
+
+  // S4 Liquidity sweep: premarket already breaking above/below prev day hi/lo
+  if (bull && row.prevDayHigh > 0 && row.premarketHigh > row.prevDayHigh) setups.push('liquidity_sweep');
+  if (bear && row.prevDayLow > 0 && row.premarketLow < row.prevDayLow) setups.push('liquidity_sweep');
+
+  // S5 OB/FVG: clean gap leaves FVG below (bull) or above (bear) current PM range
+  if (bull && row.prevDayHigh > 0 && row.premarketLow > row.prevDayHigh * 1.003) setups.push('ob_fvg_retest');
+  if (bear && row.prevDayLow > 0 && row.premarketHigh < row.prevDayLow * 0.997) setups.push('ob_fvg_retest');
+
+  return setups.slice(0, 3); // cap at 3 badges
+}
+
+function isPremarketWindow(): boolean {
+  const h = parseInt(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
+  const m = parseInt(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', minute: '2-digit' }), 10);
+  const mins = h * 60 + m;
+  return mins >= 7 * 60 + 30 && mins < 9 * 60 + 45;
+}
+
+type GapRow = ProTradeRow & { pmScore: number };
+
+function PremarketGapPanel({
+  rows,
+  watchlistSet,
+  onSelect,
+  onLockWatchlist,
+}: {
+  rows: ProTradeRow[];
+  watchlistSet: Set<string>;
+  onSelect: (row: ProTradeRow) => void;
+  onLockWatchlist: (symbols: string[]) => void;
+}) {
+  const gapRows: GapRow[] = React.useMemo(
+    () =>
+      rows
+        .filter((r) => Math.abs(r.gapPct) >= 0.5)
+        .map((r) => ({ ...r, pmScore: Math.abs(r.gapPct) * Math.max(0.5, r.rvol) }))
+        .sort((a, b) => b.pmScore - a.pmScore)
+        .slice(0, 15),
+    [rows],
+  );
+  const top10 = gapRows.slice(0, 10).map((r) => r.symbol);
+  const inWindow = isPremarketWindow();
+  const etStr = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: true });
+
+  return (
+    <div className="glass rounded-xl overflow-hidden flex-1">
+      <div className="p-3 border-b border-white/5 bg-white/5 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <TrendingUp size={14} className="text-amber-400" />
+          <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200">Premarket Gap Scan</h2>
+          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{gapRows.length} gappers · gap% × RVOL</span>
+          <span className={`text-[10px] px-2 py-0.5 rounded border font-bold uppercase tracking-widest ${inWindow ? 'border-amber-500/30 bg-amber-500/10 text-amber-300' : 'border-slate-600/40 bg-slate-800/30 text-slate-400'}`}>
+            {inWindow ? `⏰ Premarket ${etStr}` : `Market open · ${etStr}`}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={() => onLockWatchlist(top10)}
+          disabled={!top10.length}
+          className="h-7 px-3 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 disabled:opacity-40 flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest"
+        >
+          ★ Lock Top 10 as Day Watchlist
+        </button>
+      </div>
+      <div className="overflow-auto">
+        <table className="w-full min-w-[1060px] text-left border-collapse">
+          <thead className="text-[9px] uppercase text-slate-500 font-bold tracking-widest bg-slate-900/50 sticky top-0 z-10">
+            <tr>
+              <th className="py-2.5 px-3 border-r border-white/5"># Symbol</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">Gap%</th>
+              <th className="py-2.5 px-3 border-r border-white/5">Dir</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">Price</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">Prev Hi</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">Prev Lo</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">PM High</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">PM Low</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">PM Vol</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">RVOL</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">ATR%</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">Score</th>
+              <th className="py-2.5 px-3 border-r border-white/5">Setups</th>
+              <th className="py-2.5 px-3">Action</th>
+            </tr>
+          </thead>
+          <tbody className="font-mono text-[11px]">
+            {gapRows.map((row, i) => {
+              const hasEarnings = row.earningsDays !== null && Math.abs(row.earningsDays) <= 1;
+              const isWatchlisted = watchlistSet.has(row.symbol);
+              const isBull = row.gapPct > 0;
+              const isTop10 = i < 10;
+              return (
+                <tr
+                  key={row.symbol}
+                  onClick={() => onSelect(row)}
+                  className={`border-b border-white/5 hover:bg-white/5 cursor-pointer ${!isTop10 ? 'opacity-50' : ''}`}
+                >
+                  <td className="py-3 px-3 border-r border-white/5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[9px] text-slate-600 font-black w-4 shrink-0">{i + 1}</span>
+                      {isWatchlisted && <span className="text-amber-400 text-[11px] font-black">★</span>}
+                      <span className="font-black text-white text-[12px]">{row.symbol}</span>
+                      {row.catalyst === 'hard' && <span title="Hard catalyst" className="text-orange-400 text-[10px]">🔥</span>}
+                      {hasEarnings && <span title={row.earningsStatus} className="text-amber-400 text-[10px]">⚠</span>}
+                      {row.earningsChecked && !hasEarnings && <span className="text-slate-700 text-[8px]">E✓</span>}
+                    </div>
+                  </td>
+                  <td className={`py-3 px-3 border-r border-white/5 text-right font-black text-[13px] ${isBull ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {isBull ? '+' : ''}{row.gapPct.toFixed(2)}%
+                  </td>
+                  <td className={`py-3 px-3 border-r border-white/5 font-black ${row.direction === 'BULL' ? 'text-emerald-400' : row.direction === 'BEAR' ? 'text-rose-400' : 'text-slate-500'}`}>
+                    {row.direction}
+                  </td>
+                  <td className="py-3 px-3 border-r border-white/5 text-right text-white">{fmtMoney(row.price)}</td>
+                  <td className="py-3 px-3 border-r border-white/5 text-right text-slate-400">{row.prevDayHigh > 0 ? fmtMoney(row.prevDayHigh) : '--'}</td>
+                  <td className="py-3 px-3 border-r border-white/5 text-right text-slate-400">{row.prevDayLow > 0 ? fmtMoney(row.prevDayLow) : '--'}</td>
+                  <td className="py-3 px-3 border-r border-white/5 text-right text-emerald-300">{row.premarketHigh > 0 ? fmtMoney(row.premarketHigh) : '--'}</td>
+                  <td className="py-3 px-3 border-r border-white/5 text-right text-rose-300">{row.premarketLow > 0 ? fmtMoney(row.premarketLow) : '--'}</td>
+                  <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">
+                    {row.premarketVolume > 0 ? `${(row.premarketVolume / 1000).toFixed(0)}K` : '--'}
+                  </td>
+                  <td className={`py-3 px-3 border-r border-white/5 text-right font-black ${row.rvol >= 1.5 ? 'text-emerald-300' : row.rvol >= 1 ? 'text-slate-200' : 'text-slate-500'}`}>
+                    {row.rvol.toFixed(2)}x
+                  </td>
+                  <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">{row.atrPct.toFixed(1)}%</td>
+                  <td className="py-3 px-3 border-r border-white/5 text-right text-indigo-300 font-black">{row.pmScore.toFixed(1)}</td>
+                  <td className="py-3 px-3 border-r border-white/5">
+                    {(() => { const setups = pmSetups(row); return (
+                      <div className="flex flex-wrap gap-1">
+                        {setups.map((id) => (
+                          <span
+                            key={id}
+                            title={STRATEGY_LABELS[id]}
+                            className="inline-flex items-center rounded px-1.5 py-0.5 text-[9px] uppercase tracking-widest font-black border border-indigo-400/40 bg-indigo-500/15 text-indigo-200"
+                          >
+                            {STRATEGY_CODES[id]}
+                          </span>
+                        ))}
+                        {!setups.length && <span className="text-slate-700 text-[9px]">—</span>}
+                      </div>
+                    ); })()}
+                  </td>
+                  <td className="py-3 px-3">
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); onSelect(row); }}
+                      className="h-7 px-2.5 rounded border border-white/10 bg-white/5 text-slate-300 hover:text-white hover:bg-white/10 text-[10px] uppercase tracking-widest font-black"
+                    >
+                      Review
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {!gapRows.length && (
+          <div className="p-8 text-center text-sm text-slate-500">
+            No gappers detected (gap ≥ 0.5%). Waiting for premarket data — 7:30–9:30 AM ET.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ProTradeScannerScreen() {
   const [snapshot, setSnapshot] = React.useState<ProTradeSnapshot | null>(null);
+  const snapshotRef = React.useRef<ProTradeSnapshot | null>(null);
+  React.useEffect(() => { snapshotRef.current = snapshot; }, [snapshot]);
   const [brokerSnapshot, setBrokerSnapshot] = React.useState<Trading212Snapshot | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [manualLoading, setManualLoading] = React.useState(false);
@@ -1078,18 +1412,27 @@ export function ProTradeScannerScreen() {
   const [paperTrades, setPaperTrades] = React.useState<PaperTrade[]>(() => loadPaperTrades());
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [settings, setSettings] = React.useState<ProTradeSettings>(() => loadProTradeSettings());
+  const [accountBalance, setAccountBalance] = React.useState(100_000);
+  const [watchlist, setWatchlist] = React.useState<DayWatchlist>(() => loadWatchlist());
+  const [watchlistOnly, setWatchlistOnly] = React.useState(false);
+  const [viewMode, setViewMode] = React.useState<'premarket' | 'workflow'>(() => isPremarketWindow() ? 'premarket' : 'workflow');
 
   async function load(manual = false) {
     try {
       if (manual) setManualLoading(true);
       else setLoading(true);
       setError('');
-      const [nextSnapshot, nextBroker] = await Promise.all([
+      const [nextSnapshot, nextBroker, acct] = await Promise.all([
         fetchProTradeScannerSnapshot(),
         fetchTrading212Snapshot({ fast: true }).catch(() => null),
+        getPaperAccount().catch(() => null),
       ]);
       setSnapshot(nextSnapshot);
       setBrokerSnapshot(nextBroker);
+      if (acct) {
+        const bal = parseFloat(acct.equity);
+        if (bal > 0) { setAccountBalance(bal); initDailyBalance(bal); }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1102,13 +1445,36 @@ export function ProTradeScannerScreen() {
     void load();
   }, []);
 
+  // Full universe scan every 60s
   React.useEffect(() => {
     const id = window.setInterval(() => {
       if (document.hidden) return;
       void load();
-    }, activeStage === 'forming' || activeStage === 'confirmed' || activeStage === 'locked' || activeStage === 'trade_ready' ? 15_000 : 60_000);
+    }, 60_000);
     return () => window.clearInterval(id);
-  }, [activeStage]);
+  }, []);
+
+  // Hot-set refresh every 20s — only re-evaluates forming/confirmed/locked stocks
+  React.useEffect(() => {
+    const id = window.setInterval(() => {
+      if (document.hidden) return;
+      const cur = snapshotRef.current;
+      if (!cur) return;
+      const hotSymbols = cur.rows
+        .filter((r) => r.workflowStage === 'forming' || r.workflowStage === 'confirmed' || r.workflowStage === 'locked')
+        .map((r) => r.symbol);
+      if (!hotSymbols.length) return;
+      void fetchHotSetSnapshot(hotSymbols, 0).then((fresh) => {
+        if (!fresh.length) return;
+        setSnapshot((prev) => {
+          if (!prev) return prev;
+          const freshMap = new Map(fresh.map((r) => [r.symbol, r]));
+          return { ...prev, rows: prev.rows.map((r) => freshMap.get(r.symbol) ?? r), fetchedAt: new Date().toISOString() };
+        });
+      }).catch(() => { /* best-effort */ });
+    }, 20_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const orderedSymbols = React.useMemo(() => buildOrderedSymbols(brokerSnapshot), [brokerSnapshot]);
   const rows = React.useMemo(() => withOrderedStage(snapshot?.rows || [], orderedSymbols, paperTrades), [snapshot?.rows, orderedSymbols, paperTrades]);
@@ -1119,14 +1485,65 @@ export function ProTradeScannerScreen() {
     : activeStage === 'pro_watchlist'
       ? proWatchlistRows
       : rows.filter((row) => row.workflowStage === activeStage);
-  const filteredRows = activeStrategy === 'all'
+  const strategyFilteredRows = activeStrategy === 'all'
     ? stageRows
     : rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === activeStrategy && signal.stage !== 'pro_watchlist'));
+  const watchlistSet = React.useMemo(() => new Set(watchlist.symbols), [watchlist.symbols]);
+  // When watchlist filter is active, show ALL stages for watchlist stocks (ignore stage filter)
+  const filteredRows = watchlistOnly && watchlist.symbols.length > 0
+    ? rows.filter((row) => watchlistSet.has(row.symbol))
+    : strategyFilteredRows;
   const orderedPaperTrades = paperTrades.filter((trade) => baseSymbol(trade.symbol) && (trade.status === 'Open' || trade.status === 'Closed'));
   const selected = selectedRow ? withOrderedStage([selectedRow], orderedSymbols, paperTrades)[0] : null;
   const strategyIds = Object.keys(STRATEGY_LABELS) as StrategyId[];
   const lastUpdated = snapshot?.fetchedAt ? new Date(snapshot.fetchedAt) : null;
   const stale = rows.some((row) => row.dataStatus.stale);
+
+  function lockWatchlist(symbols: string[]) {
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const next: DayWatchlist = { date: today, symbols };
+    setWatchlist(next);
+    saveWatchlist(next);
+    setWatchlistOnly(true);
+    setViewMode('workflow');
+  }
+
+  // P5: Auto-lock Day Watchlist at 9:30 AM ET on first scan of the day
+  React.useEffect(() => {
+    if (!rows.length) return;
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    if (watchlist.date === today) return;
+    const etH = parseInt(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
+    const etM = parseInt(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', minute: '2-digit' }), 10);
+    if (etH < 9 || (etH === 9 && etM < 30)) return;
+    const top10 = [...rows].sort((a, b) => b.confidence - a.confidence).slice(0, 10).map((r) => r.symbol);
+    const next: DayWatchlist = { date: today, symbols: top10 };
+    setWatchlist(next);
+    saveWatchlist(next);
+  }, [rows, watchlist.date]);
+
+  // P9: EOD archive — record watchlist outcome after 4 PM ET
+  React.useEffect(() => {
+    if (!rows.length || !watchlist.symbols.length) return;
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    if (watchlist.date !== todayET) return;
+    const etH = parseInt(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
+    const etM = parseInt(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', minute: '2-digit' }), 10);
+    if (etH * 60 + etM < 16 * 60) return; // Before 4 PM ET
+    const archive = loadArchive();
+    if (archive.some((r) => r.date === todayET)) return; // Already archived
+    const priceBySymbol = new Map(rows.map((r) => [r.symbol, r.price]));
+    const results: WatchlistStockResult[] = watchlist.symbols.map((sym) => {
+      const pt = paperTrades.find((t) => baseSymbol(t.symbol) === sym && t.status !== 'Open');
+      return {
+        symbol: sym,
+        closingPrice: priceBySymbol.get(sym) ?? 0,
+        pnl: pt?.pnl ?? 0,
+        outcome: pt?.outcome ?? '--',
+      };
+    });
+    saveArchive([{ date: todayET, archivedAt: new Date().toISOString(), symbols: watchlist.symbols, results }, ...archive]);
+  }, [rows, watchlist, paperTrades]);
 
   React.useEffect(() => {
     savePaperTrades(paperTrades);
@@ -1142,8 +1559,74 @@ export function ProTradeScannerScreen() {
     if (monitored.changed) setPaperTrades(monitored.trades);
   }, [rows, paperTrades]);
 
+  // Sync open localStorage trades with Alpaca paper positions.
+  // If a trade is no longer in Alpaca (bracket leg filled), close it with the real fill price.
+  React.useEffect(() => {
+    const openTrades = paperTrades.filter((t) => t.status === 'Open');
+    if (!openTrades.length) return;
+
+    void (async () => {
+      try {
+        const alpacaPositions = await getPaperPositions();
+        const alpacaSymbols = new Set(alpacaPositions.map((p) => p.symbol.toUpperCase()));
+
+        // Trades whose Alpaca position is gone — bracket filled at stop or target
+        const closedInAlpaca = openTrades.filter((t) => !alpacaSymbols.has(t.symbol.toUpperCase()));
+        if (!closedInAlpaca.length) return;
+
+        const closedUpdates = await Promise.all(
+          closedInAlpaca.map(async (trade): Promise<PaperTrade | null> => {
+            // Try to get the real Alpaca fill price from closed orders
+            let exitPrice: number | null = null;
+            let closedAt: string | undefined;
+            try {
+              const filled = await getRecentFilledOrders(trade.symbol);
+              // Pick the most recent filled order (stop_loss or take_profit leg)
+              const leg = filled[0];
+              if (leg?.filled_avg_price) {
+                exitPrice = parseFloat(leg.filled_avg_price);
+                closedAt = leg.filled_at ?? undefined;
+              }
+            } catch {
+              // fall through to row price fallback
+            }
+
+            // Fallback: current scan price
+            if (!exitPrice) {
+              const row = rows.find((r) => r.symbol === trade.symbol);
+              exitPrice = row?.price ?? null;
+            }
+            if (!exitPrice) return null;
+
+            // Determine outcome from exit vs stop/target
+            const toStop = Math.abs(exitPrice - trade.stop);
+            const toTarget = Math.abs(exitPrice - trade.target);
+            const outcome: PaperTrade['outcome'] = toStop <= toTarget ? 'Stop' : 'Target';
+            return closePaperTrade(trade, exitPrice, outcome, closedAt);
+          })
+        );
+
+        const validUpdates = closedUpdates.filter(Boolean) as PaperTrade[];
+        if (!validUpdates.length) return;
+
+        const updateMap = new Map(validUpdates.map((t) => [t.id, t]));
+        setPaperTrades((current) => current.map((t) => updateMap.get(t.id) ?? t));
+
+        // Record results in risk manager (circuit breaker + daily loss)
+        validUpdates.forEach((t) => {
+          if (t.pnl !== undefined) recordTradeResult(t.strategyName, t.pnl, accountBalance);
+        });
+      } catch {
+        // Sync is best-effort — never block the UI
+      }
+    })();
+  }, [rows]); // runs after each scan refresh
+
   React.useEffect(() => {
     if (!snapshot?.rows.length) return;
+    if (checkDailyLossLimit(accountBalance).ok === false) return;
+    const posCheck = checkMaxPositions(paperTrades);
+    if (!posCheck.ok) return;
     const lockedRows = snapshot.rows.filter((row) => row.workflowStage === 'trade_ready' && canPaperTradeRow(row, settings, paperTrades));
     if (!lockedRows.length) return;
     const tradedSymbols = new Set(paperTrades.map((trade) => baseSymbol(trade.symbol)));
@@ -1152,7 +1635,12 @@ export function ProTradeScannerScreen() {
     lockedRows.forEach((row) => {
       const symbolKey = baseSymbol(row.symbol);
       if (orderedSymbols.has(symbolKey) || tradedSymbols.has(symbolKey)) return;
-      const trade = buildPaperTrade(row, settings, [...paperTrades, ...autoTrades], openedAt);
+      const strategyName = row.primaryStrategy?.strategyId || row.symbol;
+      if (!checkStrategyCircuitBreaker(strategyName).ok) return;
+      if (!checkMaxPositions([...paperTrades, ...autoTrades]).ok) return;
+      // P3: Skip auto-trade when earnings are within ±1 day (too much gap risk)
+      if (row.earningsDays !== null && Math.abs(row.earningsDays) <= 1) return;
+      const trade = buildPaperTrade(row, settings, [...paperTrades, ...autoTrades], openedAt, accountBalance);
       if (!trade) return;
       autoTrades.push(trade);
       tradedSymbols.add(symbolKey);
@@ -1173,16 +1661,28 @@ export function ProTradeScannerScreen() {
   async function approve(row: ProTradeRow) {
     const plan = effectiveTradePlan(row, settings);
     if (!plan) return;
+    const strategyName = row.primaryStrategy?.strategyId || row.symbol;
+    const lossCheck = checkDailyLossLimit(accountBalance);
+    if (!lossCheck.ok) { setApprovalMessage(lossCheck.reason!); return; }
+    const cbCheck = checkStrategyCircuitBreaker(strategyName);
+    if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
+    const posCheck = checkMaxPositions(paperTrades);
+    if (!posCheck.ok) { setApprovalMessage(posCheck.reason!); return; }
+    // P3: Earnings warning (manual override allowed, but alert the trader)
+    if (row.earningsDays !== null && Math.abs(row.earningsDays) <= 1) {
+      setApprovalMessage(`⚠ Earnings ${row.earningsStatus} — elevated gap risk. Submitting with caution.`);
+    }
     try {
       setApprovalBusy(true);
       setApprovalMessage('');
+      const qty = computePositionSize(accountBalance, plan.entry, plan.stop);
       const order = await placePaperBracketOrder({
         symbol: row.symbol,
         direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL',
         entry: plan.entry,
         stop: plan.stop,
         target: plan.target,
-        notional: settings.maxPerOrder || PAPER_NOTIONAL,
+        notional: qty * plan.entry,
       });
       setApprovalMessage(`Alpaca paper bracket submitted: ${order.id.slice(0, 8)} · ${row.symbol} ${order.side.toUpperCase()} ${order.qty} shares`);
       await load(true);
@@ -1194,13 +1694,20 @@ export function ProTradeScannerScreen() {
   }
 
   function createPaperTrade(row: ProTradeRow) {
-    const trade = buildPaperTrade(row, settings, paperTrades);
+    const strategyName = row.primaryStrategy?.strategyId || row.symbol;
+    const lossCheck = checkDailyLossLimit(accountBalance);
+    if (!lossCheck.ok) { setApprovalMessage(lossCheck.reason!); return; }
+    const cbCheck = checkStrategyCircuitBreaker(strategyName);
+    if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
+    const posCheck = checkMaxPositions(paperTrades);
+    if (!posCheck.ok) { setApprovalMessage(posCheck.reason!); return; }
+    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance);
     if (!trade) {
       const plan = effectiveTradePlan(row, settings);
       if (!plan) {
         setApprovalMessage('Paper trade blocked: entry, stop, or target is not valid.');
-      } else if (plan.rr < 1.8) {
-        setApprovalMessage(`Paper trade blocked: R:R is ${plan.rr.toFixed(2)}, minimum is 1.80.`);
+      } else if (plan.rr < 1.5) {
+        setApprovalMessage(`Paper trade blocked: R:R is ${plan.rr.toFixed(2)}, minimum is 1.50.`);
       } else {
         setApprovalMessage('Paper trade blocked: trading amount limit has been reached.');
       }
@@ -1211,17 +1718,21 @@ export function ProTradeScannerScreen() {
       setApprovalMessage(`Paper trade already open for ${row.symbol}.`);
       return;
     }
+    const earningsNote = row.earningsDays !== null && Math.abs(row.earningsDays) <= 1
+      ? ` ⚠ ${row.earningsStatus}` : '';
     setPaperTrades((current) => [trade, ...current]);
-    setApprovalMessage(`Paper trade opened for ${row.symbol}: entry ${fmtMoney(trade.entry)}, stop ${fmtMoney(trade.stop)}, T1 ${fmtMoney(trade.target1)}, T2 ${fmtMoney(trade.target2)}.`);
+    setApprovalMessage(`Paper trade opened for ${row.symbol}: entry ${fmtMoney(trade.entry)}, stop ${fmtMoney(trade.stop)}, T1 ${fmtMoney(trade.target1)}, T2 ${fmtMoney(trade.target2)}.${earningsNote}`);
     // Mirror to Alpaca paper account for realistic fill tracking (fire-and-forget)
     placePaperBracketOrder({ symbol: row.symbol, direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL', entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional })
       .catch((err: unknown) => console.warn('Alpaca paper order skipped:', err instanceof Error ? err.message : err));
   }
 
   function manualClosePaperTrade(trade: PaperTrade, price: number) {
-    setPaperTrades((current) => current.map((item) => (
-      item.id === trade.id ? closePaperTrade(item, price, 'Manual') : item
-    )));
+    const closed = closePaperTrade(trade, price, 'Manual');
+    setPaperTrades((current) => current.map((item) => item.id === trade.id ? closed : item));
+    if (closed.pnl !== undefined) {
+      recordTradeResult(trade.strategyName, closed.pnl, accountBalance);
+    }
   }
 
   return (
@@ -1236,9 +1747,14 @@ export function ProTradeScannerScreen() {
             <span className={`px-3 py-1 rounded-full border ${stale ? 'border-amber-500/30 text-amber-300 bg-amber-500/10' : 'border-emerald-500/20 text-emerald-300 bg-emerald-500/10'}`}>
               {snapshot ? `Last refreshed ${lastUpdated?.toLocaleTimeString()}` : 'Loading'}
             </span>
-            <span className="px-3 py-1 rounded-full border border-amber-500/20 text-amber-300 bg-amber-500/10">
-              Provider: Yahoo fallback
+            <span className="px-3 py-1 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10">
+              Provider: Alpaca IEX
             </span>
+            {watchlist.symbols.length > 0 && (
+              <span className="px-3 py-1 rounded-full border border-amber-500/30 text-amber-300 bg-amber-500/10">
+                ★ Watchlist: {watchlist.symbols.length} stocks locked
+              </span>
+            )}
             <span className="px-3 py-1 rounded-full border border-slate-600/40 text-slate-400 bg-slate-800/30">
               Auto refresh: {activeStage === 'forming' || activeStage === 'confirmed' || activeStage === 'locked' || activeStage === 'trade_ready' ? '15s hot set' : '60s'}
             </span>
@@ -1248,6 +1764,25 @@ export function ProTradeScannerScreen() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              if (watchlist.symbols.length > 0) {
+                setWatchlistOnly((v) => !v);
+                if (!watchlistOnly) setViewMode('workflow');
+              } else {
+                lockWatchlist([...rows].sort((a, b) => b.confidence - a.confidence).slice(0, 10).map((r) => r.symbol));
+              }
+            }}
+            disabled={!rows.length}
+            className={`h-9 px-4 rounded-full border flex items-center gap-2 transition-colors disabled:opacity-40 ${watchlistOnly ? 'border-amber-500/60 bg-amber-500/25 text-amber-200' : watchlist.symbols.length > 0 ? 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20' : 'border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'}`}
+            title={watchlist.symbols.length > 0 ? (watchlistOnly ? 'Showing watchlist only — click to show all' : `Filter to ${watchlist.symbols.length} locked stocks`) : "Lock top 10 as today's watchlist"}
+          >
+            <span className="text-[11px]">★</span>
+            <span className="text-[10px] font-black uppercase tracking-widest">
+              {watchlist.symbols.length > 0 ? `Watchlist (${watchlist.symbols.length})${watchlistOnly ? ' ✓' : ''}` : 'Lock Watchlist'}
+            </span>
+          </button>
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
@@ -1267,48 +1802,81 @@ export function ProTradeScannerScreen() {
         </div>
       </div>
 
-      <div className="flex gap-3 overflow-x-auto pb-1 scrollbar-none shrink-0">
-        {WORKFLOW_STAGE_ORDER.map((stage) => (
-          <StageTile
-            key={stage}
-            stage={stage}
-            count={countRows(rows, stage, rawRows)}
-            active={activeStage === stage}
-            onClick={() => {
-              setActiveStage(stage);
-              setActiveStrategy('all');
-            }}
-          />
-        ))}
+      <div className="flex gap-1 shrink-0">
+        <button
+          type="button"
+          onClick={() => setViewMode('premarket')}
+          className={`h-8 px-4 rounded-lg border text-[10px] font-black uppercase tracking-widest flex items-center gap-2 transition-colors ${viewMode === 'premarket' ? 'border-amber-500/30 bg-amber-500/10 text-amber-300' : 'border-white/10 bg-white/5 text-slate-400 hover:text-white'}`}
+        >
+          <TrendingUp size={12} />
+          Gap Scan
+        </button>
+        <button
+          type="button"
+          onClick={() => setViewMode('workflow')}
+          className={`h-8 px-4 rounded-lg border text-[10px] font-black uppercase tracking-widest transition-colors ${viewMode === 'workflow' ? 'border-indigo-500/30 bg-indigo-500/10 text-indigo-300' : 'border-white/10 bg-white/5 text-slate-400 hover:text-white'}`}
+        >
+          Workflow
+        </button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3 shrink-0">
-        {strategyIds.map((strategy) => (
-          <StrategyCard
-            key={strategy}
-            strategy={strategy}
-            count={rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === strategy && signal.stage !== 'pro_watchlist')).length}
-            active={activeStrategy === strategy}
-            onClick={() => setActiveStrategy((current) => current === strategy ? 'all' : strategy)}
-          />
-        ))}
-      </div>
+      {viewMode === 'premarket' ? (
+        <PremarketGapPanel
+          rows={rows}
+          watchlistSet={watchlistSet}
+          onSelect={(row) => { setSelectedRow(row); setApprovalMessage(''); }}
+          onLockWatchlist={lockWatchlist}
+        />
+      ) : (
+        <>
+          <div className="flex items-center gap-3 overflow-x-auto pb-1 scrollbar-none shrink-0">
+            {WORKFLOW_STAGE_ORDER.map((stage) => (
+              <StageTile
+                key={stage}
+                stage={stage}
+                count={countRows(rows, stage, rawRows)}
+                active={!watchlistOnly && activeStage === stage}
+                onClick={() => {
+                  setWatchlistOnly(false);
+                  setActiveStage(stage);
+                  setActiveStrategy('all');
+                }}
+              />
+            ))}
+          </div>
 
-      {error && (
-        <div className="rounded-xl border border-rose-500/20 bg-rose-500/10 text-rose-300 px-4 py-3 text-xs font-bold">
-          {error}
-        </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3 shrink-0">
+            {strategyIds.map((strategy) => (
+              <StrategyCard
+                key={strategy}
+                strategy={strategy}
+                count={rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === strategy && signal.stage !== 'pro_watchlist')).length}
+                active={activeStrategy === strategy}
+                onClick={() => setActiveStrategy((current) => current === strategy ? 'all' : strategy)}
+              />
+            ))}
+          </div>
+
+          {error && (
+            <div className="rounded-xl border border-rose-500/20 bg-rose-500/10 text-rose-300 px-4 py-3 text-xs font-bold">
+              {error}
+            </div>
+          )}
+
+          <WorkflowTable
+            rows={filteredRows}
+            selected={selected}
+            reasonMode={activeStage === 'pro_watchlist' && activeStrategy === 'all' ? 'base' : 'strategy'}
+            orderedTrades={activeStage === 'ordered' && activeStrategy === 'all' ? orderedPaperTrades : []}
+            watchlistSet={watchlistSet}
+            onSelect={(row) => { setSelectedRow(row); setApprovalMessage(''); }}
+          />
+        </>
       )}
 
-      <WorkflowTable
-        rows={filteredRows}
-        selected={selected}
-        reasonMode={activeStage === 'pro_watchlist' && activeStrategy === 'all' ? 'base' : 'strategy'}
-        orderedTrades={activeStage === 'ordered' && activeStrategy === 'all' ? orderedPaperTrades : []}
-        onSelect={(row) => { setSelectedRow(row); setApprovalMessage(''); }}
-      />
-
       <PaperTradeMonitor trades={paperTrades} rows={rows} onCloseTrade={manualClosePaperTrade} />
+
+      <WatchlistHistoryPanel />
 
       <DecisionPanel
         row={selected}

@@ -6,6 +6,7 @@ export const env = {
   alpacaKey: import.meta.env.VITE_ALPACA_KEY || '',
   alpacaSecret: import.meta.env.VITE_ALPACA_SECRET || '',
   alpacaDataUrl: import.meta.env.VITE_ALPACA_DATA_URL || 'https://data.alpaca.markets',
+  finnhubKey: import.meta.env.VITE_FINNHUB_KEY || '',
 };
 
 export function hasSupabaseConfig() {

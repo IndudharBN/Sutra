@@ -52,6 +52,41 @@ function toCandle(bar: AlpacaBar): Candle {
   return { time: bar.t, open: bar.o, high: bar.h, low: bar.l, close: bar.c, volume: bar.v };
 }
 
+// ── Single-symbol historical bars with date range (for backtesting) ──────────
+export async function fetchHistoricalBars(
+  symbol: string,
+  start: string,
+  end: string,
+  interval: Interval = '5m',
+): Promise<Candle[]> {
+  const cacheKey = `hist:${interval}:${symbol}:${start}:${end}`;
+  const hit = cacheGet<Candle[]>(cacheKey);
+  if (hit) return hit;
+
+  const all: Candle[] = [];
+  let pageToken: string | undefined;
+  do {
+    const params: Record<string, string> = {
+      timeframe: ALPACA_TF[interval],
+      start: `${start}T00:00:00Z`,
+      end: `${end}T23:59:59Z`,
+      limit: '10000',
+      sort: 'asc',
+      feed: 'iex',
+    };
+    if (pageToken) params['page_token'] = pageToken;
+    const data = await alpacaGet<{ bars: AlpacaBar[]; next_page_token?: string }>(
+      `/v2/stocks/${symbol}/bars`,
+      params,
+    );
+    all.push(...(data.bars || []).map(toCandle));
+    pageToken = data.next_page_token ?? undefined;
+  } while (pageToken);
+
+  cacheSet(cacheKey, all, 3_600_000);
+  return all;
+}
+
 // ── Multi-symbol bars (batch — 1 API call for all symbols) ───────────────────
 export async function fetchBars(symbols: string[], interval: Interval): Promise<Record<string, Candle[]>> {
   if (!symbols.length) return {};
@@ -148,8 +183,81 @@ export function selectTopSymbols(metas: SymbolMeta[], n = 60): string[] {
       ...m,
       score: Math.abs(m.gapPct) * 3 + m.rvolEst * 20 + Math.abs(m.intradayChangePct) * 2,
     }))
-    .filter((m) => m.price > 1 && m.price < 500)
+    .filter((m) => m.price > 1 && m.price < 1500)
     .sort((a, b) => b.score - a.score)
     .slice(0, n)
     .map((m) => m.symbol);
+}
+
+// ── News: catalyst quality tier per symbol ────────────────────────────────────
+
+export type CatalystTier = 'hard' | 'soft' | 'none';
+
+const HARD_RE = /\b(earnings|beat|beats|topped|exceeded|surpassed|miss|misses|fda|approved|approval|rejected|rejection|merger|acquisition|acquires|acquired|buyout|takeover|joins s&p|added to index|deal closed|contract awarded|guidance raised|guidance lowered)\b/i;
+const SOFT_RE = /\b(analyst|upgrade|downgrade|maintains|reiterates|overweight|underweight|price target|target price|sector|market report|economic|survey|outlook)\b/i;
+
+function classifyCatalyst(headline: string): CatalystTier {
+  if (HARD_RE.test(headline)) return 'hard';
+  if (SOFT_RE.test(headline)) return 'soft';
+  return 'none';
+}
+
+export async function fetchNewsFlags(symbols: string[]): Promise<Record<string, CatalystTier>> {
+  if (!symbols.length) return {};
+  const cacheKey = `news2:${symbols.slice().sort().join(',')}`;
+  const hit = cacheGet<Record<string, CatalystTier>>(cacheKey);
+  if (hit) return hit;
+
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const data = await alpacaGet<{ news: Array<{ headline: string; symbols: string[] }> }>('/v1beta1/news', {
+    symbols: symbols.join(','),
+    limit: '50',
+    start: `${todayET}T00:00:00Z`,
+  }).catch(() => ({ news: [] as Array<{ headline: string; symbols: string[] }> }));
+
+  const result: Record<string, CatalystTier> = {};
+  for (const sym of symbols) result[sym] = 'none';
+  for (const article of data.news) {
+    const tier = classifyCatalyst(article.headline ?? '');
+    for (const sym of article.symbols) {
+      if (tier === 'hard') result[sym] = 'hard';
+      else if (tier === 'soft' && result[sym] === 'none') result[sym] = 'soft';
+    }
+  }
+  cacheSet(cacheKey, result, 300_000);
+  return result;
+}
+
+// ── Sector ETF trends ─────────────────────────────────────────────────────────
+const SECTOR_ETFS = ['XLF', 'XLK', 'XLY', 'XLE', 'XLV', 'XLI', 'XLB', 'XLP', 'XLU', 'XLRE', 'XLC'];
+
+export const SYMBOL_SECTOR: Record<string, string> = {
+  AAPL:'XLK', MSFT:'XLK', NVDA:'XLK', AMD:'XLK', INTC:'XLK', QCOM:'XLK', MU:'XLK', AMAT:'XLK', LRCX:'XLK', KLAC:'XLK',
+  META:'XLC', GOOGL:'XLC', GOOG:'XLC', NFLX:'XLC', DIS:'XLC', CMCSA:'XLC', T:'XLC', VZ:'XLC',
+  AMZN:'XLY', TSLA:'XLY', HD:'XLY', MCD:'XLY', NKE:'XLY', SBUX:'XLY', TGT:'XLY', LOW:'XLY',
+  JPM:'XLF', BAC:'XLF', WFC:'XLF', GS:'XLF', MS:'XLF', C:'XLF', BLK:'XLF', AXP:'XLF', V:'XLF', MA:'XLF',
+  XOM:'XLE', CVX:'XLE', COP:'XLE', OXY:'XLE', SLB:'XLE', HAL:'XLE', MRO:'XLE', DVN:'XLE',
+  JNJ:'XLV', UNH:'XLV', PFE:'XLV', ABBV:'XLV', MRK:'XLV', LLY:'XLV', AMGN:'XLV', GILD:'XLV', BMY:'XLV',
+  BA:'XLI', CAT:'XLI', GE:'XLI', HON:'XLI', RTX:'XLI', LMT:'XLI', NOC:'XLI', UPS:'XLI', FDX:'XLI',
+  WMT:'XLP', PG:'XLP', KO:'XLP', PEP:'XLP', COST:'XLP', CL:'XLP', GIS:'XLP',
+  NEE:'XLU', DUK:'XLU', SO:'XLU', D:'XLU', AEP:'XLU',
+  AMT:'XLRE', PLD:'XLRE', CCI:'XLRE', SPG:'XLRE', EQIX:'XLRE',
+  NEM:'XLB', FCX:'XLB', LIN:'XLB', APD:'XLB', DD:'XLB',
+};
+
+export async function fetchSectorTrends(): Promise<Record<string, 'UP' | 'DOWN' | 'FLAT'>> {
+  const cacheKey = 'sector:trends';
+  const hit = cacheGet<Record<string, 'UP' | 'DOWN' | 'FLAT'>>(cacheKey);
+  if (hit) return hit;
+
+  const snaps = await fetchSnapshots(SECTOR_ETFS).catch(() => ({} as Record<string, AlpacaSnapshot>));
+  const result: Record<string, 'UP' | 'DOWN' | 'FLAT'> = {};
+  for (const etf of SECTOR_ETFS) {
+    const snap = snaps[etf];
+    if (!snap?.dailyBar || !snap?.prevDailyBar) { result[etf] = 'FLAT'; continue; }
+    const pct = (snap.dailyBar.c - snap.prevDailyBar.c) / snap.prevDailyBar.c;
+    result[etf] = pct > 0.002 ? 'UP' : pct < -0.002 ? 'DOWN' : 'FLAT';
+  }
+  cacheSet(cacheKey, result, 600_000);
+  return result;
 }

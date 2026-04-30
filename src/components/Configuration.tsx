@@ -1,6 +1,9 @@
 import React from 'react';
-import { Activity, AlertTriangle, BarChart, CheckCircle2, Shield, Wallet, Globe, Bell, Plus, TrendingUp } from 'lucide-react';
-import { STRATEGY_CODES, STRATEGY_LABELS, type StrategyId } from '../features/protrade/workflowTypes';
+import { Activity, AlertTriangle, BarChart, CheckCircle2, Shield, Wallet, TrendingUp, Clock, Zap, RefreshCcw, Lock } from 'lucide-react';
+import { getRiskSettings, saveRiskSettings, getRiskSummary, type RiskSettings } from '../lib/riskManager';
+import { getPaperAccount } from '../lib/alpacaBroker';
+import { STRATEGY_LABELS, STRATEGY_CODES, type StrategyId } from '../features/protrade/workflowTypes';
+import { env, hasAlpacaConfig } from '../lib/env';
 
 const PAPER_TRADES_KEY = 'sutra.protrade.paperTrades.v1';
 
@@ -83,6 +86,32 @@ function usePaperStats() {
 
   const recentTrades = [...closed].sort((a, b) => (b.closedAt ?? '').localeCompare(a.closedAt ?? '')).slice(0, 10);
 
+  // ── Intraday analytics ──────────────────────────────────────────────────────
+  const grossWin = closed.filter((t) => (t.pnl ?? 0) > 0).reduce((s, t) => s + (t.pnl ?? 0), 0);
+  const grossLoss = Math.abs(closed.filter((t) => (t.pnl ?? 0) < 0).reduce((s, t) => s + (t.pnl ?? 0), 0));
+  const profitFactor = grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? 99 : 0;
+
+  const avgRR = closed.length > 0
+    ? closed.reduce((s, t) => {
+        const stopDist = Math.abs(t.entry - t.stop);
+        const rr = stopDist > 0 && t.target ? Math.abs(t.target - t.entry) / stopDist : 0;
+        return s + rr;
+      }, 0) / closed.length
+    : 0;
+
+  const withHold = closed.filter((t) => t.openedAt && t.closedAt);
+  const avgHoldMinutes = withHold.length > 0
+    ? Math.round(withHold.reduce((s, t) => s + (new Date(t.closedAt!).getTime() - new Date(t.openedAt).getTime()) / 60000, 0) / withHold.length)
+    : 0;
+
+  // hour-of-day PnL in ET (9–16)
+  const hourlyPnl: Record<number, number> = {};
+  for (const t of closed) {
+    if (!t.closedAt) continue;
+    const h = parseInt(new Date(t.closedAt).toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'America/New_York' }));
+    hourlyPnl[h] = (hourlyPnl[h] ?? 0) + (t.pnl ?? 0);
+  }
+
   // ── Calendar data ───────────────────────────────────────────────────────────
   const dayMap = new Map<string, PaperTradeRecord[]>();
   for (const t of closed) {
@@ -131,7 +160,7 @@ function usePaperStats() {
     }
   }
 
-  return { todayPnl, totalPnl, winRate, wins, losses, closed, open, todayClosed, byStrategy, recentTrades, totalTrades: closed.length, dayStatsMap, equityPoints, maxDrawdown, bestDay, worstDay, streak, streakType };
+  return { todayPnl, totalPnl, winRate, wins, losses, closed, open, todayClosed, byStrategy, recentTrades, totalTrades: closed.length, dayStatsMap, equityPoints, maxDrawdown, bestDay, worstDay, streak, streakType, profitFactor, avgRR, avgHoldMinutes, hourlyPnl };
 }
 
 function pnlColor(v: number) { return v >= 0 ? 'text-emerald-400' : 'text-rose-400'; }
@@ -263,6 +292,41 @@ function KeyStats({ maxDrawdown, bestDay, worstDay, streak, streakType }: {
           <p className="text-[9px] text-slate-600 mt-0.5">{item.sub}</p>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ── Hour-of-Day Heatmap ───────────────────────────────────────────────────────
+
+function HourHeatmap({ hourlyPnl }: { hourlyPnl: Record<number, number> }) {
+  const hours = [9, 10, 11, 12, 13, 14, 15];
+  const vals = hours.map((h) => hourlyPnl[h] ?? 0);
+  const maxAbs = Math.max(1, ...vals.map(Math.abs));
+
+  return (
+    <div className="glass p-5 rounded-xl">
+      <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2 mb-4">
+        <Clock size={14} className="text-amber-400" />Best Hour to Trade (ET)
+      </h3>
+      <div className="flex gap-2">
+        {hours.map((h) => {
+          const pnl = hourlyPnl[h] ?? 0;
+          const intensity = Math.abs(pnl) / maxAbs;
+          const bg = pnl > 0
+            ? `rgba(16,185,129,${0.12 + intensity * 0.5})`
+            : pnl < 0
+              ? `rgba(244,63,94,${0.12 + intensity * 0.5})`
+              : 'rgba(255,255,255,0.04)';
+          const label = h === 12 ? '12P' : h > 12 ? `${h - 12}P` : `${h}A`;
+          return (
+            <div key={h} className="flex-1 rounded-lg border border-white/10 p-2 text-center" style={{ background: bg }}>
+              <p className="text-[9px] font-bold text-slate-500 uppercase">{label}</p>
+              <p className={`text-[10px] font-black mt-1 ${pnlColor(pnl)}`}>{pnl !== 0 ? fmtPnl(pnl) : '--'}</p>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-[9px] text-slate-600 mt-2">Based on closed paper trade exit times in ET</p>
     </div>
   );
 }
@@ -400,16 +464,28 @@ export function PerformanceScreen() {
     { label: 'Total Paper P&L', value: fmtPnl(stats.totalPnl), sub: `${stats.totalTrades} closed trades`, color: pnlColor(stats.totalPnl) },
     { label: 'Win Rate', value: `${stats.winRate}%`, sub: `${stats.wins}W / ${stats.losses}L`, color: 'text-indigo-400' },
     { label: 'Open Positions', value: String(stats.open.length), sub: 'Paper trades active', color: 'text-amber-400' },
+    { label: 'Profit Factor', value: stats.profitFactor >= 99 ? '∞' : stats.profitFactor.toFixed(2), sub: 'Gross win / gross loss', color: stats.profitFactor >= 1.5 ? 'text-emerald-400' : stats.profitFactor >= 1 ? 'text-amber-400' : 'text-rose-400' },
+    { label: 'Avg R:R', value: stats.avgRR > 0 ? `${stats.avgRR.toFixed(2)}R` : '--', sub: 'Target / stop distance', color: 'text-cyan-400' },
+    { label: 'Avg Hold', value: stats.avgHoldMinutes > 0 ? stats.avgHoldMinutes >= 60 ? `${(stats.avgHoldMinutes / 60).toFixed(1)}h` : `${stats.avgHoldMinutes}m` : '--', sub: 'Per closed trade', color: 'text-slate-300' },
   ];
 
   return (
     <div className="flex flex-col gap-5 pb-12">
-      <div className="grid grid-cols-4 gap-4">
-        {summaryCards.map((card) => (
+      <div className="grid grid-cols-4 gap-3">
+        {summaryCards.slice(0, 4).map((card) => (
           <div key={card.label} className="glass p-4 rounded-xl">
             <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">{card.label}</p>
             <p className={`text-2xl font-bold ${card.color}`}>{card.value}</p>
             <p className="text-[10px] text-slate-500 mt-1 uppercase font-bold tracking-tight">{card.sub}</p>
+          </div>
+        ))}
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        {summaryCards.slice(4).map((card) => (
+          <div key={card.label} className="glass p-3 rounded-xl">
+            <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mb-1">{card.label}</p>
+            <p className={`text-xl font-black ${card.color}`}>{card.value}</p>
+            <p className="text-[9px] text-slate-600 mt-0.5">{card.sub}</p>
           </div>
         ))}
       </div>
@@ -424,6 +500,7 @@ export function PerformanceScreen() {
         <>
           <KeyStats maxDrawdown={stats.maxDrawdown} bestDay={stats.bestDay} worstDay={stats.worstDay} streak={stats.streak} streakType={stats.streakType} />
           <EquityCurve points={stats.equityPoints} />
+          <HourHeatmap hourlyPnl={stats.hourlyPnl} />
           <PnlCalendar dayStatsMap={stats.dayStatsMap} />
         </>
       )}
@@ -528,79 +605,212 @@ export function PerformanceScreen() {
 // ── SettingsScreen ────────────────────────────────────────────────────────────
 
 interface SettingsScreenProps {
-  brokerConnected: boolean;
-  brokerLoading: boolean;
+  brokerConnected?: boolean;
+  brokerLoading?: boolean;
   brokerError?: string;
-  onConnectBroker: () => void;
-  onDisconnectBroker: () => void;
+  onConnectBroker?: () => void;
+  onDisconnectBroker?: () => void;
 }
 
-export function SettingsScreen({ brokerConnected, brokerLoading, brokerError = '', onConnectBroker, onDisconnectBroker }: SettingsScreenProps) {
-  const statusText = brokerLoading ? 'Loading' : brokerConnected ? 'Connected (Demo)' : brokerError ? 'Disconnected' : 'Disconnected';
+function NumInput({ label, value, min, max, step = 1, suffix, onChange }: {
+  label: string; value: number; min: number; max: number; step?: number; suffix?: string;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div>
+      <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block mb-1">{label}</label>
+      <div className="flex items-center gap-2">
+        <input
+          type="number" min={min} max={max} step={step} value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-indigo-500/50"
+        />
+        {suffix && <span className="text-[10px] text-slate-500 font-bold shrink-0">{suffix}</span>}
+      </div>
+    </div>
+  );
+}
+
+export function SettingsScreen(_props: SettingsScreenProps) {
+  const [settings, setSettings] = React.useState<RiskSettings>(() => getRiskSettings());
+  const [saved, setSaved] = React.useState(false);
+  const [alpacaEquity, setAlpacaEquity] = React.useState<string | null>(null);
+  const [alpacaLoading, setAlpacaLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    getPaperAccount()
+      .then((a) => setAlpacaEquity(a.equity))
+      .catch(() => setAlpacaEquity(null))
+      .finally(() => setAlpacaLoading(false));
+  }, []);
+
+  function update(patch: Partial<RiskSettings>) {
+    setSettings((s) => ({ ...s, ...patch }));
+    setSaved(false);
+  }
+
+  function save() {
+    saveRiskSettings(settings);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  }
+
+  const riskSummary = getRiskSummary();
+  const keysOk = hasAlpacaConfig();
+  const strategyIds = Object.keys(STRATEGY_LABELS) as StrategyId[];
 
   return (
-    <div className="grid grid-cols-3 gap-6">
-      <div className="col-span-2 space-y-6">
-        <section className="glass p-6 rounded-xl">
-          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2 mb-6">
-            <Wallet size={14} className="text-indigo-400" />Broker Connections
-          </h3>
-          <div className="space-y-3">
-            <div className="p-4 bg-white/5 border border-white/10 rounded-xl flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                <div className="w-10 h-10 bg-indigo-600/20 border border-indigo-500/20 rounded-lg flex items-center justify-center font-black text-indigo-400">T2</div>
-                <div>
-                  <p className="text-xs font-bold text-white tracking-widest">Trading212</p>
-                  <p className={`text-[10px] font-bold uppercase tracking-widest flex items-center gap-1 ${brokerConnected ? 'text-emerald-400' : brokerLoading ? 'text-amber-400' : 'text-slate-500'}`}>{statusText}</p>
-                  {brokerError && !brokerConnected && <p className="mt-1 text-[10px] text-rose-400 max-w-xl">{brokerError}</p>}
-                </div>
-              </div>
-              {brokerConnected || brokerLoading ? (
-                <button onClick={onDisconnectBroker} className="text-[10px] font-bold text-rose-400 uppercase tracking-widest hover:underline">Disconnect</button>
-              ) : (
-                <button onClick={onConnectBroker} className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest hover:underline">Connect</button>
-              )}
-            </div>
-            <div className="p-8 border border-white/5 border-dashed rounded-xl flex items-center justify-center gap-3 text-slate-500 hover:text-slate-300 hover:bg-white/5 cursor-pointer transition-all">
-              <Plus size={16} /><span className="text-xs font-bold uppercase tracking-widest">Connect New Broker</span>
-            </div>
+    <div className="flex flex-col gap-5 pb-12">
+
+      {/* ── Alpaca Connection ── */}
+      <section className="glass p-5 rounded-xl">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2 mb-4">
+          <Wallet size={14} className="text-indigo-400" />Broker — Alpaca Paper
+        </h3>
+        <div className="grid grid-cols-3 gap-3">
+          <div className="bg-white/5 border border-white/10 rounded-lg p-3">
+            <p className="text-[9px] text-slate-500 uppercase font-bold tracking-widest">API Keys</p>
+            <p className={`text-sm font-black mt-1 ${keysOk ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {keysOk ? 'Configured' : 'Missing'}
+            </p>
+            <p className="text-[9px] text-slate-600 mt-0.5">{keysOk ? `${env.alpacaKey.slice(0, 6)}…` : 'Set VITE_ALPACA_KEY + VITE_ALPACA_SECRET in .env'}</p>
           </div>
+          <div className="bg-white/5 border border-white/10 rounded-lg p-3">
+            <p className="text-[9px] text-slate-500 uppercase font-bold tracking-widest">Paper Equity</p>
+            <p className="text-sm font-black mt-1 text-white">
+              {alpacaLoading ? '…' : alpacaEquity ? `$${parseFloat(alpacaEquity).toLocaleString('en-US', { maximumFractionDigits: 0 })}` : 'Offline'}
+            </p>
+            <p className="text-[9px] text-slate-600 mt-0.5">Alpaca paper account</p>
+          </div>
+          <div className="bg-white/5 border border-white/10 rounded-lg p-3">
+            <p className="text-[9px] text-slate-500 uppercase font-bold tracking-widest">Feed</p>
+            <p className="text-sm font-black mt-1 text-cyan-400">IEX Live</p>
+            <p className="text-[9px] text-slate-600 mt-0.5">data.alpaca.markets · free tier</p>
+          </div>
+        </div>
+      </section>
+
+      <div className="grid grid-cols-2 gap-5">
+
+        {/* ── Risk Controls ── */}
+        <section className="glass p-5 rounded-xl space-y-4">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+            <Shield size={14} className="text-emerald-400" />Risk Controls
+          </h3>
+          <NumInput label="Risk per Trade" value={Math.round(settings.riskPerTradePct * 100 * 10) / 10} min={0.5} max={5} step={0.5} suffix="% of account" onChange={(v) => update({ riskPerTradePct: v / 100 })} />
+          <NumInput label="Daily Loss Limit" value={Math.round(settings.dailyLossLimitPct * 100)} min={3} max={20} step={1} suffix="% of account" onChange={(v) => update({ dailyLossLimitPct: v / 100 })} />
+          <NumInput label="Max Concurrent Positions" value={settings.maxPositions} min={1} max={10} step={1} suffix="trades" onChange={(v) => update({ maxPositions: v })} />
+          <NumInput label="Circuit Breaker — Consecutive Losses" value={settings.cbLossThreshold} min={2} max={10} step={1} suffix="losses → 2hr pause" onChange={(v) => update({ cbLossThreshold: v })} />
         </section>
 
-        <section className="glass p-6 rounded-xl">
-          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2 mb-6">
-            <Shield size={14} className="text-emerald-400" />Execution Rules
+        {/* ── Live Risk Status ── */}
+        <section className="glass p-5 rounded-xl space-y-4">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+            <Activity size={14} className="text-amber-400" />Live Risk Status
           </h3>
-          <div className="grid grid-cols-2 gap-6">
-            <div className="space-y-2">
-              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Risk per Trade (%)</label>
-              <input type="number" defaultValue="1.0" className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-xs text-white" />
+          <div className="space-y-2">
+            <div className="flex justify-between items-center py-2 border-b border-white/5">
+              <span className="text-[11px] text-slate-400">Daily P&L</span>
+              <span className={`text-sm font-black ${riskSummary.dailyPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {riskSummary.dailyPnl >= 0 ? '+' : ''}${riskSummary.dailyPnl.toFixed(2)}
+              </span>
             </div>
-            <div className="space-y-4">
-              <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl border border-white/10">
-                <p className="text-[10px] font-bold text-slate-200 uppercase tracking-widest">Auto-execute</p>
-                <div className="w-10 h-5 bg-indigo-600 rounded-full relative p-1">
-                  <div className="absolute right-1 w-3 h-3 bg-white rounded-full" />
-                </div>
-              </div>
+            <div className="flex justify-between items-center py-2 border-b border-white/5">
+              <span className="text-[11px] text-slate-400">Daily Loss Limit</span>
+              <span className="text-sm font-black text-slate-300">${riskSummary.dailyLossLimit.toFixed(0)}</span>
+            </div>
+            <div className="flex justify-between items-center py-2 border-b border-white/5">
+              <span className="text-[11px] text-slate-400">Limit Used</span>
+              {riskSummary.dailyLossLimit > 0 ? (
+                <span className={`text-sm font-black ${Math.abs(Math.min(0, riskSummary.dailyPnl)) / riskSummary.dailyLossLimit > 0.7 ? 'text-rose-400' : 'text-slate-300'}`}>
+                  {(Math.abs(Math.min(0, riskSummary.dailyPnl)) / riskSummary.dailyLossLimit * 100).toFixed(0)}%
+                </span>
+              ) : <span className="text-slate-500 text-sm">--</span>}
+            </div>
+            <div className="pt-1">
+              <p className="text-[9px] text-slate-500 uppercase font-bold tracking-widest mb-1.5">Circuit Breakers</p>
+              {riskSummary.openCbStrategies.length === 0
+                ? <p className="text-[11px] text-emerald-400">All strategies active</p>
+                : riskSummary.openCbStrategies.map((s) => (
+                  <p key={s} className="text-[11px] text-rose-400 flex items-center gap-1">
+                    <Lock size={10} />{s} — paused
+                  </p>
+                ))
+              }
             </div>
           </div>
         </section>
       </div>
 
-      <div className="space-y-6">
-        <section className="glass p-6 rounded-xl">
-          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2 mb-4">
-            <Bell size={14} className="text-amber-400" />Alerts
-          </h3>
-          <div className="space-y-3">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 bg-indigo-500/10 border border-indigo-500/20 rounded-lg flex items-center justify-center text-indigo-400"><Globe size={14} /></div>
-              <div className="flex-1"><p className="text-[10px] font-bold text-white tracking-widest uppercase">Telegram</p></div>
-              <button className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">On</button>
+      {/* ── Strategy On/Off ── */}
+      <section className="glass p-5 rounded-xl">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2 mb-4">
+          <Zap size={14} className="text-fuchsia-400" />Strategy Controls
+        </h3>
+        <div className="grid grid-cols-5 gap-3">
+          {strategyIds.map((id) => {
+            const disabled = settings.disabledStrategies.includes(id);
+            return (
+              <button
+                key={id}
+                onClick={() => update({
+                  disabledStrategies: disabled
+                    ? settings.disabledStrategies.filter((s) => s !== id)
+                    : [...settings.disabledStrategies, id],
+                })}
+                className={`p-3 rounded-xl border text-left transition-all ${
+                  disabled
+                    ? 'border-white/10 bg-white/3 text-slate-600'
+                    : 'border-indigo-500/30 bg-indigo-500/10 text-indigo-300'
+                }`}
+              >
+                <p className="text-[10px] font-black uppercase tracking-widest">{STRATEGY_CODES[id]}</p>
+                <p className="text-[10px] mt-0.5 leading-tight">{STRATEGY_LABELS[id]}</p>
+                <p className={`text-[9px] font-bold mt-1 uppercase ${disabled ? 'text-slate-600' : 'text-emerald-400'}`}>
+                  {disabled ? 'Disabled' : 'Active'}
+                </p>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* ── Session Rules ── */}
+      <section className="glass p-5 rounded-xl">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2 mb-3">
+          <Clock size={14} className="text-cyan-400" />Session Rules (Read-only)
+        </h3>
+        <div className="grid grid-cols-3 gap-2 text-[11px] text-slate-400">
+          {[
+            'Trade window: 10:00 AM – 4:00 PM ET',
+            'Opening blackout: 9:30 – 10:00 AM ET',
+            'Min R:R ≥ 1.8 for Trade Ready',
+            'Min RVOL ≥ 1.0 for all strategies',
+            'VWAP + 5m + 15m must align for qualified',
+            'Price range: $1 – $1,500',
+            'ATR% range: 1.5% – 8% (beta filter)',
+            'Dollar volume ≥ $3M',
+            'Score ≥ 65 required for qualified',
+          ].map((r) => (
+            <div key={r} className="flex items-start gap-1.5">
+              <CheckCircle2 size={10} className="text-emerald-500 mt-0.5 shrink-0" />
+              <span>{r}</span>
             </div>
-          </div>
-        </section>
+          ))}
+        </div>
+      </section>
+
+      {/* ── Save ── */}
+      <div className="flex justify-end">
+        <button
+          onClick={save}
+          className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${
+            saved ? 'bg-emerald-600 text-white' : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+          }`}
+        >
+          <RefreshCcw size={12} className={saved ? '' : ''} />
+          {saved ? 'Saved!' : 'Save Settings'}
+        </button>
       </div>
     </div>
   );
