@@ -74,18 +74,37 @@ export function Sidebar({ activeScreen, setActiveScreen, collapsed, onToggleColl
   );
 }
 
+function useEtClock() {
+  const [tick, setTick] = React.useState(() => new Date());
+  React.useEffect(() => {
+    const id = setInterval(() => setTick(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const timeStr = tick.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
+  const h = parseInt(tick.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
+  const m = parseInt(tick.toLocaleString('en-US', { timeZone: 'America/New_York', minute: '2-digit' }), 10);
+  const mins = h * 60 + m;
+  const isWeekend = tick.toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short' }).startsWith('S');
+  let session: string;
+  let sessionColor: string;
+  if (isWeekend || mins < 4 * 60 || mins >= 20 * 60) { session = 'CLOSED'; sessionColor = 'text-slate-500'; }
+  else if (mins < 9 * 60 + 30) { session = 'PRE'; sessionColor = 'text-amber-400'; }
+  else if (mins < 16 * 60) { session = 'RTH'; sessionColor = 'text-emerald-400'; }
+  else { session = 'AFTER'; sessionColor = 'text-amber-400'; }
+  return { timeStr, session, sessionColor };
+}
+
 export function TopBar({ brokerStatus, scannerStatus }: { brokerStatus: string; scannerStatus: string }) {
   const [isRunning, setIsRunning] = React.useState(true);
   const connected = brokerStatus.toLowerCase().includes('connected');
+  const { timeStr, session, sessionColor } = useEtClock();
 
   return (
     <header className="h-14 border-b border-white/5 glass flex items-center justify-between px-6 z-10 shrink-0">
       <div className="flex items-center gap-8">
-        <div className="flex items-center gap-8">
-          <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
-            <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
-            Broker: <span className={`${connected ? 'text-emerald-400' : 'text-amber-400'} font-bold uppercase tracking-wider`}>{brokerStatus}</span>
-          </div>
+        <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
+          <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
+          Broker: <span className={`${connected ? 'text-emerald-400' : 'text-amber-400'} font-bold uppercase tracking-wider`}>{brokerStatus}</span>
         </div>
       </div>
 
@@ -94,8 +113,14 @@ export function TopBar({ brokerStatus, scannerStatus }: { brokerStatus: string; 
           <div className="w-2 h-2 rounded-full bg-emerald-500 status-pulse"></div>
           <span className="text-[10px] uppercase tracking-widest font-bold text-slate-300">Scanner: {scannerStatus}</span>
         </div>
-        
-        <button 
+
+        {/* Live ET clock — always visible top right */}
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-white/10 bg-white/5">
+          <span className={`text-[10px] font-black uppercase tracking-widest ${sessionColor}`}>{session}</span>
+          <span className="text-[10px] font-mono font-bold text-white tabular-nums">{timeStr} ET</span>
+        </div>
+
+        <button
           onClick={() => setIsRunning(!isRunning)}
           className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 text-[10px] uppercase font-bold px-3 py-1.5 rounded-full border border-rose-500/20 transition-all"
         >

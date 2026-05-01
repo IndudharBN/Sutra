@@ -153,3 +153,14 @@ export function getRiskSummary() {
       .map(([name]) => name),
   };
 }
+
+export function getDailyStartBalance(): number {
+  return load().dailyStartBalance || 0;
+}
+
+export function getPausedStrategies(): Array<{ name: string; minsLeft: number }> {
+  const state = load();
+  return Object.entries(state.strategyCb)
+    .filter(([, cb]) => cb.pauseUntil > Date.now())
+    .map(([name, cb]) => ({ name, minsLeft: Math.ceil((cb.pauseUntil - Date.now()) / 60_000) }));
+}

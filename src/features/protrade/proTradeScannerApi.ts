@@ -235,7 +235,11 @@ function buildRowFromAlpaca(
   const daily = (candleSet['1d'] || []).slice(-80);
 
   const price = meta.price;
-  const direction = computeDirection(five); // matches backtest: intraday 5m bias, not flat 1h
+  // EMA crossover on 5m candles; falls back to gap direction when < 22 bars (pre-market / early RTH)
+  const _emaDir = computeDirection(five);
+  const direction: 'BULL' | 'BEAR' | 'NEUTRAL' = _emaDir !== 'NEUTRAL'
+    ? _emaDir
+    : meta.gapPct > 0.5 ? 'BULL' : meta.gapPct < -0.5 ? 'BEAR' : 'NEUTRAL';
   const atr20 = computeAtr20(daily);
   const atrPct = price > 0 ? (atr20 / price) * 100 : 0;
   const dollarVolM = (price * meta.todayVolume) / 1_000_000;
@@ -379,11 +383,13 @@ export async function fetchHotSetSnapshot(symbols: string[], spyChangePct: numbe
 
 // ── Main fetch ────────────────────────────────────────────────────────────────
 
-export async function fetchProTradeScannerSnapshot(): Promise<ProTradeSnapshot> {
+export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = []): Promise<ProTradeSnapshot> {
   const candidates = DEFAULT_LIVE_UNIVERSE.filter((s) => !s.endsWith('.L'));
 
   const metas = await fetchUniverseMeta(candidates);
-  const top = selectTopSymbols(metas, 100);
+  const scored = selectTopSymbols(metas, 100);
+  // Guarantee pinned watchlist symbols are always scanned regardless of score rank
+  const top = [...new Set([...scored, ...pinnedSymbols])];
 
   const [bars1m, bars5m, bars15m, bars1h, bars1d, newsFlags, sectorTrends, spyBars] = await Promise.all([
     fetchBars(top, '1m'),

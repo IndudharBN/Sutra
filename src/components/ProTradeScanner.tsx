@@ -2,7 +2,7 @@ import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
 import { fetchTrading212Snapshot } from '../features/brokers/trading212LiveApi';
 import { placePaperBracketOrder, closeAllPaperPositions, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
-import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance } from '../lib/riskManager';
+import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, getDailyStartBalance } from '../lib/riskManager';
 import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
 import {
   STRATEGY_CODES,
@@ -88,7 +88,7 @@ interface PaperTrade {
   strategyName: string;
   direction: 'BULL' | 'BEAR' | 'NEUTRAL';
   status: 'Open' | 'Closed';
-  outcome: 'Open' | 'Target' | 'Stop' | 'Manual';
+  outcome: 'Open' | 'Target' | 'T1 Profit' | 'Stop' | 'Manual';
   entry: number;
   stop: number;
   target: number;
@@ -158,6 +158,10 @@ function normalizeSettingNumber(value: number, fallback = 0) {
 
 function fmtMoney(value?: number | null) {
   return value && Number.isFinite(value) ? `$${value.toFixed(2)}` : '--';
+}
+
+function toETTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
 }
 
 function fmtPct(value: number) {
@@ -293,8 +297,11 @@ function paperTrailingStop(trade: PaperTrade) {
 function monitorPaperTrades(trades: PaperTrade[], rows: ProTradeRow[]) {
   const priceBySymbol = new Map(rows.map((row) => [baseSymbol(row.symbol), row.price]));
   let changed = false;
+  const now = Date.now();
   const next = trades.map((trade) => {
     if (trade.status !== 'Open') return trade;
+    // Grace period: don't evaluate stop/target within 60s of opening (prevents same-tick closure)
+    if (now - new Date(trade.openedAt).getTime() < 60_000) return trade;
     const current = priceBySymbol.get(baseSymbol(trade.symbol));
     if (!current) return trade;
     const target1 = paperTarget1(trade);
@@ -317,7 +324,9 @@ function monitorPaperTrades(trades: PaperTrade[], rows: ProTradeRow[]) {
     }
     if (hitStop) {
       changed = true;
-      return closePaperTrade(trade, trailingStop, trade.t1HitAt ? 'Target' : 'Stop');
+      // Exit at actual market price (current), not the stop level — more realistic fill
+      // After T1: trailing stop was at T1 price; exit here is a profit, not a loss
+      return closePaperTrade(trade, current, trade.t1HitAt ? 'T1 Profit' : 'Stop');
     }
     return trade;
   });
@@ -371,6 +380,28 @@ function etMinutesNow(): number {
   const h = parseInt(now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
   const m = parseInt(now.toLocaleString('en-US', { timeZone: 'America/New_York', minute: '2-digit' }), 10);
   return h * 60 + m;
+}
+
+function playTradeReadyAlert() {
+  try {
+    const ACtx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!ACtx) return;
+    const ctx = new ACtx();
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.15, ctx.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.6);
+    gain.connect(ctx.destination);
+    [523, 659, 784].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, ctx.currentTime + i * 0.13);
+      osc.connect(gain);
+      osc.start(ctx.currentTime + i * 0.13);
+      osc.stop(ctx.currentTime + i * 0.13 + 0.2);
+    });
+    setTimeout(() => void ctx.close().catch(() => {}), 800);
+  } catch { /* browser may block audio before interaction */ }
 }
 
 function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT_PROTRADE_SETTINGS, trades: PaperTrade[] = []) {
@@ -714,9 +745,9 @@ function WorkflowTable({
                         <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">{orderedTrade ? orderedTrade.quantity.toFixed(4) : '--'}</td>
                         <td className="py-3 px-3 border-r border-white/5 text-right text-white">{orderedTrade ? fmtMoney(currentPrice) : '--'}</td>
                         <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">{orderedTrade ? fmtMoney(orderedTrade.notional) : '--'}</td>
-                        <td className="py-3 px-3 border-r border-white/5 text-slate-400">{orderedTrade ? new Date(orderedTrade.openedAt).toLocaleString() : '--'}</td>
+                        <td className="py-3 px-3 border-r border-white/5 text-slate-400">{orderedTrade ? toETTime(orderedTrade.openedAt) + ' ET' : '--'}</td>
                         <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">{orderedTrade?.exitPrice ? fmtMoney(orderedTrade.exitPrice) : '--'}</td>
-                        <td className="py-3 px-3 border-r border-white/5 text-slate-400">{orderedTrade?.closedAt ? new Date(orderedTrade.closedAt).toLocaleString() : '--'}</td>
+                        <td className="py-3 px-3 border-r border-white/5 text-slate-400">{orderedTrade?.closedAt ? toETTime(orderedTrade.closedAt) + ' ET' : '--'}</td>
                         <td className={`py-3 px-3 border-r border-white/5 text-right font-black ${(livePnl?.pnl || 0) >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
                           {livePnl ? `${livePnl.pnl >= 0 ? '+' : ''}$${livePnl.pnl.toFixed(2)}` : '--'}
                         </td>
@@ -924,19 +955,39 @@ function DecisionPanel({
   );
 }
 
+function estimatedExitPrice(trade: PaperTrade): number {
+  if (trade.exitPrice && trade.exitPrice !== trade.entry) return trade.exitPrice;
+  if (trade.outcome === 'Target') return trade.target;
+  if (trade.outcome === 'T1 Profit') return trade.target1 ?? trade.target;
+  return trade.stop; // Stop or Manual — worst case: exited at stop level
+}
+
 function PaperTradeMonitor({
   trades,
   rows,
   onCloseTrade,
+  onClearClosed,
+  onFixZeroPnl,
+  realDayPnl,
 }: {
   trades: PaperTrade[];
   rows: ProTradeRow[];
   onCloseTrade: (trade: PaperTrade, price: number) => void;
+  onClearClosed: () => void;
+  onFixZeroPnl: () => void;
+  realDayPnl: number | null;
 }) {
   const priceBySymbol = new Map(rows.map((row) => [baseSymbol(row.symbol), row.price]));
   const open = trades.filter((trade) => trade.status === 'Open');
   const closed = trades.filter((trade) => trade.status === 'Closed');
-  const totalPnl = trades.reduce((total, trade) => total + (trade.pnl || 0), 0);
+  // Use Alpaca equity delta as ground truth; fall back to estimated if not yet initialised
+  const totalPnl = realDayPnl !== null ? realDayPnl : trades.reduce((total, trade) => {
+    if (trade.status === 'Open') return total;
+    const pnl = (!trade.pnl || trade.pnl === 0)
+      ? paperPnl(trade, estimatedExitPrice(trade)).pnl
+      : trade.pnl;
+    return total + pnl;
+  }, 0);
 
   return (
     <div className="glass rounded-xl overflow-hidden">
@@ -946,9 +997,21 @@ function PaperTradeMonitor({
           <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200">Paper Trade Monitor</h2>
           <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{open.length} open / {closed.length} closed</span>
         </div>
-        <span className={`text-xs font-black ${totalPnl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
-          Total P&L {totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}
-        </span>
+        <div className="flex items-center gap-3">
+          <span className={`text-xs font-black ${totalPnl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
+            Total P&L {totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}
+          </span>
+          {closed.some((t) => !t.pnl || t.pnl === 0) && (
+            <button onClick={onFixZeroPnl} className="text-[10px] uppercase font-black tracking-widest px-2 py-1 rounded border border-amber-500/30 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 transition-colors">
+              Fix $0 P&L
+            </button>
+          )}
+          {closed.length > 0 && (
+            <button onClick={onClearClosed} className="text-[10px] uppercase font-black tracking-widest px-2 py-1 rounded border border-slate-600/40 bg-slate-800/30 text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-colors">
+              Clear History
+            </button>
+          )}
+        </div>
       </div>
       <div className="overflow-auto">
         <table className="w-full min-w-[1120px] text-left border-collapse">
@@ -972,11 +1035,19 @@ function PaperTradeMonitor({
           </thead>
           <tbody className="font-mono text-[11px]">
             {trades.map((trade) => {
-              const current = priceBySymbol.get(baseSymbol(trade.symbol)) || trade.exitPrice || trade.entry;
-              const livePnl = trade.status === 'Open' ? paperPnl(trade, current) : { pnl: trade.pnl || 0, pnlPercent: trade.pnlPercent || 0 };
+              const livePrice = priceBySymbol.get(baseSymbol(trade.symbol)) || trade.entry;
+              // For closed trades: use exit price; fall back to estimated stop/target price (fixes $0.00 display)
+              const closedExitPrice = trade.exitPrice && trade.exitPrice !== trade.entry
+                ? trade.exitPrice
+                : estimatedExitPrice(trade);
+              const current = trade.status === 'Open' ? livePrice : closedExitPrice;
+              const livePnl = trade.status === 'Open'
+                ? paperPnl(trade, livePrice)
+                : { pnl: trade.pnl && trade.pnl !== 0 ? trade.pnl : paperPnl(trade, closedExitPrice).pnl,
+                    pnlPercent: trade.pnlPercent && trade.pnlPercent !== 0 ? trade.pnlPercent : paperPnl(trade, closedExitPrice).pnlPercent };
               return (
                 <tr key={trade.id} className="border-b border-white/5 hover:bg-white/5">
-                  <td className="py-3 px-3 border-r border-white/5 text-slate-400">{new Date(trade.openedAt).toLocaleTimeString()}</td>
+                  <td className="py-3 px-3 border-r border-white/5 text-slate-400">{toETTime(trade.openedAt)} ET</td>
                   <td className="py-3 px-3 border-r border-white/5">
                     <div className="font-black text-white">{trade.symbol}</div>
                     <div className="text-[10px] text-slate-500 uppercase truncate max-w-[160px]">{trade.company}</div>
@@ -991,7 +1062,15 @@ function PaperTradeMonitor({
                   <td className="py-3 px-3 border-r border-white/5 text-right text-amber-300">{fmtMoney(paperTrailingStop(trade))}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">{trade.quantity.toFixed(4)}</td>
                   <td className="py-3 px-3 border-r border-white/5">
-                    <span className={`px-2 py-1 rounded border text-[10px] uppercase tracking-widest font-black ${trade.status === 'Open' ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300' : trade.outcome === 'Target' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-rose-500/30 bg-rose-500/10 text-rose-300'}`}>
+                    <span className={`px-2 py-1 rounded border text-[10px] uppercase tracking-widest font-black ${
+                      trade.status === 'Open'
+                        ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
+                        : trade.outcome === 'Target' || trade.outcome === 'T1 Profit'
+                          ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                          : trade.outcome === 'Stop'
+                            ? 'border-rose-500/30 bg-rose-500/10 text-rose-300'
+                            : 'border-slate-600/40 bg-slate-800/30 text-slate-400'
+                    }`}>
                       {trade.status === 'Open' ? (trade.t1HitAt ? 'T1 Hit' : 'Open') : trade.outcome}
                     </span>
                   </td>
@@ -1008,7 +1087,7 @@ function PaperTradeMonitor({
                         <span className="text-[10px] uppercase tracking-widest font-black">Close</span>
                       </button>
                     ) : (
-                      <span className="text-slate-600">{trade.closedAt ? new Date(trade.closedAt).toLocaleTimeString() : '--'}</span>
+                      <span className="text-slate-600">{trade.closedAt ? toETTime(trade.closedAt) + ' ET' : '--'}</span>
                     )}
                   </td>
                 </tr>
@@ -1202,7 +1281,7 @@ function WatchlistHistoryPanel() {
                     <td className="py-2 px-3 border-r border-white/5 text-slate-500">{i === 0 ? record.date : ''}</td>
                     <td className="py-2 px-3 border-r border-white/5 font-black text-white">{r.symbol}</td>
                     <td className="py-2 px-3 border-r border-white/5 text-right text-slate-300">{r.closingPrice > 0 ? `$${r.closingPrice.toFixed(2)}` : '--'}</td>
-                    <td className={`py-2 px-3 border-r border-white/5 font-black ${r.outcome === 'Target' ? 'text-emerald-300' : r.outcome === 'Stop' ? 'text-rose-300' : 'text-slate-500'}`}>{r.outcome}</td>
+                    <td className={`py-2 px-3 border-r border-white/5 font-black ${r.outcome === 'Target' || r.outcome === 'T1 Profit' ? 'text-emerald-300' : r.outcome === 'Stop' ? 'text-rose-300' : 'text-slate-500'}`}>{r.outcome}</td>
                     <td className={`py-2 px-3 text-right font-black ${r.pnl > 0 ? 'text-emerald-300' : r.pnl < 0 ? 'text-rose-300' : 'text-slate-500'}`}>
                       {r.pnl !== 0 ? `${r.pnl >= 0 ? '+' : ''}$${r.pnl.toFixed(2)}` : '--'}
                     </td>
@@ -1430,7 +1509,7 @@ export function ProTradeScannerScreen() {
       else setLoading(true);
       setError('');
       const [nextSnapshot, nextBroker, acct] = await Promise.all([
-        fetchProTradeScannerSnapshot(),
+        fetchProTradeScannerSnapshot(watchlist.symbols),
         fetchTrading212Snapshot({ fast: true }).catch(() => null),
         getPaperAccount().catch(() => null),
       ]);
@@ -1467,9 +1546,11 @@ export function ProTradeScannerScreen() {
       if (document.hidden) return;
       const cur = snapshotRef.current;
       if (!cur) return;
-      const hotSymbols = cur.rows
-        .filter((r) => r.workflowStage === 'forming' || r.workflowStage === 'confirmed' || r.workflowStage === 'locked')
+      const hotFromStage = cur.rows
+        .filter((r) => r.workflowStage === 'forming' || r.workflowStage === 'confirmed' || r.workflowStage === 'locked' || r.workflowStage === 'trade_ready')
         .map((r) => r.symbol);
+      // Always keep watchlist symbols in the hot set so they're never dropped from monitoring
+      const hotSymbols = [...new Set([...hotFromStage, ...watchlist.symbols])];
       if (!hotSymbols.length) return;
       void fetchHotSetSnapshot(hotSymbols, 0).then((fresh) => {
         if (!fresh.length) return;
@@ -1482,6 +1563,21 @@ export function ProTradeScannerScreen() {
     }, 20_000);
     return () => window.clearInterval(id);
   }, []);
+
+  // Refresh account equity every 15s for live HUD updates
+  React.useEffect(() => {
+    const id = window.setInterval(async () => {
+      if (document.hidden) return;
+      try {
+        const acct = await getPaperAccount();
+        const bal = parseFloat(acct.equity);
+        if (bal > 0) { setAccountBalance(bal); initDailyBalance(bal); }
+      } catch { /* best-effort */ }
+    }, 15_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const alertedTradeReadyRef = React.useRef<Set<string>>(new Set());
 
   const orderedSymbols = React.useMemo(() => buildOrderedSymbols(brokerSnapshot), [brokerSnapshot]);
   const rows = React.useMemo(() => withOrderedStage(snapshot?.rows || [], orderedSymbols, paperTrades), [snapshot?.rows, orderedSymbols, paperTrades]);
@@ -1505,6 +1601,14 @@ export function ProTradeScannerScreen() {
   const strategyIds = Object.keys(STRATEGY_LABELS) as StrategyId[];
   const lastUpdated = snapshot?.fetchedAt ? new Date(snapshot.fetchedAt) : null;
   const stale = rows.some((row) => row.dataStatus.stale);
+
+  // Sound alert when a new stock reaches trade_ready
+  React.useEffect(() => {
+    const newOnes = rows.filter((r) => r.workflowStage === 'trade_ready' && !alertedTradeReadyRef.current.has(r.symbol));
+    if (!newOnes.length) return;
+    newOnes.forEach((r) => alertedTradeReadyRef.current.add(r.symbol));
+    playTradeReadyAlert();
+  }, [rows]);
 
   function lockWatchlist(symbols: string[]) {
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -1577,8 +1681,12 @@ export function ProTradeScannerScreen() {
         const alpacaPositions = await getPaperPositions();
         const alpacaSymbols = new Set(alpacaPositions.map((p) => p.symbol.toUpperCase()));
 
-        // Trades whose Alpaca position is gone — bracket filled at stop or target
-        const closedInAlpaca = openTrades.filter((t) => !alpacaSymbols.has(t.symbol.toUpperCase()));
+        // Grace: ignore trades opened in the last 2 minutes — Alpaca position may not be registered yet
+        const SYNC_GRACE_MS = 120_000;
+        const closedInAlpaca = openTrades.filter((t) =>
+          !alpacaSymbols.has(t.symbol.toUpperCase()) &&
+          Date.now() - new Date(t.openedAt).getTime() >= SYNC_GRACE_MS
+        );
         if (!closedInAlpaca.length) return;
 
         const closedUpdates = await Promise.all(
@@ -1587,9 +1695,11 @@ export function ProTradeScannerScreen() {
             let exitPrice: number | null = null;
             let closedAt: string | undefined;
             try {
-              const filled = await getRecentFilledOrders(trade.symbol);
-              // Pick the most recent filled order (stop_loss or take_profit leg)
-              const leg = filled[0];
+              const filled = (await getRecentFilledOrders(trade.symbol))
+                // Only fills that happened AFTER this trade opened — avoids stale fills from prior sessions
+                .filter((o) => o.filled_at && o.filled_at > trade.openedAt);
+              // Pick the most recent exit leg (stop_loss or take_profit — skip the entry fill)
+              const leg = filled.find((o) => o.side !== (trade.direction === 'BULL' ? 'buy' : 'sell')) ?? filled[0];
               if (leg?.filled_avg_price) {
                 exitPrice = parseFloat(leg.filled_avg_price);
                 closedAt = leg.filled_at ?? undefined;
@@ -1598,17 +1708,16 @@ export function ProTradeScannerScreen() {
               // fall through to row price fallback
             }
 
-            // Fallback: current scan price
-            if (!exitPrice) {
-              const row = rows.find((r) => r.symbol === trade.symbol);
-              exitPrice = row?.price ?? null;
-            }
+            // No real Alpaca fill found — don't fabricate a price; keep trade Open
+            // The price-based monitor will close it when it detects stop/target breach
             if (!exitPrice) return null;
 
             // Determine outcome from exit vs stop/target
             const toStop = Math.abs(exitPrice - trade.stop);
             const toTarget = Math.abs(exitPrice - trade.target);
-            const outcome: PaperTrade['outcome'] = toStop <= toTarget ? 'Stop' : 'Target';
+            const outcome: PaperTrade['outcome'] = toStop <= toTarget
+              ? (trade.t1HitAt ? 'T1 Profit' : 'Stop')
+              : 'Target';
             return closePaperTrade(trade, exitPrice, outcome, closedAt);
           })
         );
@@ -1627,7 +1736,7 @@ export function ProTradeScannerScreen() {
         // Sync is best-effort — never block the UI
       }
     })();
-  }, [rows]); // runs after each scan refresh
+  }, [snapshot?.rows]); // scan data only — must NOT depend on rows/paperTrades or sync fires on every trade open
 
   React.useEffect(() => {
     if (!snapshot?.rows.length) return;
@@ -1755,6 +1864,19 @@ export function ProTradeScannerScreen() {
       .catch((err: unknown) => console.warn('Alpaca paper order skipped:', err instanceof Error ? err.message : err));
   }
 
+  function clearClosedTrades() {
+    setPaperTrades((current) => current.filter((t) => t.status === 'Open'));
+  }
+
+  function fixZeroPnlTrades() {
+    setPaperTrades((current) => current.map((trade) => {
+      if (trade.status !== 'Closed' || (trade.pnl && trade.pnl !== 0)) return trade;
+      const exitPrice = estimatedExitPrice(trade);
+      const { pnl, pnlPercent } = paperPnl(trade, exitPrice);
+      return { ...trade, exitPrice, pnl, pnlPercent };
+    }));
+  }
+
   function manualClosePaperTrade(trade: PaperTrade, price: number) {
     const closed = closePaperTrade(trade, price, 'Manual');
     setPaperTrades((current) => current.map((item) => item.id === trade.id ? closed : item));
@@ -1765,10 +1887,136 @@ export function ProTradeScannerScreen() {
 
   return (
     <div className="flex-1 flex flex-col gap-5 min-h-0">
+      {/* === Trading HUD — critical session metrics === */}
+      {(() => {
+        const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        const todayClosed = paperTrades.filter((t) => t.status === 'Closed' && new Date(t.openedAt).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === todayET);
+        // Use outcome label — not pnl — to determine wins/losses (pnl may be stale/zero from prior bugs)
+        const todayWins = todayClosed.filter((t) => t.outcome === 'Target' || t.outcome === 'T1 Profit').length;
+        const todayLosses = todayClosed.filter((t) => t.outcome === 'Stop' || t.outcome === 'Manual').length;
+        const priceMap = new Map(rows.map((r) => [baseSymbol(r.symbol), r.price]));
+        const openTrades = paperTrades.filter((t) => t.status === 'Open');
+        const openPnl = openTrades.reduce((sum, t) => {
+          const px = priceMap.get(baseSymbol(t.symbol)) ?? t.entry;
+          return sum + paperPnl(t, px).pnl;
+        }, 0);
+        // Use Alpaca equity as ground truth for closed P&L — more accurate than stale localStorage pnl fields
+        const startBalance = getDailyStartBalance();
+        const closedPnl = startBalance > 0 ? (accountBalance - startBalance) - openPnl : 0;
+        const hudPnl = closedPnl + openPnl;
+        const totalClosed = todayWins + todayLosses;
+        const wr = totalClosed > 0 ? Math.round((todayWins / totalClosed) * 100) : 0;
+        const riskSummary = getRiskSummary();
+        const usedRisk = Math.max(0, -riskSummary.dailyPnl);
+        const riskPct = riskSummary.dailyLossLimit > 0 ? Math.min(100, (usedRisk / riskSummary.dailyLossLimit) * 100) : 0;
+        const pausedStrats = getPausedStrategies();
+        const etMins = etMinutesNow();
+        const cutoffMins = 15 * 60 + 50;
+        const minsLeft = cutoffMins - etMins;
+        const scanAge = snapshot?.fetchedAt ? Math.floor((Date.now() - new Date(snapshot.fetchedAt).getTime()) / 1000) : 0;
+        const tradeReadyCount = rows.filter((r) => r.workflowStage === 'trade_ready').length;
+        const formingCount = rows.filter((r) => r.workflowStage === 'forming').length;
+        return (
+          <div className="shrink-0 rounded-xl border border-white/5 bg-white/[0.025] px-4 py-3 space-y-3">
+            {/* Row 1: P&L · Record · Equity · Scan health */}
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+              <div>
+                <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">Today P&L</p>
+                <p className={`text-xl font-black font-mono tabular-nums leading-none ${hudPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {hudPnl >= 0 ? '+' : ''}{hudPnl.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                </p>
+              </div>
+              <div>
+                <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">Record</p>
+                <p className="text-sm font-mono leading-none">
+                  <span className="text-emerald-400 font-black">{todayWins}W</span>
+                  <span className="text-slate-600 mx-1">/</span>
+                  <span className="text-rose-400 font-black">{todayLosses}L</span>
+                  {totalClosed > 0 && <span className="text-slate-400 text-xs ml-2">{wr}% WR</span>}
+                </p>
+              </div>
+              <div>
+                <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">Equity</p>
+                <p className="text-sm font-mono font-bold text-white leading-none">${accountBalance.toLocaleString()}</p>
+              </div>
+              <div className="ml-auto text-right">
+                <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">Scan Health</p>
+                <p className="text-xs font-mono text-slate-300 leading-none">
+                  {formingCount} forming ·{' '}
+                  <span className={tradeReadyCount > 0 ? 'text-emerald-400 font-black' : 'text-slate-400'}>
+                    {tradeReadyCount} ready
+                  </span>
+                  {' '}· {scanAge}s ago
+                </p>
+              </div>
+            </div>
+
+            {/* Row 2: Risk bar · Circuit breaker · Entry cutoff */}
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+              <div className="flex-1 min-w-[160px] max-w-xs">
+                <div className="flex justify-between text-[9px] uppercase tracking-widest font-black mb-1">
+                  <span className="text-slate-500">Daily Risk</span>
+                  <span className={riskPct > 80 ? 'text-rose-400' : riskPct > 50 ? 'text-amber-400' : 'text-slate-400'}>
+                    ${usedRisk.toFixed(0)} / ${riskSummary.dailyLossLimit.toFixed(0)}
+                  </span>
+                </div>
+                <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-500 ${riskPct > 80 ? 'bg-rose-500' : riskPct > 50 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                    style={{ width: `${riskPct}%` }}
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {pausedStrats.length > 0 ? (
+                  <>
+                    <span className="text-[9px] uppercase tracking-widest text-rose-400 font-black">CB Paused:</span>
+                    {pausedStrats.map((s) => (
+                      <span key={s.name} className="px-2 py-0.5 rounded border border-rose-500/30 bg-rose-500/10 text-rose-300 text-[9px] font-black uppercase">
+                        {s.name} {s.minsLeft}m
+                      </span>
+                    ))}
+                  </>
+                ) : (
+                  <span className="text-[9px] uppercase tracking-widest text-emerald-400 font-black">● All strategies active</span>
+                )}
+              </div>
+              {!stale && etMins >= 15 * 60 && minsLeft > 0 && (
+                <span className="ml-auto px-3 py-1 rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-300 text-[10px] font-black uppercase tracking-widest">
+                  Entry closes in {minsLeft}m
+                </span>
+              )}
+              {!stale && etMins >= cutoffMins && etMins < 16 * 60 + 35 && (
+                <span className="ml-auto px-3 py-1 rounded-full border border-rose-500/30 bg-rose-500/10 text-rose-300 text-[10px] font-black uppercase tracking-widest">
+                  Entry cutoff — EOD in {Math.max(0, 16 * 60 + 32 - etMins)}m
+                </span>
+              )}
+            </div>
+
+            {/* Row 3: Open positions mini-strip */}
+            {openTrades.length > 0 && (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-2 border-t border-white/5">
+                <span className="text-[9px] uppercase tracking-widest text-slate-500 font-black shrink-0">Live:</span>
+                {openTrades.map((t) => {
+                  const px = priceMap.get(baseSymbol(t.symbol)) ?? t.entry;
+                  const { pnl } = paperPnl(t, px);
+                  const up = pnl >= 0;
+                  return (
+                    <span key={t.id} className={`text-[11px] font-mono font-black tabular-nums ${up ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {baseSymbol(t.symbol)} {up ? '▲' : '▼'} {pnl >= 0 ? '+' : ''}${Math.abs(pnl).toFixed(0)}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       <div className="flex flex-wrap items-start justify-between gap-4 shrink-0">
         <div>
           <h2 className="text-xl font-bold text-white tracking-tight">ProTrade Workflow</h2>
-          <p className="mt-2 text-xs text-slate-500 max-w-4xl leading-relaxed">
+          <p className="mt-2 text-xs text-slate-300 max-w-4xl leading-relaxed">
             Tickers move from raw candidates → forming → confirmed → trade ready → ordered. Data from Alpaca IEX (live). Paper trades auto-open when a setup reaches Trade Ready and are mirrored to your Alpaca paper account.
           </p>
           <div className="mt-3 flex flex-wrap gap-2 text-[10px] uppercase tracking-widest font-black">
@@ -1786,9 +2034,15 @@ export function ProTradeScannerScreen() {
             <span className="px-3 py-1 rounded-full border border-slate-600/40 text-slate-400 bg-slate-800/30">
               Auto refresh: {activeStage === 'forming' || activeStage === 'confirmed' || activeStage === 'locked' || activeStage === 'trade_ready' ? '15s hot set' : '60s'}
             </span>
-            <span className="px-3 py-1 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10">
-              Paper auto-order: Locked
-            </span>
+            {(() => {
+              const mins = etMinutesNow();
+              const cutoff = mins >= 15 * 60 + 50;
+              const lossLimitHit = !checkDailyLossLimit(accountBalance).ok;
+              if (stale) return <span className="px-3 py-1 rounded-full border border-slate-600/40 text-slate-400 bg-slate-800/30">Auto-order: Market Closed</span>;
+              if (lossLimitHit) return <span className="px-3 py-1 rounded-full border border-rose-500/30 text-rose-300 bg-rose-500/10">Auto-order: Daily Limit Hit</span>;
+              if (cutoff) return <span className="px-3 py-1 rounded-full border border-amber-500/30 text-amber-300 bg-amber-500/10">Auto-order: Entry Cutoff 3:50 PM</span>;
+              return <span className="px-3 py-1 rounded-full border border-emerald-500/20 text-emerald-300 bg-emerald-500/10">Auto-order: Active</span>;
+            })()}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -1902,7 +2156,14 @@ export function ProTradeScannerScreen() {
         </>
       )}
 
-      <PaperTradeMonitor trades={paperTrades} rows={rows} onCloseTrade={manualClosePaperTrade} />
+      <PaperTradeMonitor
+        trades={paperTrades}
+        rows={rows}
+        onCloseTrade={manualClosePaperTrade}
+        onClearClosed={clearClosedTrades}
+        onFixZeroPnl={fixZeroPnlTrades}
+        realDayPnl={getDailyStartBalance() > 0 ? accountBalance - getDailyStartBalance() : null}
+      />
 
       <WatchlistHistoryPanel />
 
