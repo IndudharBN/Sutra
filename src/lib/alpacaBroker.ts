@@ -100,6 +100,12 @@ export async function cancelPaperOrder(orderId: string): Promise<void> {
   });
 }
 
+// Close all open positions at market (EOD flat) — cancels all open orders first
+export async function closeAllPaperPositions(): Promise<void> {
+  await paperFetch('/v2/orders', { method: 'DELETE' }).catch(() => {});
+  await paperFetch('/v2/positions', { method: 'DELETE' }).catch(() => {});
+}
+
 // ── Account & Positions ───────────────────────────────────────────────────────
 
 export async function getPaperAccount(): Promise<AlpacaAccount> {

@@ -1,7 +1,7 @@
 import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
 import { fetchTrading212Snapshot } from '../features/brokers/trading212LiveApi';
-import { placePaperBracketOrder, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
+import { placePaperBracketOrder, closeAllPaperPositions, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
 import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance } from '../lib/riskManager';
 import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
 import {
@@ -364,6 +364,13 @@ function availablePaperNotional(settings: ProTradeSettings, trades: PaperTrade[]
     .filter((trade) => trade.status === 'Open')
     .reduce((total, trade) => total + trade.notional, 0);
   return Math.min(maxPerOrder, Math.max(0, usableAmount - openNotional));
+}
+
+function etMinutesNow(): number {
+  const now = new Date();
+  const h = parseInt(now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
+  const m = parseInt(now.toLocaleString('en-US', { timeZone: 'America/New_York', minute: '2-digit' }), 10);
+  return h * 60 + m;
 }
 
 function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT_PROTRADE_SETTINGS, trades: PaperTrade[] = []) {
@@ -1624,6 +1631,7 @@ export function ProTradeScannerScreen() {
 
   React.useEffect(() => {
     if (!snapshot?.rows.length) return;
+    if (etMinutesNow() >= 15 * 60 + 50) return; // no new entries after 3:50 PM ET
     if (checkDailyLossLimit(accountBalance).ok === false) return;
     const posCheck = checkMaxPositions(paperTrades);
     if (!posCheck.ok) return;
@@ -1657,6 +1665,26 @@ export function ProTradeScannerScreen() {
         .catch((err: unknown) => console.warn(`Auto Alpaca paper skipped for ${trade.symbol}:`, err instanceof Error ? err.message : err));
     });
   }, [snapshot?.rows, orderedSymbols, paperTrades, settings]);
+
+  // EOD flat: at 4:32 PM ET close all open positions on Alpaca and mark locally as closed
+  React.useEffect(() => {
+    const interval = setInterval(() => {
+      const mins = etMinutesNow();
+      if (mins < 16 * 60 + 32 || mins > 16 * 60 + 35) return; // fires once in 4:32–4:35 window
+      const openTrades = paperTrades.filter((t) => t.status === 'Open');
+      if (!openTrades.length) return;
+      const closedAt = new Date().toISOString();
+      setPaperTrades((current) => current.map((t) => {
+        if (t.status !== 'Open') return t;
+        const row = snapshot?.rows.find((r) => baseSymbol(r.symbol) === baseSymbol(t.symbol));
+        const exitPrice = row?.price ?? t.entry;
+        return closePaperTrade(t, exitPrice, 'Manual', closedAt);
+      }));
+      closeAllPaperPositions().catch(() => {});
+      setApprovalMessage(`EOD 4:32 PM — closed ${openTrades.length} open position(s) flat.`);
+    }, 60_000); // check every minute
+    return () => clearInterval(interval);
+  }, [paperTrades, snapshot?.rows]);
 
   async function approve(row: ProTradeRow) {
     const plan = effectiveTradePlan(row, settings);
