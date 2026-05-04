@@ -345,7 +345,7 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
 
 export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
   const trigger = last(input.candles.five);
-  const recent = input.candles.five.slice(-8); // 40-min window
+  const recent = input.candles.five.slice(-12); // 60-min window — wider catches mid-session RS setups
   const highs = recent.map((c) => c.high);
   const lows = recent.map((c) => c.low);
   const microHigh = highs.length ? Math.max(...highs.slice(0, -1)) : 0;
@@ -360,9 +360,18 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
   const t1 = input.direction === 'BULL' ? entry + risk * 2 : entry - risk * 2;
   const t2 = structuralT2(input, entry, risk, t1);
   const tradePlan = directionOk(input) && recent.length >= 6 ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  // 1H directional: compare current 15m close to close from 4 bars ago (≈ 1 hour)
+  const fifteen = input.candles.fifteen;
+  const trend1h: 'UP' | 'DOWN' | 'FLAT' = fifteen.length >= 5
+    ? (fifteen[fifteen.length - 1].close > fifteen[fifteen.length - 5].close * 1.002 ? 'UP'
+      : fifteen[fifteen.length - 1].close < fifteen[fifteen.length - 5].close * 0.998 ? 'DOWN' : 'FLAT')
+    : 'FLAT';
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
-    htfTrendCheck(input),
+    input.trend15mAligned
+      ? pass('15m trend', `${input.trend15m} ✓ — aligned with direction`)
+      : fail('15m trend', `${input.trend15m} — must be aligned for RS entry`),
+    pass('1H directional', `${trend1h} — macro bias (informational)`),
     pass('Relative strength vs SPY', `${rsLabel}${rsEdge ? ' ✓' : ' — watch, RS building'}`),
     input.trendAligned ? pass('5m trend aligned', input.trend5m) : fail('5m trend aligned', 'EMA9/EMA21 not aligned'),
     breakout ? pass('Micro range break', 'Latest candle broke the local range') : fail('Micro range break', 'Waiting for micro breakout'),
@@ -375,7 +384,7 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
 
 export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   const range = openingRange(input.candles.five, 3);
-  const recent = input.candles.five.slice(-10); // 50-min window for liquidity sweep detection
+  const recent = input.candles.five.slice(-20); // 100-min window — sweeps can form later in session
   const trigger = last(recent);
 
   // The structural level that was swept (OR low for bull, OR high for bear)
@@ -391,11 +400,11 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   // Entry pinned to the reclaimed structural level — not current price
   const entry = sweptLevel ?? input.price;
 
-  // Proximity check: price must be within 1.5× ATR of the level (avoid entering after a big run)
+  // Proximity check: price must be within 2.5× ATR of the level — wider to account for post-sweep momentum
   const nearLevel = sweptLevel !== null
     ? (input.direction === 'BULL'
-        ? input.price <= sweptLevel + input.atr20 * 1.5
-        : input.price >= sweptLevel - input.atr20 * 1.5)
+        ? input.price <= sweptLevel + input.atr20 * 2.5
+        : input.price >= sweptLevel - input.atr20 * 2.5)
     : false;
 
   // Anchor: sweep candle extreme (the institutional wick that defines invalidation).
@@ -417,8 +426,8 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     const cRange = sweepCandle.high - sweepCandle.low;
     if (cRange < 1e-8) return false;
     return input.direction === 'BULL'
-      ? (sweepCandle.close - sweepCandle.low) / cRange >= 0.3
-      : (sweepCandle.high - sweepCandle.close) / cRange >= 0.3;
+      ? (sweepCandle.close - sweepCandle.low) / cRange >= 0.2
+      : (sweepCandle.high - sweepCandle.close) / cRange >= 0.2;
   })() : false;
 
   const tradePlan = directionOk(input) && range && swept && reclaimed && nearLevel
@@ -431,7 +440,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     swept ? pass('Liquidity swept', `Sweep candle: ${sweepCandle ? round(input.direction === 'BULL' ? sweepCandle.low : sweepCandle.high, 2) : '--'}`) : fail('Liquidity swept', 'No sweep below/above opening range yet'),
     sweepWickOk ? pass('Sweep rejection wick', 'Candle closed back in range — institutional rejection confirmed') : fail('Sweep rejection wick', 'Sweep candle closed near extremes — no rejection, likely continuation'),
     reclaimed ? pass('Level reclaimed', `Close back ${input.direction === 'BULL' ? 'above' : 'below'} ${sweptLevel ? round(sweptLevel, 2) : '--'}`) : fail('Level reclaimed', 'Waiting for close back through swept level'),
-    nearLevel ? pass('Entry proximity', 'Price within 1.5×ATR of level') : fail('Entry proximity', 'Price too far from swept level — do not chase'),
+    nearLevel ? pass('Entry proximity', 'Price within 2.5×ATR of level') : fail('Entry proximity', 'Price too far from swept level — do not chase'),
     pass('Volume confirmation', `${round(input.rvol, 2)}x${input.rvol >= 1.0 ? ' — confirmed on sweep' : ' — low, sweep structure is the primary signal'}`),
     ema1mCheck(input),
   ];
@@ -539,9 +548,11 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
     ? recentThree.some((c) => c.close > protectedHigh)
     : recentThree.some((c) => c.close < protectedLow);
 
-  // Bar-2 confirmation: current price still holds above/below protected level (no immediate reversal)
+  // Bar-2 confirmation: use second-to-last CLOSED bar — avoids scan timing mismatch where
+  // the 20s refresh fires after price already pulled back below the MSS level.
+  const prevClose = five.length >= 2 ? five[five.length - 2].close : input.price;
   const bar2Ok = mssOk && (
-    dir === 'BULL' ? input.price > protectedHigh : input.price < protectedLow
+    dir === 'BULL' ? prevClose > protectedHigh : prevClose < protectedLow
   );
 
   // Zone clearance: no opposing OB within 1×ATR directly ahead
