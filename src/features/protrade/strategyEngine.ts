@@ -228,39 +228,6 @@ function recentRetest(input: StrategyInput, level: number) {
     : recent.some((c) => c.high >= level - tolerance && c.close <= level);
 }
 
-// RSI-14 (Wilder simplified) from a close series. Returns 50 when < 15 samples.
-function rsi14(cls: number[]): number {
-  if (cls.length < 15) return 50;
-  const slice = cls.slice(-15);
-  let avgGain = 0; let avgLoss = 0;
-  for (let i = 1; i < slice.length; i++) {
-    const d = slice[i] - slice[i - 1];
-    if (d > 0) avgGain += d; else avgLoss -= d;
-  }
-  avgGain /= 14; avgLoss /= 14;
-  return avgLoss === 0 ? 100 : Number((100 - 100 / (1 + avgGain / avgLoss)).toFixed(1));
-}
-
-// Count RTH (≥ 9:30 AM ET = ≥ 13:30 UTC) 5m bars — pre-market bars excluded.
-function rthBarCount(candles: Candle[]): number {
-  return candles.filter((c) => {
-    const d = new Date(c.time);
-    return d.getUTCHours() * 60 + d.getUTCMinutes() >= 13 * 60 + 30;
-  }).length;
-}
-
-// True when today's intraday range has consumed ≥ 80 % of the daily ATR20 — momentum exhausted.
-function adrExhausted(five: Candle[], atr20: number): boolean {
-  if (atr20 <= 0) return false;
-  const rth = five.filter((c) => {
-    const d = new Date(c.time);
-    return d.getUTCHours() * 60 + d.getUTCMinutes() >= 13 * 60 + 30;
-  });
-  if (!rth.length) return false;
-  const hi = Math.max(...rth.map((c) => c.high));
-  const lo = Math.min(...rth.map((c) => c.low));
-  return (hi - lo) >= atr20 * 0.8;
-}
 
 // 1m EMA alignment — informational only, never blocks execution.
 function ema1mCheck(input: StrategyInput): StrategyChecklistItem {
@@ -300,9 +267,8 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
     range ? pass('Opening range formed', `${round(range.low, 2)}–${round(range.high, 2)}`) : fail('Opening range formed', 'Need first 15 min of 5m candles'),
     rangeBreak ? pass('Opening range break', 'Price broke the range in direction') : fail('Opening range break', 'Waiting for breakout'),
     retest ? pass('Retest hold', 'Breakout level retested and held') : fail('Retest hold', 'Waiting for controlled retest'),
-    input.rvol >= 1.2 ? pass('RVOL ≥1.2×', `${round(input.rvol, 2)}× — institutional interest confirmed`) : fail('RVOL ≥1.2×', `${round(input.rvol, 2)}× — need ≥1.2× to confirm breakout is real`),
+    pass('RVOL confirmation', `${round(input.rvol, 2)}x${input.rvol >= 1.0 ? ' — confirmed' : ' — low, watch for volume on break'}`),
     pass('VWAP context', `${input.vwapAligned ? 'VWAP ✓' : 'VWAP building — early session'} — informational`),
-    !adrExhausted(input.candles.five, input.atr20) ? pass('ADR room', 'Today < 80% of ATR used — room to move') : fail('ADR room', '>80% of daily ATR used — momentum exhausted, skip'),
     ema1mCheck(input),
   ];
   return signal('orb_retest', input, checklist, tradePlan, 'Opening range breakout with controlled retest, VWAP, RVOL, and 1m timing.', false, range ? [{
@@ -492,9 +458,6 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const t2 = structuralT2(input, entry, risk, t1);
   const tradePlan = hasStructure ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
 
-  const rthBars = rthBarCount(input.candles.five);
-  const rsiVal = rsi14(closes(input.candles.five));
-  const rsiOk = dir === 'BULL' ? rsiVal < 65 : rsiVal > 35;
   const fvgSizeOk = fvgAligned && gap ? (gap.gapHigh - gap.gapLow) >= input.atr20 * 0.25 : false;
   const structureLabel = atOb && atFvg
     ? `OB+FVG confluence ${ob!.low.toFixed(2)}–${ob!.high.toFixed(2)}`
@@ -512,11 +475,8 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
     obReject || atFvg
       ? pass('Entry confirmation', obReject ? 'Rejection candle at OB' : 'Price retesting FVG zone')
       : fail('Entry confirmation', 'No rejection candle at OB — wait for confirmation'),
-    input.vwapAligned ? pass('VWAP side', `${dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓'}`) : fail('VWAP side', `${dir === 'BULL' ? 'Below VWAP — no BULL OB/FVG against VWAP' : 'Above VWAP — no BEAR OB/FVG against VWAP'}`),
-    input.rvol >= 1.2 ? pass('RVOL ≥1.2×', `${round(input.rvol, 2)}× — institutional confirmation`) : fail('RVOL ≥1.2×', `${round(input.rvol, 2)}× — OB/FVG needs ≥1.2× to avoid false zones`),
-    rsiOk ? pass('RSI context', `RSI ${round(rsiVal, 1)} — not extended`) : fail('RSI context', `RSI ${round(rsiVal, 1)} — extended, high reversal risk for OB/FVG entry`),
-    rthBars >= 5 ? pass('RTH bars ≥5', `${rthBars} RTH bars — enough for structure`) : fail('RTH bars ≥5', `${rthBars} RTH bars — need ≥5 (wait until ~9:55 AM ET)`),
-    !adrExhausted(input.candles.five, input.atr20) ? pass('ADR room', 'Today < 80% of ATR used') : fail('ADR room', '>80% of daily ATR used — skip, no room for target'),
+    pass('VWAP context', `${input.vwapAligned ? 'VWAP ✓' : 'VWAP (below — watch for reclaim)'} — informational`),
+    pass('RVOL context', `${round(input.rvol, 2)}x${input.rvol >= 1.0 ? ' — confirmed' : ' — low, structure is the primary signal'}`),
     ema1mCheck(input),
   ];
   return signal('ob_fvg_retest', input, checklist, tradePlan, 'S5: OB or FVG retest — either zone qualifies. FVG must be ≥0.25×ATR. OB needs rejection candle.');

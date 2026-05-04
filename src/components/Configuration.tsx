@@ -586,11 +586,9 @@ export function PerformanceScreen() {
             <div className="space-y-2 text-[11px] text-slate-400">
               {[
                 'Trade window: 9:30 AM – 3:50 PM ET (entry cutoff 3:50)',
-                'S5 earliest entry: ≥5 RTH bars (~9:55 AM)',
-                'EOD flat: all positions closed at 4:32 PM ET',
+                'EOD flat: all positions closed at 3:57 PM ET',
                 'Min R:R ≥ 1.5 for Trade Ready',
-                'RVOL ≥ 1.2× hard gate — S1, S3, S5',
-                'ADR < 80% of ATR required — S1, S5',
+                'RVOL ≥ 1.2× hard gate — S3 only',
                 'Max 5 concurrent positions',
                 'Circuit breaker: 3 consecutive losses → 2h strategy pause',
               ].map((r) => (
@@ -605,10 +603,9 @@ export function PerformanceScreen() {
             <div className="space-y-2 text-[11px] text-slate-400">
               {[
                 'S3: 15m trend must align — hard fail if counter-trend',
-                'S5: VWAP side + RSI <65 BULL / >35 BEAR — extended moves skipped',
-                'S1/S3/S5: RVOL ≥ 1.2× — no institutional interest, no trade',
-                'S1/S5: ADR < 80% — exhausted range, skip entry',
+                'S3: RVOL ≥ 1.2× — no institutional interest, no trade',
                 'S6: MSS confirmed on closed bar — no live-tick entries',
+                'S4: sweep wick + reclaim within 100-min window',
                 '1m EMA must confirm timing before auto-execute fires',
                 'Stop anchored to structural swing — min 0.75×ATR noise floor',
                 'T1 = 2R → scale 50%, stop to entry; T2 = structural level',
@@ -804,15 +801,14 @@ export function SettingsScreen(_props: SettingsScreenProps) {
         <div className="grid grid-cols-3 gap-2 text-[11px] text-slate-400">
           {[
             'Trade window: 9:30 AM – 3:50 PM ET',
-            'S5 earliest: ≥5 RTH bars (~9:55 AM)',
             'EOD flat: 3:57 PM ET',
             'Min R:R ≥ 1.5 for Trade Ready',
-            'RVOL ≥ 1.2× hard gate: S1, S3, S5',
-            'RVOL ≥ 1.0 soft: S2, S4, S6',
-            'VWAP + 5m EMA hard fail: S2, S3, S5',
+            'RVOL ≥ 1.2× hard gate: S3',
+            'RVOL ≥ 1.0 soft: S1, S2, S4, S5, S6',
+            'VWAP + 5m EMA hard fail: S2, S3',
             '15m trend hard fail: S3',
-            'ADR < 80% of ATR: S1, S5',
-            'RSI <65 BULL / >35 BEAR: S5',
+            'S4: 100-min sweep window, 2.5×ATR proximity',
+            'S6: bar2Ok on closed bar (not live tick)',
             'Price range: $1 – $1,500',
             'Max 5 positions; CB: 3L → 2h pause',
           ].map((r) => (
