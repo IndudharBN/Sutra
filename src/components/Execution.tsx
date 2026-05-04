@@ -1,9 +1,8 @@
 import React from 'react';
 import { TrendingDown, TrendingUp, RefreshCcw } from 'lucide-react';
 import { getPaperAccount, getPaperPositions, type AlpacaPosition, type AlpacaAccount } from '../lib/alpacaBroker';
+import { loadTrades, todayET } from '../lib/tradeStore';
 import type { Order, Position } from '../types';
-
-const PAPER_TRADES_KEY = 'sutra.protrade.paperTrades.v1';
 
 interface PaperTrade {
   id: string;
@@ -11,18 +10,13 @@ interface PaperTrade {
   strategyCode: string;
   direction: 'BULL' | 'BEAR' | 'NEUTRAL';
   status: 'Open' | 'Closed';
-  outcome: 'Open' | 'Target' | 'Stop' | 'Manual';
+  outcome: 'Open' | 'Target' | 'T1 Profit' | 'Stop' | 'Manual';
   entry: number;
   stop: number;
   target: number;
   quantity: number;
   openedAt: string;
   pnl?: number;
-}
-
-function loadPaperTrades(): PaperTrade[] {
-  try { return JSON.parse(localStorage.getItem(PAPER_TRADES_KEY) || '[]') as PaperTrade[]; }
-  catch { return []; }
 }
 
 function fmtMoney(v: number | string | null | undefined) {
@@ -142,11 +136,19 @@ function AlpacaPositionsScreen() {
   );
 }
 
-// ── Paper Orders from localStorage ────────────────────────────────────────────
+// ── Paper Orders ──────────────────────────────────────────────────────────────
 
 function AlpacaOrdersScreen() {
-  const [trades] = React.useState<PaperTrade[]>(() => loadPaperTrades());
+  const [date, setDate] = React.useState<string>(() => todayET());
+  const [trades, setTrades] = React.useState<PaperTrade[]>([]);
+  const [loadingTrades, setLoadingTrades] = React.useState(true);
   const [filter, setFilter] = React.useState<'all' | 'open' | 'closed'>('all');
+
+  React.useEffect(() => {
+    setLoadingTrades(true);
+    void loadTrades<PaperTrade>(date).then((result) => { setTrades(result); setLoadingTrades(false); })
+      .catch(() => setLoadingTrades(false));
+  }, [date]);
 
   const displayed = filter === 'open' ? trades.filter((t) => t.status === 'Open')
     : filter === 'closed' ? trades.filter((t) => t.status === 'Closed')
@@ -155,9 +157,17 @@ function AlpacaOrdersScreen() {
   return (
     <div className="glass rounded-xl overflow-hidden flex flex-col flex-1">
       <div className="p-3 border-b border-white/5 flex justify-between items-center bg-white/5">
-        <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-          Paper Orders · Sutra ({trades.length})
-        </h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
+            Paper Orders · Sutra ({trades.length})
+          </h2>
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="h-6 px-2 rounded text-[10px] font-bold bg-slate-800 border border-white/10 text-slate-300 focus:outline-none focus:border-indigo-500/50"
+          />
+        </div>
         <div className="flex gap-1 text-[10px] font-bold uppercase tracking-widest">
           {(['all', 'open', 'closed'] as const).map((f) => (
             <button
@@ -186,8 +196,11 @@ function AlpacaOrdersScreen() {
             </tr>
           </thead>
           <tbody className="font-mono text-[11px]">
-            {displayed.length === 0 && (
-              <tr><td colSpan={11} className="py-8 text-center text-slate-500 font-sans text-xs">No paper trades found.</td></tr>
+            {loadingTrades && (
+              <tr><td colSpan={11} className="py-8 text-center text-slate-500 font-sans text-xs">Loading trades...</td></tr>
+            )}
+            {!loadingTrades && displayed.length === 0 && (
+              <tr><td colSpan={11} className="py-8 text-center text-slate-500 font-sans text-xs">No paper trades for {date}.</td></tr>
             )}
             {displayed.map((t) => {
               const pnl = t.pnl ?? 0;
