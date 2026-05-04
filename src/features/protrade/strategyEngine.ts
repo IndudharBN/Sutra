@@ -506,7 +506,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
     input.vwapAligned ? pass('VWAP side', `${dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓'}`) : fail('VWAP side', `${dir === 'BULL' ? 'Below VWAP — no BULL OB/FVG against VWAP' : 'Above VWAP — no BEAR OB/FVG against VWAP'}`),
     input.rvol >= 1.2 ? pass('RVOL ≥1.2×', `${round(input.rvol, 2)}× — institutional confirmation`) : fail('RVOL ≥1.2×', `${round(input.rvol, 2)}× — OB/FVG needs ≥1.2× to avoid false zones`),
     rsiOk ? pass('RSI context', `RSI ${round(rsiVal, 1)} — not extended`) : fail('RSI context', `RSI ${round(rsiVal, 1)} — extended, high reversal risk for OB/FVG entry`),
-    rthBars >= 10 ? pass('RTH bars ≥10', `${rthBars} RTH bars — ATR and structure reliable`) : fail('RTH bars ≥10', `${rthBars} RTH bars — need ≥10 (earliest fire ~10:20 AM ET)`),
+    rthBars >= 5 ? pass('RTH bars ≥5', `${rthBars} RTH bars — enough for structure`) : fail('RTH bars ≥5', `${rthBars} RTH bars — need ≥5 (wait until ~9:55 AM ET)`),
     !adrExhausted(input.candles.five, input.atr20) ? pass('ADR room', 'Today < 80% of ATR used') : fail('ADR room', '>80% of daily ATR used — skip, no room for target'),
     ema1mCheck(input),
   ];

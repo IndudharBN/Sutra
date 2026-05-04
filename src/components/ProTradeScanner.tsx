@@ -1796,7 +1796,6 @@ export function ProTradeScannerScreen() {
   // Phase 2 (async): fetch 1m bars, check last closed bar for price + volume confirmation, then fire.
   React.useEffect(() => {
     if (!snapshot?.rows.length) return;
-    if (etMinutesNow() < 10 * 60) return; // blackout: no auto-execute before 10:00 AM ET
     if (etMinutesNow() >= 15 * 60 + 50) return;
     if (!checkDailyLossLimit(accountBalance).ok) return;
 
