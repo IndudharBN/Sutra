@@ -584,7 +584,16 @@ export function PerformanceScreen() {
               <TrendingUp size={14} className="text-emerald-400" />Session Rules
             </h3>
             <div className="space-y-2 text-[11px] text-slate-400">
-              {['Trade window: 10:00 AM – 4:00 PM ET', 'Opening blackout: 9:30 – 10:00 AM ET', 'Strategies auto-lock outside session', 'Min R:R 1.8 for Trade Ready', 'Min RVOL: 1.0 (S2/S4/S5) / 1.2 (S1/S3)'].map((r) => (
+              {[
+                'Trade window: 9:30 AM – 3:50 PM ET (entry cutoff 3:50)',
+                'S5 earliest entry: ≥5 RTH bars (~9:55 AM)',
+                'EOD flat: all positions closed at 4:32 PM ET',
+                'Min R:R ≥ 1.5 for Trade Ready',
+                'RVOL ≥ 1.2× hard gate — S1, S3, S5',
+                'ADR < 80% of ATR required — S1, S5',
+                'Max 5 concurrent positions',
+                'Circuit breaker: 3 consecutive losses → 2h strategy pause',
+              ].map((r) => (
                 <div key={r} className="flex items-start gap-2"><CheckCircle2 size={11} className="text-emerald-500 mt-0.5 shrink-0" /><span>{r}</span></div>
               ))}
             </div>
@@ -594,7 +603,16 @@ export function PerformanceScreen() {
               <AlertTriangle size={14} className="text-amber-400" />Day Trader Rules
             </h3>
             <div className="space-y-2 text-[11px] text-slate-400">
-              {['No trades in first 30 min (blackout)', 'Check 15m trend before entry', 'VWAP must align with direction', '1m EMA must confirm entry timing', 'S3 breakout: must have 1.2x RVOL', 'Stop below structure — not arbitrary'].map((r) => (
+              {[
+                'S3: 15m trend must align — hard fail if counter-trend',
+                'S5: VWAP side + RSI <65 BULL / >35 BEAR — extended moves skipped',
+                'S1/S3/S5: RVOL ≥ 1.2× — no institutional interest, no trade',
+                'S1/S5: ADR < 80% — exhausted range, skip entry',
+                'S6: MSS confirmed on closed bar — no live-tick entries',
+                '1m EMA must confirm timing before auto-execute fires',
+                'Stop anchored to structural swing — min 0.75×ATR noise floor',
+                'T1 = 2R → scale 50%, stop to entry; T2 = structural level',
+              ].map((r) => (
                 <div key={r} className="flex items-start gap-2"><AlertTriangle size={11} className="text-amber-500 mt-0.5 shrink-0" /><span>{r}</span></div>
               ))}
             </div>
@@ -785,15 +803,18 @@ export function SettingsScreen(_props: SettingsScreenProps) {
         </h3>
         <div className="grid grid-cols-3 gap-2 text-[11px] text-slate-400">
           {[
-            'Trade window: 10:00 AM – 4:00 PM ET',
-            'Opening blackout: 9:30 – 10:00 AM ET',
-            'Min R:R ≥ 1.8 for Trade Ready',
-            'Min RVOL ≥ 1.0 for all strategies',
-            'VWAP + 5m + 15m must align for qualified',
+            'Trade window: 9:30 AM – 3:50 PM ET',
+            'S5 earliest: ≥5 RTH bars (~9:55 AM)',
+            'EOD flat: 4:32 PM ET',
+            'Min R:R ≥ 1.5 for Trade Ready',
+            'RVOL ≥ 1.2× hard gate: S1, S3, S5',
+            'RVOL ≥ 1.0 soft: S2, S4, S6',
+            'VWAP + 5m EMA hard fail: S2, S3, S5',
+            '15m trend hard fail: S3',
+            'ADR < 80% of ATR: S1, S5',
+            'RSI <65 BULL / >35 BEAR: S5',
             'Price range: $1 – $1,500',
-            'ATR% range: 1.5% – 8% (beta filter)',
-            'Dollar volume ≥ $3M',
-            'Score ≥ 65 required for qualified',
+            'Max 5 positions; CB: 3L → 2h pause',
           ].map((r) => (
             <div key={r} className="flex items-start gap-1.5">
               <CheckCircle2 size={10} className="text-emerald-500 mt-0.5 shrink-0" />
