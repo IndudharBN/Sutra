@@ -2,7 +2,9 @@ import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
 import { fetchTrading212Snapshot } from '../features/brokers/trading212LiveApi';
 import { placePaperBracketOrder, closeAllPaperPositions, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
-import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, getDailyStartBalance } from '../lib/riskManager';
+import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, getDailyStartBalance, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
+import { alpacaBarStream } from '../lib/alpacaBarStream';
+import { clearBarCache } from '../lib/alpacaClient';
 import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
 import {
   STRATEGY_CODES,
@@ -1522,6 +1524,7 @@ export function ProTradeScannerScreen() {
   const [watchlist, setWatchlist] = React.useState<DayWatchlist>(() => loadWatchlist());
   const [watchlistOnly, setWatchlistOnly] = React.useState(false);
   const [viewMode, setViewMode] = React.useState<'premarket' | 'workflow'>(() => isPremarketWindow() ? 'premarket' : 'workflow');
+  const [cbTick, setCbTick] = React.useState(0);
 
   async function load(manual = false) {
     try {
@@ -1548,7 +1551,10 @@ export function ProTradeScannerScreen() {
   }
 
   React.useEffect(() => {
+    migrateCbKeys();
+    alpacaBarStream.connect();
     void load();
+    return () => alpacaBarStream.destroy();
   }, []);
 
   // Full universe scan every 60s
@@ -1582,6 +1588,36 @@ export function ProTradeScannerScreen() {
       }).catch(() => { /* best-effort */ });
     }, 20_000);
     return () => window.clearInterval(id);
+  }, []);
+
+  // WebSocket: subscribe S3/S4/S6 symbols so 5m bar close fires instantly instead of waiting up to 20s
+  React.useEffect(() => {
+    const wsSymbols = (snapshot?.rows ?? [])
+      .filter((r) =>
+        (r.workflowStage === 'forming' || r.workflowStage === 'confirmed') &&
+        r.strategySignals.some((s) =>
+          s.strategyId === 'rs_continuation' ||
+          s.strategyId === 'liquidity_sweep' ||
+          s.strategyId === 'mss_breakout'
+        )
+      )
+      .map((r) => r.symbol);
+    if (wsSymbols.length) alpacaBarStream.subscribe(wsSymbols);
+  }, [snapshot?.rows]);
+
+  // WebSocket 5m bar close → evict cache + re-evaluate that symbol immediately
+  React.useEffect(() => {
+    return alpacaBarStream.onFiveMinClose((symbol) => {
+      clearBarCache(symbol);
+      void fetchHotSetSnapshot([symbol], 0).then((fresh) => {
+        if (!fresh.length) return;
+        setSnapshot((prev) => {
+          if (!prev) return prev;
+          const freshMap = new Map(fresh.map((r) => [r.symbol, r]));
+          return { ...prev, rows: prev.rows.map((r) => freshMap.get(r.symbol) ?? r), fetchedAt: new Date().toISOString() };
+        });
+      }).catch(() => { /* best-effort */ });
+    });
   }, []);
 
   // Refresh account equity every 15s for live HUD updates
@@ -2029,7 +2065,7 @@ export function ProTradeScannerScreen() {
         const riskSummary = getRiskSummary();
         const usedRisk = Math.max(0, -riskSummary.dailyPnl);
         const riskPct = riskSummary.dailyLossLimit > 0 ? Math.min(100, (usedRisk / riskSummary.dailyLossLimit) * 100) : 0;
-        const pausedStrats = getPausedStrategies();
+        const pausedStrats = cbTick >= 0 ? getPausedStrategies() : [];
         const etMins = etMinutesNow();
         const cutoffMins = 15 * 60 + 50;
         const minsLeft = cutoffMins - etMins;
@@ -2095,8 +2131,13 @@ export function ProTradeScannerScreen() {
                   <>
                     <span className="text-[9px] uppercase tracking-widest text-rose-400 font-black">CB Paused:</span>
                     {pausedStrats.map((s) => (
-                      <span key={s.name} className="px-2 py-0.5 rounded border border-rose-500/30 bg-rose-500/10 text-rose-300 text-[9px] font-black uppercase">
-                        {s.name} {s.minsLeft}m
+                      <span key={s.name} className="flex items-center gap-1 px-2 py-0.5 rounded border border-rose-500/30 bg-rose-500/10 text-rose-300 text-[9px] font-black uppercase">
+                        {STRATEGY_LABELS[s.name as StrategyId] ?? s.name} {s.minsLeft}m
+                        <button
+                          onClick={() => { unpauseCbStrategy(s.name); setCbTick((t) => t + 1); }}
+                          className="ml-0.5 text-rose-400 hover:text-white leading-none"
+                          title="Unpause strategy"
+                        >✕</button>
                       </span>
                     ))}
                   </>

@@ -158,6 +158,40 @@ export function getDailyStartBalance(): number {
   return load().dailyStartBalance || 0;
 }
 
+// One-time migration: old keys were human-readable names; new keys are strategyIds.
+// Safe to call on every mount — only runs if old keys exist in localStorage.
+const CB_KEY_MAP: Record<string, string> = {
+  'ORB Retest': 'orb_retest',
+  'VWAP Pullback': 'vwap_pullback',
+  'RS Continuation': 'rs_continuation',
+  'Liquidity Sweep': 'liquidity_sweep',
+  'OB/FVG Retest': 'ob_fvg_retest',
+  'MSS Breakout': 'mss_breakout',
+};
+
+export function migrateCbKeys(): void {
+  const state = load();
+  let changed = false;
+  for (const [oldKey, newKey] of Object.entries(CB_KEY_MAP)) {
+    const old = state.strategyCb[oldKey];
+    if (!old) continue;
+    const existing = state.strategyCb[newKey];
+    // Keep whichever pause expires later
+    if (!existing || old.pauseUntil > existing.pauseUntil) {
+      state.strategyCb[newKey] = old;
+    }
+    delete state.strategyCb[oldKey];
+    changed = true;
+  }
+  if (changed) save(state);
+}
+
+export function unpauseCbStrategy(strategyId: string): void {
+  const state = load();
+  state.strategyCb[strategyId] = { count: 0, pauseUntil: 0 };
+  save(state);
+}
+
 export function getPausedStrategies(): Array<{ name: string; minsLeft: number }> {
   const state = load();
   return Object.entries(state.strategyCb)

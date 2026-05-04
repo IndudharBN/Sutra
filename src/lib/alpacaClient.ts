@@ -35,6 +35,13 @@ function cacheSet<T>(key: string, data: T, ttlMs: number) {
   _cache.set(key, { data, expiresAt: Date.now() + ttlMs });
 }
 
+// Evict all cache entries for a specific symbol (called after WebSocket bar close).
+export function clearBarCache(symbol: string): void {
+  for (const key of _cache.keys()) {
+    if (key.includes(symbol)) _cache.delete(key);
+  }
+}
+
 // ── Base fetch ────────────────────────────────────────────────────────────────
 async function alpacaGet<T>(path: string, params: Record<string, string> = {}): Promise<T> {
   const { alpacaKey, alpacaSecret, alpacaDataUrl } = env;
