@@ -1,11 +1,10 @@
 import React from 'react';
 import { Activity, AlertTriangle, BarChart, CheckCircle2, Shield, Wallet, TrendingUp, Clock, Zap, RefreshCcw, Lock } from 'lucide-react';
 import { getRiskSettings, saveRiskSettings, getRiskSummary, type RiskSettings } from '../lib/riskManager';
+import { loadAllTrades } from '../lib/tradeStore';
 import { getPaperAccount } from '../lib/alpacaBroker';
 import { STRATEGY_LABELS, STRATEGY_CODES, type StrategyId } from '../features/protrade/workflowTypes';
 import { env, hasAlpacaConfig } from '../lib/env';
-
-const PAPER_TRADES_KEY = 'sutra.protrade.paperTrades.v1';
 
 interface PaperTradeRecord {
   id: string;
@@ -15,7 +14,7 @@ interface PaperTradeRecord {
   strategyName: string;
   direction: 'BULL' | 'BEAR' | 'NEUTRAL';
   status: 'Open' | 'Closed';
-  outcome: 'Open' | 'Target' | 'Stop' | 'Manual';
+  outcome: 'Open' | 'Target' | 'T1 Profit' | 'Stop' | 'Manual' | 'EOD';
   entry: number;
   stop: number;
   target: number;
@@ -58,30 +57,33 @@ function toETDate(iso: string): string {
 function usePaperStats() {
   const [trades, setTrades] = React.useState<PaperTradeRecord[]>([]);
   React.useEffect(() => {
-    try {
-      const raw = JSON.parse(window.localStorage.getItem(PAPER_TRADES_KEY) || '[]') as PaperTradeRecord[];
-      setTrades(Array.isArray(raw) ? raw : []);
-    } catch {
-      setTrades([]);
-    }
+    void loadAllTrades<PaperTradeRecord>()
+      .then((all) => setTrades(Array.isArray(all) ? all : []))
+      .catch(() => setTrades([]));
   }, []);
+
+  // Win = structural exit at target. Loss = structural exit at stop.
+  // EOD/Manual are operational closes — excluded from W/L so they don't distort the record.
+  const isWin = (t: PaperTradeRecord) => t.outcome === 'Target' || t.outcome === 'T1 Profit';
+  const isLoss = (t: PaperTradeRecord) => t.outcome === 'Stop';
 
   const closed = trades.filter((t) => t.status === 'Closed');
   const open = trades.filter((t) => t.status === 'Open');
   const today = todayET();
-  const todayClosed = closed.filter((t) => t.closedAt && t.closedAt.startsWith(today));
+  const todayClosed = closed.filter((t) => t.closedAt && toETDate(t.closedAt) === today);
   const todayPnl = todayClosed.reduce((s, t) => s + (t.pnl ?? 0), 0);
   const totalPnl = closed.reduce((s, t) => s + (t.pnl ?? 0), 0);
-  const wins = closed.filter((t) => (t.pnl ?? 0) > 0).length;
-  const losses = closed.filter((t) => (t.pnl ?? 0) < 0).length;
-  const winRate = closed.length > 0 ? Math.round((wins / closed.length) * 100) : 0;
+  const wins = closed.filter(isWin).length;
+  const losses = closed.filter(isLoss).length;
+  const winRate = (wins + losses) > 0 ? Math.round((wins / (wins + losses)) * 100) : 0;
 
   const byStrategy = Object.keys(STRATEGY_LABELS).map((id) => {
     const sid = id as StrategyId;
     const sc = closed.filter((t) => t.strategyId === sid);
     const sp = sc.reduce((s, t) => s + (t.pnl ?? 0), 0);
-    const sw = sc.filter((t) => (t.pnl ?? 0) > 0).length;
-    return { id: sid, code: STRATEGY_CODES[sid], name: STRATEGY_LABELS[sid], trades: sc.length, wins: sw, losses: sc.length - sw, pnl: sp };
+    const sw = sc.filter(isWin).length;
+    const sl = sc.filter(isLoss).length;
+    return { id: sid, code: STRATEGY_CODES[sid], name: STRATEGY_LABELS[sid], trades: sc.length, wins: sw, losses: sl, pnl: sp };
   }).filter((s) => s.trades > 0);
 
   const recentTrades = [...closed].sort((a, b) => (b.closedAt ?? '').localeCompare(a.closedAt ?? '')).slice(0, 10);
@@ -125,9 +127,10 @@ function usePaperStats() {
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, dayTrades]) => {
       const pnl = dayTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
-      const w = dayTrades.filter((t) => (t.pnl ?? 0) > 0).length;
+      const w = dayTrades.filter(isWin).length;
+      const l = dayTrades.filter(isLoss).length;
       const pnls = dayTrades.map((t) => t.pnl ?? 0);
-      return { date, pnl, trades: dayTrades.length, wins: w, losses: dayTrades.length - w, bestTrade: pnls.length ? Math.max(...pnls) : 0, worstTrade: pnls.length ? Math.min(...pnls) : 0, tradeList: dayTrades };
+      return { date, pnl, trades: dayTrades.length, wins: w, losses: l, bestTrade: pnls.length ? Math.max(...pnls) : 0, worstTrade: pnls.length ? Math.min(...pnls) : 0, tradeList: dayTrades };
     });
 
   const dayStatsMap = new Map(dayStatsArray.map((d) => [d.date, d]));

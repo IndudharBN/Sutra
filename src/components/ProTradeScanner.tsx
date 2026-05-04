@@ -1,8 +1,10 @@
 import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
 import { fetchTrading212Snapshot } from '../features/brokers/trading212LiveApi';
-import { placePaperBracketOrder, closeAllPaperPositions, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
-import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, getDailyStartBalance } from '../lib/riskManager';
+import { placePaperBracketOrder, closeAllPaperPositions, closePaperPosition, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
+import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, getDailyStartBalance, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
+import { alpacaBarStream } from '../lib/alpacaBarStream';
+import { clearBarCache } from '../lib/alpacaClient';
 import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
 import {
   STRATEGY_CODES,
@@ -326,9 +328,12 @@ function monitorPaperTrades(trades: PaperTrade[], rows: ProTradeRow[]) {
     }
     if (hitStop) {
       changed = true;
-      // Exit at actual market price (current), not the stop level — more realistic fill
-      // After T1: trailing stop was at T1 price; exit here is a profit, not a loss
-      return closePaperTrade(trade, current, trade.t1HitAt ? 'T1 Profit' : 'Stop');
+      // For T1 Profit: floor exit at the trailing stop level — prevents negative P&L from scan lag.
+      // For Stop: exit at current (realistic fill, may be slightly worse than stop level).
+      const exitPrice = trade.t1HitAt
+        ? (trade.direction === 'BEAR' ? Math.min(trailingStop, current) : Math.max(trailingStop, current))
+        : current;
+      return closePaperTrade(trade, exitPrice, trade.t1HitAt ? 'T1 Profit' : 'Stop');
     }
     return trade;
   });
@@ -1037,6 +1042,7 @@ function PaperTradeMonitor({
               <th className="py-2.5 px-3 border-r border-white/5">Dir</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">Entry</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">Current/Exit</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">Exit Amt</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">Stop</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">T1</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">T2</th>
@@ -1070,6 +1076,7 @@ function PaperTradeMonitor({
                   <td className={`py-3 px-3 border-r border-white/5 font-black ${trade.direction === 'BULL' ? 'text-emerald-400' : 'text-rose-400'}`}>{trade.direction}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-white">{fmtMoney(trade.entry)}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-white">{fmtMoney(current)}</td>
+                  <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">${(current * trade.quantity).toFixed(2)}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-rose-300">{fmtMoney(trade.stop)}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-cyan-300">{fmtMoney(paperTarget1(trade))}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-emerald-300">{fmtMoney(paperTarget2(trade))}</td>
@@ -1517,6 +1524,7 @@ export function ProTradeScannerScreen() {
   const [watchlist, setWatchlist] = React.useState<DayWatchlist>(() => loadWatchlist());
   const [watchlistOnly, setWatchlistOnly] = React.useState(false);
   const [viewMode, setViewMode] = React.useState<'premarket' | 'workflow'>(() => isPremarketWindow() ? 'premarket' : 'workflow');
+  const [cbTick, setCbTick] = React.useState(0);
 
   async function load(manual = false) {
     try {
@@ -1543,7 +1551,10 @@ export function ProTradeScannerScreen() {
   }
 
   React.useEffect(() => {
+    migrateCbKeys();
+    alpacaBarStream.connect();
     void load();
+    return () => alpacaBarStream.destroy();
   }, []);
 
   // Full universe scan every 60s
@@ -1577,6 +1588,36 @@ export function ProTradeScannerScreen() {
       }).catch(() => { /* best-effort */ });
     }, 20_000);
     return () => window.clearInterval(id);
+  }, []);
+
+  // WebSocket: subscribe S3/S4/S6 symbols so 5m bar close fires instantly instead of waiting up to 20s
+  React.useEffect(() => {
+    const wsSymbols = (snapshot?.rows ?? [])
+      .filter((r) =>
+        (r.workflowStage === 'forming' || r.workflowStage === 'confirmed') &&
+        r.strategySignals.some((s) =>
+          s.strategyId === 'rs_continuation' ||
+          s.strategyId === 'liquidity_sweep' ||
+          s.strategyId === 'mss_breakout'
+        )
+      )
+      .map((r) => r.symbol);
+    if (wsSymbols.length) alpacaBarStream.subscribe(wsSymbols);
+  }, [snapshot?.rows]);
+
+  // WebSocket 5m bar close → evict cache + re-evaluate that symbol immediately
+  React.useEffect(() => {
+    return alpacaBarStream.onFiveMinClose((symbol) => {
+      clearBarCache(symbol);
+      void fetchHotSetSnapshot([symbol], 0).then((fresh) => {
+        if (!fresh.length) return;
+        setSnapshot((prev) => {
+          if (!prev) return prev;
+          const freshMap = new Map(fresh.map((r) => [r.symbol, r]));
+          return { ...prev, rows: prev.rows.map((r) => freshMap.get(r.symbol) ?? r), fetchedAt: new Date().toISOString() };
+        });
+      }).catch(() => { /* best-effort */ });
+    });
   }, []);
 
   // Refresh account equity every 15s for live HUD updates
@@ -1765,7 +1806,12 @@ export function ProTradeScannerScreen() {
             const outcome: PaperTrade['outcome'] = toStop <= toTarget
               ? (trade.t1HitAt ? 'T1 Profit' : 'Stop')
               : 'Target';
-            return closePaperTrade(trade, exitPrice, outcome, closedAt);
+            // T1 Profit: floor exit at trailing stop — Alpaca fill slippage can't produce negative P&L on protected trade
+            const ts = trade.trailingStop ?? trade.stop;
+            const safeExit = outcome === 'T1 Profit'
+              ? (trade.direction === 'BULL' ? Math.max(exitPrice, ts) : Math.min(exitPrice, ts))
+              : exitPrice;
+            return closePaperTrade(trade, safeExit, outcome, closedAt);
           })
         );
 
@@ -1776,8 +1822,9 @@ export function ProTradeScannerScreen() {
         setPaperTrades((current) => current.map((t) => updateMap.get(t.id) ?? t));
 
         // Record results in risk manager (circuit breaker + daily loss)
+        // Use strategyId (not strategyName) — must match the key used in checkStrategyCircuitBreaker
         validUpdates.forEach((t) => {
-          if (t.pnl !== undefined) recordTradeResult(t.strategyName, t.pnl, accountBalance);
+          if (t.pnl !== undefined) recordTradeResult(t.strategyId ?? t.strategyName, t.pnl, accountBalance);
         });
       } catch {
         // Sync is best-effort — never block the UI
@@ -1997,6 +2044,7 @@ export function ProTradeScannerScreen() {
     if (closed.pnl !== undefined) {
       recordTradeResult(trade.strategyName, closed.pnl, accountBalance);
     }
+    closePaperPosition(trade.symbol).catch(() => {});
   }
 
   return (
@@ -2005,9 +2053,14 @@ export function ProTradeScannerScreen() {
       {(() => {
         const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
         const todayClosed = paperTrades.filter((t) => t.status === 'Closed' && new Date(t.openedAt).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === todayET);
-        // Use outcome label — not pnl — to determine wins/losses (pnl may be stale/zero from prior bugs)
-        const todayWins = todayClosed.filter((t) => t.outcome === 'Target' || t.outcome === 'T1 Profit').length;
-        const todayLosses = todayClosed.filter((t) => t.outcome === 'Stop').length;
+        const todayWins = todayClosed.filter((t) =>
+          t.outcome === 'Target' || t.outcome === 'T1 Profit' ||
+          ((t.outcome === 'Manual' || t.outcome === 'EOD') && (t.pnl ?? 0) > 0)
+        ).length;
+        const todayLosses = todayClosed.filter((t) =>
+          t.outcome === 'Stop' ||
+          ((t.outcome === 'Manual' || t.outcome === 'EOD') && (t.pnl ?? 0) <= 0)
+        ).length;
         const priceMap = new Map(rows.map((r) => [baseSymbol(r.symbol), r.price]));
         const openTrades = paperTrades.filter((t) => t.status === 'Open');
         const openPnl = openTrades.reduce((sum, t) => {
@@ -2023,7 +2076,7 @@ export function ProTradeScannerScreen() {
         const riskSummary = getRiskSummary();
         const usedRisk = Math.max(0, -riskSummary.dailyPnl);
         const riskPct = riskSummary.dailyLossLimit > 0 ? Math.min(100, (usedRisk / riskSummary.dailyLossLimit) * 100) : 0;
-        const pausedStrats = getPausedStrategies();
+        const pausedStrats = cbTick >= 0 ? getPausedStrategies() : [];
         const etMins = etMinutesNow();
         const cutoffMins = 15 * 60 + 50;
         const minsLeft = cutoffMins - etMins;
@@ -2089,8 +2142,13 @@ export function ProTradeScannerScreen() {
                   <>
                     <span className="text-[9px] uppercase tracking-widest text-rose-400 font-black">CB Paused:</span>
                     {pausedStrats.map((s) => (
-                      <span key={s.name} className="px-2 py-0.5 rounded border border-rose-500/30 bg-rose-500/10 text-rose-300 text-[9px] font-black uppercase">
-                        {s.name} {s.minsLeft}m
+                      <span key={s.name} className="flex items-center gap-1 px-2 py-0.5 rounded border border-rose-500/30 bg-rose-500/10 text-rose-300 text-[9px] font-black uppercase">
+                        {STRATEGY_LABELS[s.name as StrategyId] ?? s.name} {s.minsLeft}m
+                        <button
+                          onClick={() => { unpauseCbStrategy(s.name); setCbTick((t) => t + 1); }}
+                          className="ml-0.5 text-rose-400 hover:text-white leading-none"
+                          title="Unpause strategy"
+                        >✕</button>
                       </span>
                     ))}
                   </>
