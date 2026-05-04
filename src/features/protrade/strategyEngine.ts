@@ -345,7 +345,7 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
 
 export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
   const trigger = last(input.candles.five);
-  const recent = input.candles.five.slice(-12); // 60-min window — wider gives more breakout candidates
+  const recent = input.candles.five.slice(-8); // 40-min window
   const highs = recent.map((c) => c.high);
   const lows = recent.map((c) => c.low);
   const microHigh = highs.length ? Math.max(...highs.slice(0, -1)) : 0;
@@ -375,7 +375,7 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
 
 export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   const range = openingRange(input.candles.five, 3);
-  const recent = input.candles.five.slice(-20); // 100-min window — sweeps can form later in session
+  const recent = input.candles.five.slice(-10); // 50-min window for liquidity sweep detection
   const trigger = last(recent);
 
   // The structural level that was swept (OR low for bull, OR high for bear)
@@ -391,11 +391,11 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   // Entry pinned to the reclaimed structural level — not current price
   const entry = sweptLevel ?? input.price;
 
-  // Proximity check: price must be within 2.5× ATR of the level — wider to account for post-sweep momentum
+  // Proximity check: price must be within 1.5× ATR of the level (avoid entering after a big run)
   const nearLevel = sweptLevel !== null
     ? (input.direction === 'BULL'
-        ? input.price <= sweptLevel + input.atr20 * 2.5
-        : input.price >= sweptLevel - input.atr20 * 2.5)
+        ? input.price <= sweptLevel + input.atr20 * 1.5
+        : input.price >= sweptLevel - input.atr20 * 1.5)
     : false;
 
   // Anchor: sweep candle extreme (the institutional wick that defines invalidation).
@@ -417,8 +417,8 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     const cRange = sweepCandle.high - sweepCandle.low;
     if (cRange < 1e-8) return false;
     return input.direction === 'BULL'
-      ? (sweepCandle.close - sweepCandle.low) / cRange >= 0.2
-      : (sweepCandle.high - sweepCandle.close) / cRange >= 0.2;
+      ? (sweepCandle.close - sweepCandle.low) / cRange >= 0.3
+      : (sweepCandle.high - sweepCandle.close) / cRange >= 0.3;
   })() : false;
 
   const tradePlan = directionOk(input) && range && swept && reclaimed && nearLevel
@@ -431,7 +431,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     swept ? pass('Liquidity swept', `Sweep candle: ${sweepCandle ? round(input.direction === 'BULL' ? sweepCandle.low : sweepCandle.high, 2) : '--'}`) : fail('Liquidity swept', 'No sweep below/above opening range yet'),
     sweepWickOk ? pass('Sweep rejection wick', 'Candle closed back in range — institutional rejection confirmed') : fail('Sweep rejection wick', 'Sweep candle closed near extremes — no rejection, likely continuation'),
     reclaimed ? pass('Level reclaimed', `Close back ${input.direction === 'BULL' ? 'above' : 'below'} ${sweptLevel ? round(sweptLevel, 2) : '--'}`) : fail('Level reclaimed', 'Waiting for close back through swept level'),
-    nearLevel ? pass('Entry proximity', 'Price within 2.5×ATR of level') : fail('Entry proximity', 'Price too far from swept level — do not chase'),
+    nearLevel ? pass('Entry proximity', 'Price within 1.5×ATR of level') : fail('Entry proximity', 'Price too far from swept level — do not chase'),
     pass('Volume confirmation', `${round(input.rvol, 2)}x${input.rvol >= 1.0 ? ' — confirmed on sweep' : ' — low, sweep structure is the primary signal'}`),
     ema1mCheck(input),
   ];
@@ -539,11 +539,9 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
     ? recentThree.some((c) => c.close > protectedHigh)
     : recentThree.some((c) => c.close < protectedLow);
 
-  // Bar-2 confirmation: use second-to-last CLOSED bar (not current tick) — avoids scan timing mismatch
-  // where the 15s refresh fires after price has already pulled back below the MSS level.
-  const prevClose = five.length >= 2 ? five[five.length - 2].close : input.price;
+  // Bar-2 confirmation: current price still holds above/below protected level (no immediate reversal)
   const bar2Ok = mssOk && (
-    dir === 'BULL' ? prevClose > protectedHigh : prevClose < protectedLow
+    dir === 'BULL' ? input.price > protectedHigh : input.price < protectedLow
   );
 
   // Zone clearance: no opposing OB within 1×ATR directly ahead

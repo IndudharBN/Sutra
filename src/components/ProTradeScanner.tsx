@@ -1,7 +1,7 @@
 import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
 import { fetchTrading212Snapshot } from '../features/brokers/trading212LiveApi';
-import { placePaperBracketOrder, closeAllPaperPositions, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
+import { placePaperBracketOrder, closeAllPaperPositions, closePaperPosition, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
 import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, getDailyStartBalance, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
 import { alpacaBarStream } from '../lib/alpacaBarStream';
 import { clearBarCache } from '../lib/alpacaClient';
@@ -1806,7 +1806,12 @@ export function ProTradeScannerScreen() {
             const outcome: PaperTrade['outcome'] = toStop <= toTarget
               ? (trade.t1HitAt ? 'T1 Profit' : 'Stop')
               : 'Target';
-            return closePaperTrade(trade, exitPrice, outcome, closedAt);
+            // T1 Profit: floor exit at trailing stop — Alpaca fill slippage can't produce negative P&L on protected trade
+            const ts = trade.trailingStop ?? trade.stop;
+            const safeExit = outcome === 'T1 Profit'
+              ? (trade.direction === 'BULL' ? Math.max(exitPrice, ts) : Math.min(exitPrice, ts))
+              : exitPrice;
+            return closePaperTrade(trade, safeExit, outcome, closedAt);
           })
         );
 
@@ -2039,6 +2044,7 @@ export function ProTradeScannerScreen() {
     if (closed.pnl !== undefined) {
       recordTradeResult(trade.strategyName, closed.pnl, accountBalance);
     }
+    closePaperPosition(trade.symbol).catch(() => {});
   }
 
   return (
@@ -2047,9 +2053,14 @@ export function ProTradeScannerScreen() {
       {(() => {
         const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
         const todayClosed = paperTrades.filter((t) => t.status === 'Closed' && new Date(t.openedAt).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === todayET);
-        // Use outcome label — not pnl — to determine wins/losses (pnl may be stale/zero from prior bugs)
-        const todayWins = todayClosed.filter((t) => t.outcome === 'Target' || t.outcome === 'T1 Profit').length;
-        const todayLosses = todayClosed.filter((t) => t.outcome === 'Stop').length;
+        const todayWins = todayClosed.filter((t) =>
+          t.outcome === 'Target' || t.outcome === 'T1 Profit' ||
+          ((t.outcome === 'Manual' || t.outcome === 'EOD') && (t.pnl ?? 0) > 0)
+        ).length;
+        const todayLosses = todayClosed.filter((t) =>
+          t.outcome === 'Stop' ||
+          ((t.outcome === 'Manual' || t.outcome === 'EOD') && (t.pnl ?? 0) <= 0)
+        ).length;
         const priceMap = new Map(rows.map((r) => [baseSymbol(r.symbol), r.price]));
         const openTrades = paperTrades.filter((t) => t.status === 'Open');
         const openPnl = openTrades.reduce((sum, t) => {

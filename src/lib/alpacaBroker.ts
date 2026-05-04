@@ -106,6 +106,11 @@ export async function closeAllPaperPositions(): Promise<void> {
   await paperFetch('/v2/positions', { method: 'DELETE' }).catch(() => {});
 }
 
+// Close a single position by symbol (manual close)
+export async function closePaperPosition(symbol: string): Promise<void> {
+  await paperFetch(`/v2/positions/${symbol}`, { method: 'DELETE' }).catch(() => {});
+}
+
 // ── Account & Positions ───────────────────────────────────────────────────────
 
 export async function getPaperAccount(): Promise<AlpacaAccount> {
