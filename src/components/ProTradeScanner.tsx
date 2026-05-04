@@ -1020,9 +1020,9 @@ function PaperTradeMonitor({
           <span className={`text-xs font-black ${totalPnl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
             Total P&L {totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}
           </span>
-          {closed.some((t) => !t.pnl || t.pnl === 0) && (
+          {closed.some((t) => !t.pnl || t.pnl === 0 || (t.outcome === 'T1 Profit' && (t.pnl ?? 0) < 0)) && (
             <button onClick={onFixZeroPnl} className="text-[10px] uppercase font-black tracking-widest px-2 py-1 rounded border border-amber-500/30 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 transition-colors">
-              Fix $0 P&L
+              Fix P&amp;L
             </button>
           )}
           {closed.length > 0 && (
@@ -2031,10 +2031,23 @@ export function ProTradeScannerScreen() {
 
   function fixZeroPnlTrades() {
     setPaperTrades((current) => current.map((trade) => {
-      if (trade.status !== 'Closed' || (trade.pnl && trade.pnl !== 0)) return trade;
-      const exitPrice = estimatedExitPrice(trade);
-      const { pnl, pnlPercent } = paperPnl(trade, exitPrice);
-      return { ...trade, exitPrice, pnl, pnlPercent };
+      if (trade.status !== 'Closed') return trade;
+      // Fix $0 pnl
+      if (!trade.pnl || trade.pnl === 0) {
+        const exitPrice = estimatedExitPrice(trade);
+        const { pnl, pnlPercent } = paperPnl(trade, exitPrice);
+        return { ...trade, exitPrice, pnl, pnlPercent };
+      }
+      // Fix negative T1 Profit — floor exit at trailing stop (stored before the floor fix)
+      if (trade.outcome === 'T1 Profit' && trade.pnl < 0) {
+        const ts = trade.trailingStop || trade.target1 || trade.stop;
+        const exitPrice = trade.direction === 'BULL'
+          ? Math.max(trade.exitPrice ?? ts, ts)
+          : Math.min(trade.exitPrice ?? ts, ts);
+        const { pnl, pnlPercent } = paperPnl(trade, exitPrice);
+        return { ...trade, exitPrice, pnl, pnlPercent };
+      }
+      return trade;
     }));
   }
 
