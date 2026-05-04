@@ -1,50 +1,185 @@
 # Sutra Trading Terminal
 
-Sutra is the new lightweight React/TypeScript version of the Live Scanner workflow from the existing Streamlit stock analyzer.
+An intraday day-trading terminal built in React + TypeScript. Combines a live multi-strategy scanner with automated paper trading execution on Alpaca's paper account, risk management, and performance analytics.
 
-Current build status:
+---
 
-- AI Studio frontend design imported and preserved.
-- App renamed to Sutra.
-- Vite + React + TypeScript project stabilized.
-- Tailwind locked to 3.4.
-- Supabase client configuration added.
-- Broker adapter structure added for Trading212, Capital.com, IG Share Dealing, and IBKR.
-- Database schema draft added in `supabase/schema.sql`.
-- UI currently runs with mock data while scanner parity work is completed.
+## Stack
 
-## Local Setup
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, TypeScript, Tailwind CSS 3.4, Vite 6 |
+| Market Data | Alpaca IEX feed (real-time bars, snapshots, news) |
+| Paper Execution | Alpaca Paper Trading API (bracket orders) |
+| Trade Persistence | Local Node.js JSON file server (`trade-server.mjs`) |
+| Charting | TradingView widget + lightweight-charts (equity curve) |
+
+---
+
+## Running Locally
 
 ```bash
 npm install
-npm run dev
+cp .env.example .env.local   # fill in Alpaca keys
+npm run dev                   # starts Vite (port 3006) + trade server (port 3009) together
 ```
 
-The dev server defaults to:
+The Vite dev server starts `trade-server.mjs` automatically as a child process. No second terminal needed.
+
+Open: `http://localhost:3006`
+
+### Running the trade server standalone (optional)
+
+```bash
+npm run trade-server
+```
+
+Trade history is written to `data/trades.json` and survives browser refreshes.
+
+---
+
+## Environment Variables
+
+Copy `.env.example` to `.env.local`:
 
 ```text
-http://localhost:3000
+VITE_ALPACA_KEY          # Alpaca API key ID  (paper account)
+VITE_ALPACA_SECRET       # Alpaca API secret key
+VITE_ALPACA_DATA_URL     # optional — defaults to https://data.alpaca.markets
+VITE_APP_NAME            # display name (default: Sutra)
 ```
 
-## Environment
+Get free paper trading API keys at [alpaca.markets](https://alpaca.markets).
 
-Copy `.env.example` to `.env.local` and fill:
+---
 
-```text
-VITE_SUPABASE_URL
-VITE_SUPABASE_ANON_KEY
-VITE_APP_NAME
+## ProTrade — Six Intraday Strategies
+
+The core of Sutra is the ProTrade scanner, which evaluates a live universe of stocks against six intraday momentum strategies every 15 seconds during market hours.
+
+| Code | Strategy | Signal |
+|---|---|---|
+| S1 | ORB Retest | Opening range breakout with controlled retest within 20 min |
+| S2 | VWAP Pullback | Trend continuation after VWAP reclaim |
+| S3 | RS Continuation | Relative strength edge vs benchmark |
+| S4 | Liquidity Sweep | Stop-hunt reversal after sweep of prior high/low |
+| S5 | OB/FVG Retest | Order block or fair value gap retest with rejection |
+| S6 | MSS Breakout | Market structure shift with swing confirmation |
+
+### Workflow Stages
+
+Stocks progress through: `raw_candidates → forming → confirmed → locked → trade_ready → ordered`
+
+Only `trade_ready` rows trigger the auto-execute gate.
+
+---
+
+## Auto-Execute: 1-Minute Confirmation Bar Gate
+
+When a symbol reaches `trade_ready`, the engine does **not** fire immediately. It waits for a 1-minute bar to **close** above (BULL) or below (BEAR) the structural entry level with above-average volume before placing a bracket order on Alpaca.
+
+```
+trade_ready detected
+    ↓
+Enqueue symbol (structural level + direction recorded)
+    ↓  (next 15s scan cycle)
+Fetch last closed 1m bar
+    ↓
+BULL: close > level AND volume ≥ 1.1× 20-bar avg → FIRE
+BEAR: close < level AND volume ≥ 1.1× 20-bar avg → FIRE
+    ↓
+Pending count shown in HUD as "N confirming" (amber)
+Unconfirmed setups expire after 5 minutes
 ```
 
-The local `.env.local` is intentionally ignored by git.
+This eliminates entries on the breakout bar itself and low-volume fakes.
 
-## Source Of Truth
+---
 
-The existing Python app remains the source of truth for trading behavior until parity tests prove the TypeScript implementation matches it.
+## Stop Loss Architecture
 
-Important Python files:
+Stops are computed per strategy using two constants:
 
-- `pages/3_Live_Scanner.py`
-- `analyzer/engines.py`
-- `analyzer/execution_risk.py`
-- broker modules under `analyzer/`
+| Constant | Value | Purpose |
+|---|---|---|
+| `STOP_BUFFER_ATR` | 0.5× ATR20 | Structural buffer below/above anchor candle extreme |
+| `NOISE_FLOOR_ATR` | 0.75× ATR20 | Minimum stop distance from entry — no stop tighter than this |
+
+All six strategies use `noiseFlooredStop()` to enforce the floor. Stops are always at least 0.75× the daily ATR away from entry, preventing the stop from sitting inside normal intraday noise.
+
+---
+
+## Risk Management
+
+- **Position sizing**: `(account × 2% risk) / |entry − stop|` shares, capped at available notional budget
+- **Daily loss limit**: configurable (default 8% of starting equity) — blocks new entries if breached
+- **Strategy circuit breaker**: 3 consecutive losses pause a strategy for 2 hours
+- **Max concurrent positions**: configurable (default 5)
+- **Entry cutoff**: no new entries after 3:50 PM ET
+- **EOD flat close**: all open positions closed at 3:57 PM ET (before 4:00 PM market close so Alpaca executes at real market prices)
+
+---
+
+## Trade Persistence
+
+Trades are stored in `data/trades.json` via the local trade server. On every state change, changed trades are fire-and-forget POSTed to the server. localStorage is kept in sync as an immediate fallback.
+
+On browser startup, the app loads all server trades and merges them with any localStorage-only trades (auto-migrating orphaned entries to the server).
+
+The Performance tab, Paper Trade Monitor, and Orders tab all read from the server with date filtering (ET timezone).
+
+---
+
+## Performance Analytics
+
+The Performance tab tracks:
+
+- **Win rate**: structural exits only — `Target` and `T1 Profit` are wins; `Stop` is a loss; `EOD` and `Manual` closes are excluded from the W/L record
+- **Equity curve**: cumulative daily P&L plotted as an SVG line chart
+- **Daily P&L calendar**: heatmap grid by trading date
+- **Strategy breakdown**: per-strategy trade count, W/L, and P&L
+- **Intraday analytics**: profit factor, average R:R, average hold time, hour-of-day P&L
+
+---
+
+## Outcomes
+
+| Outcome | Meaning |
+|---|---|
+| `Target` | T2 hit — full position closed at target |
+| `T1 Profit` | T1 hit — partial scale-out; remaining stopped at T1 (breakeven+) |
+| `Stop` | Structural stop hit — counts as loss |
+| `Manual` | User closed from the monitor UI |
+| `EOD` | System flat-closed at 3:57 PM ET — not counted as win or loss |
+
+---
+
+## Key Files
+
+```
+src/
+  components/
+    ProTradeScanner.tsx     # Main scanner UI, auto-execute, paper trade monitor
+    Execution.tsx           # Orders tab (date picker, Alpaca positions)
+    Configuration.tsx       # Performance analytics, risk settings
+  features/protrade/
+    strategyEngine.ts       # All 6 strategy evaluations, stop/target logic
+    proTradeScannerApi.ts   # Scanner snapshot fetch + workflow stage logic
+  lib/
+    alpacaBroker.ts         # Paper bracket orders, positions, fills
+    alpacaClient.ts         # Market data bars, snapshots, news
+    riskManager.ts          # Daily loss limit, circuit breaker, position sizing
+    tradeStore.ts           # Server-side trade persistence client
+trade-server.mjs            # Local Node.js HTTP server — reads/writes data/trades.json
+data/trades.json            # Trade history (auto-created, gitignored)
+docs/
+  hard-gates-stop-loss-plan.md   # Pending: hard gate restoration plan
+```
+
+---
+
+## Pending Work
+
+- **Hard gate restoration** (`docs/hard-gates-stop-loss-plan.md`): restore RVOL ≥ 1.2 and VWAP alignment as hard `fail` gates for S1/S2, restore MIN_RR to 1.8
+- **Date P&L calendar click-to-filter**: clicking a calendar day sets the monitor date
+- **Entry confirmation for manual trades**: currently only auto-execute has the confirmation bar gate

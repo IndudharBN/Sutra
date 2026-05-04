@@ -13,6 +13,8 @@ import {
   type WorkflowStage,
 } from '../features/protrade/workflowTypes';
 import { baseSymbol } from '../lib/symbols';
+import { loadAllTrades, persistTrade, todayET, tradeDateET } from '../lib/tradeStore';
+import { fetchBars } from '../lib/alpacaClient';
 import { ProTradeCandlePreview } from './ProTradeCandlePreview';
 import { TradingViewChartModal, type TradingViewInterval } from './TradingViewChart';
 import type { Signal, Trading212Snapshot } from '../types';
@@ -88,7 +90,7 @@ interface PaperTrade {
   strategyName: string;
   direction: 'BULL' | 'BEAR' | 'NEUTRAL';
   status: 'Open' | 'Closed';
-  outcome: 'Open' | 'Target' | 'T1 Profit' | 'Stop' | 'Manual';
+  outcome: 'Open' | 'Target' | 'T1 Profit' | 'Stop' | 'Manual' | 'EOD';
   entry: number;
   stop: number;
   target: number;
@@ -965,6 +967,8 @@ function estimatedExitPrice(trade: PaperTrade): number {
 function PaperTradeMonitor({
   trades,
   rows,
+  monitorDate,
+  onMonitorDateChange,
   onCloseTrade,
   onClearClosed,
   onFixZeroPnl,
@@ -972,16 +976,20 @@ function PaperTradeMonitor({
 }: {
   trades: PaperTrade[];
   rows: ProTradeRow[];
+  monitorDate: string;
+  onMonitorDateChange: (date: string) => void;
   onCloseTrade: (trade: PaperTrade, price: number) => void;
   onClearClosed: () => void;
   onFixZeroPnl: () => void;
   realDayPnl: number | null;
 }) {
   const priceBySymbol = new Map(rows.map((row) => [baseSymbol(row.symbol), row.price]));
-  const open = trades.filter((trade) => trade.status === 'Open');
-  const closed = trades.filter((trade) => trade.status === 'Closed');
-  // Use Alpaca equity delta as ground truth; fall back to estimated if not yet initialised
-  const totalPnl = realDayPnl !== null ? realDayPnl : trades.reduce((total, trade) => {
+  const filteredTrades = trades.filter((t) => tradeDateET(t) === monitorDate);
+  const open = filteredTrades.filter((trade) => trade.status === 'Open');
+  const closed = filteredTrades.filter((trade) => trade.status === 'Closed');
+  const isToday = monitorDate === todayET();
+  // Use Alpaca equity delta as ground truth for today; fall back to estimated for historical dates
+  const totalPnl = isToday && realDayPnl !== null ? realDayPnl : filteredTrades.reduce((total, trade) => {
     if (trade.status === 'Open') return total;
     const pnl = (!trade.pnl || trade.pnl === 0)
       ? paperPnl(trade, estimatedExitPrice(trade)).pnl
@@ -996,6 +1004,12 @@ function PaperTradeMonitor({
           <div className="w-1 h-4 bg-cyan-500 rounded-full" />
           <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200">Paper Trade Monitor</h2>
           <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{open.length} open / {closed.length} closed</span>
+          <input
+            type="date"
+            value={monitorDate}
+            onChange={(e) => onMonitorDateChange(e.target.value)}
+            className="ml-2 h-6 px-2 rounded text-[10px] font-bold bg-slate-800 border border-white/10 text-slate-300 focus:outline-none focus:border-cyan-500/50"
+          />
         </div>
         <div className="flex items-center gap-3">
           <span className={`text-xs font-black ${totalPnl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
@@ -1034,7 +1048,7 @@ function PaperTradeMonitor({
             </tr>
           </thead>
           <tbody className="font-mono text-[11px]">
-            {trades.map((trade) => {
+            {filteredTrades.map((trade) => {
               const livePrice = priceBySymbol.get(baseSymbol(trade.symbol)) || trade.entry;
               // For closed trades: use exit price; fall back to estimated stop/target price (fixes $0.00 display)
               const closedExitPrice = trade.exitPrice && trade.exitPrice !== trade.entry
@@ -1095,8 +1109,8 @@ function PaperTradeMonitor({
             })}
           </tbody>
         </table>
-        {!trades.length && (
-          <div className="p-6 text-sm text-slate-500 text-center">No paper trades yet. Open a ticker review panel and click Paper.</div>
+        {!filteredTrades.length && (
+          <div className="p-6 text-sm text-slate-500 text-center">{isToday ? 'No paper trades today. Open a ticker review panel and click Paper.' : `No paper trades on ${monitorDate}.`}</div>
         )}
       </div>
     </div>
@@ -1496,6 +1510,7 @@ export function ProTradeScannerScreen() {
   const [chartRow, setChartRow] = React.useState<ProTradeRow | null>(null);
   const [chartInterval, setChartInterval] = React.useState<TradingViewInterval>('5');
   const [paperTrades, setPaperTrades] = React.useState<PaperTrade[]>(() => loadPaperTrades());
+  const [monitorDate, setMonitorDate] = React.useState<string>(() => todayET());
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [settings, setSettings] = React.useState<ProTradeSettings>(() => loadProTradeSettings());
   const [accountBalance, setAccountBalance] = React.useState(100_000);
@@ -1579,6 +1594,17 @@ export function ProTradeScannerScreen() {
 
   const alertedTradeReadyRef = React.useRef<Set<string>>(new Set());
 
+  // Confirmation queue: symbols that hit trade_ready but haven't fired yet.
+  // Keyed by base symbol; value holds context needed to fire after confirmation.
+  interface ConfirmationEntry {
+    row: ProTradeRow;
+    level: number;           // structural breakout price to confirm above/below
+    direction: 'BULL' | 'BEAR';
+    addedAt: number;
+  }
+  const awaitingConfirmRef = React.useRef<Map<string, ConfirmationEntry>>(new Map());
+  const [pendingConfirmCount, setPendingConfirmCount] = React.useState(0);
+
   const orderedSymbols = React.useMemo(() => buildOrderedSymbols(brokerSnapshot), [brokerSnapshot]);
   const rows = React.useMemo(() => withOrderedStage(snapshot?.rows || [], orderedSymbols, paperTrades), [snapshot?.rows, orderedSymbols, paperTrades]);
   const rawRows = snapshot?.rawRows || [];
@@ -1656,8 +1682,29 @@ export function ProTradeScannerScreen() {
     saveArchive([{ date: todayET, archivedAt: new Date().toISOString(), symbols: watchlist.symbols, results }, ...archive]);
   }, [rows, watchlist, paperTrades]);
 
+  // Load all trades from server on mount (server is source of truth; localStorage is fallback)
+  const serverLoadDone = React.useRef(false);
   React.useEffect(() => {
+    void loadAllTrades<PaperTrade>().then((serverTrades) => {
+      serverLoadDone.current = true;
+      if (serverTrades.length > 0) setPaperTrades(serverTrades);
+    }).catch(() => { serverLoadDone.current = true; });
+  }, []);
+
+  // Persist to localStorage + server on every change (skip very first render to avoid writing stale localStorage to server)
+  const isFirstRender = React.useRef(true);
+  const prevTradesRef = React.useRef<PaperTrade[]>(paperTrades);
+  React.useEffect(() => {
+    if (isFirstRender.current) { isFirstRender.current = false; prevTradesRef.current = paperTrades; return; }
     savePaperTrades(paperTrades);
+    const prev = prevTradesRef.current;
+    paperTrades.forEach((t) => {
+      const old = prev.find((p) => p.id === t.id);
+      if (!old || old.status !== t.status || old.outcome !== t.outcome || old.pnl !== t.pnl || old.exitPrice !== t.exitPrice) {
+        persistTrade(t);
+      }
+    });
+    prevTradesRef.current = paperTrades;
   }, [paperTrades]);
 
   React.useEffect(() => {
@@ -1738,48 +1785,115 @@ export function ProTradeScannerScreen() {
     })();
   }, [snapshot?.rows]); // scan data only — must NOT depend on rows/paperTrades or sync fires on every trade open
 
+  // Auto-execute with 1m confirmation bar gate.
+  // Phase 1 (sync): enqueue newly trade_ready rows; prune stale entries.
+  // Phase 2 (async): fetch 1m bars, check last closed bar for price + volume confirmation, then fire.
   React.useEffect(() => {
     if (!snapshot?.rows.length) return;
-    if (etMinutesNow() >= 15 * 60 + 50) return; // no new entries after 3:50 PM ET
-    if (checkDailyLossLimit(accountBalance).ok === false) return;
-    const posCheck = checkMaxPositions(paperTrades);
-    if (!posCheck.ok) return;
-    const lockedRows = snapshot.rows.filter((row) => row.workflowStage === 'trade_ready' && canPaperTradeRow(row, settings, paperTrades));
-    if (!lockedRows.length) return;
-    const tradedSymbols = new Set(paperTrades.map((trade) => baseSymbol(trade.symbol)));
-    const openedAt = new Date().toISOString();
-    const autoTrades: PaperTrade[] = [];
-    lockedRows.forEach((row) => {
-      const symbolKey = baseSymbol(row.symbol);
-      if (orderedSymbols.has(symbolKey) || tradedSymbols.has(symbolKey)) return;
-      const strategyName = row.primaryStrategy?.strategyId || row.symbol;
-      if (!checkStrategyCircuitBreaker(strategyName).ok) return;
-      if (!checkMaxPositions([...paperTrades, ...autoTrades]).ok) return;
-      // P3: Skip auto-trade when earnings are within ±1 day (too much gap risk)
+    if (etMinutesNow() >= 15 * 60 + 50) return;
+    if (!checkDailyLossLimit(accountBalance).ok) return;
+
+    const pending = awaitingConfirmRef.current;
+    const tradedSymbols = new Set(paperTrades.map((t) => baseSymbol(t.symbol)));
+    const CONFIRM_WINDOW_MS = 5 * 60_000; // abandon if no confirmation within 5 minutes
+    const now = Date.now();
+
+    // Phase 1a — enqueue eligible rows not yet queued or traded
+    snapshot.rows.forEach((row) => {
+      const sym = baseSymbol(row.symbol);
+      if (row.workflowStage !== 'trade_ready') return;
+      if (!canPaperTradeRow(row, settings, paperTrades)) return;
+      if (orderedSymbols.has(sym) || tradedSymbols.has(sym) || pending.has(sym)) return;
       if (row.earningsDays !== null && Math.abs(row.earningsDays) <= 1) return;
-      const trade = buildPaperTrade(row, settings, [...paperTrades, ...autoTrades], openedAt, accountBalance);
-      if (!trade) return;
-      autoTrades.push(trade);
-      tradedSymbols.add(symbolKey);
+      if (!checkStrategyCircuitBreaker(row.primaryStrategy?.strategyId || row.symbol).ok) return;
+      const level = row.tradePlan?.entry;
+      if (!level) return;
+      pending.set(sym, { row, level, direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL', addedAt: now });
     });
 
-    if (!autoTrades.length) return;
-    setPaperTrades((current) => [...autoTrades, ...current]);
-    setApprovalMessage(`Auto paper opened ${autoTrades.length} trade(s): ${autoTrades.map((trade) => trade.symbol).join(', ')}.`);
-    // Mirror each auto-trade to Alpaca paper account (fire-and-forget)
-    autoTrades.forEach((trade) => {
-      const row = lockedRows.find((r) => baseSymbol(r.symbol) === baseSymbol(trade.symbol));
-      if (!row) return;
-      placePaperBracketOrder({ symbol: trade.symbol, direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL', entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional })
-        .catch((err: unknown) => console.warn(`Auto Alpaca paper skipped for ${trade.symbol}:`, err instanceof Error ? err.message : err));
-    });
+    // Phase 1b — prune: window expired or setup degraded
+    for (const [sym, entry] of pending) {
+      const currentRow = snapshot.rows.find((r) => baseSymbol(r.symbol) === sym);
+      if (now - entry.addedAt > CONFIRM_WINDOW_MS || currentRow?.workflowStage !== 'trade_ready') {
+        pending.delete(sym);
+      }
+    }
+
+    setPendingConfirmCount(pending.size);
+    if (!pending.size) return;
+
+    // Phase 2 — async: 1m bar confirmation check
+    const snap = snapshot; // capture before async
+    void (async () => {
+      let barMap: Record<string, { time: string; open: number; high: number; low: number; close: number; volume: number }[]>;
+      try {
+        barMap = await fetchBars([...pending.keys()], '1m');
+      } catch {
+        return; // data unavailable — wait for next cycle
+      }
+
+      const confirmedTrades: PaperTrade[] = [];
+      const openedAt = new Date().toISOString();
+
+      for (const [sym, entry] of pending) {
+        if (!checkMaxPositions([...paperTrades, ...confirmedTrades]).ok) break;
+
+        const candles = barMap[sym];
+        if (!candles || candles.length < 5) continue;
+
+        // candles[length-1] = current in-progress bar (not closed yet)
+        // candles[length-2] = last CONFIRMED closed 1m bar
+        const closedBar = candles[candles.length - 2];
+        const priorBars = candles.slice(-22, -2); // 20 bars before the closed bar
+        const avgVol = priorBars.length > 0
+          ? priorBars.reduce((s, b) => s + b.volume, 0) / priorBars.length
+          : 0;
+
+        const priceConfirmed = entry.direction === 'BULL'
+          ? closedBar.close > entry.level          // 1m bar closed above structural level
+          : closedBar.close < entry.level;          // 1m bar closed below structural level
+        const volConfirmed = avgVol <= 0 || closedBar.volume >= avgVol * 1.1; // above-average volume
+
+        if (!priceConfirmed || !volConfirmed) {
+          // If bar closed significantly BACK THROUGH the level → setup failed, remove
+          const setupFailed = entry.direction === 'BULL'
+            ? closedBar.close < entry.level * 0.998
+            : closedBar.close > entry.level * 1.002;
+          if (setupFailed) pending.delete(sym);
+          continue;
+        }
+
+        const row = snap.rows.find((r) => baseSymbol(r.symbol) === sym);
+        if (!row || row.workflowStage !== 'trade_ready') { pending.delete(sym); continue; }
+
+        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance);
+        if (!trade) { pending.delete(sym); continue; }
+
+        confirmedTrades.push(trade);
+        pending.delete(sym);
+      }
+
+      setPendingConfirmCount(pending.size);
+      if (!confirmedTrades.length) return;
+
+      setPaperTrades((current) => [...confirmedTrades, ...current]);
+      setApprovalMessage(`1m confirmed: ${confirmedTrades.map((t) => t.symbol).join(', ')} — entry after close above level.`);
+
+      confirmedTrades.forEach((trade) => {
+        placePaperBracketOrder({
+          symbol: trade.symbol,
+          direction: trade.direction === 'BEAR' ? 'BEAR' : 'BULL',
+          entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional,
+        }).catch((err: unknown) => console.warn(`Alpaca order skipped for ${trade.symbol}:`, err instanceof Error ? err.message : err));
+      });
+    })();
   }, [snapshot?.rows, orderedSymbols, paperTrades, settings]);
 
-  // EOD flat: at 4:32 PM ET close all open positions on Alpaca and mark locally as closed
+  // EOD flat: at 3:57 PM ET close all open positions before 4:00 PM market close
   React.useEffect(() => {
     const interval = setInterval(() => {
       const mins = etMinutesNow();
-      if (mins < 16 * 60 + 32 || mins > 16 * 60 + 35) return; // fires once in 4:32–4:35 window
+      if (mins < 15 * 60 + 57 || mins > 16 * 60) return; // fires once in 3:57–4:00 window
       const openTrades = paperTrades.filter((t) => t.status === 'Open');
       if (!openTrades.length) return;
       const closedAt = new Date().toISOString();
@@ -1787,10 +1901,10 @@ export function ProTradeScannerScreen() {
         if (t.status !== 'Open') return t;
         const row = snapshot?.rows.find((r) => baseSymbol(r.symbol) === baseSymbol(t.symbol));
         const exitPrice = row?.price ?? t.entry;
-        return closePaperTrade(t, exitPrice, 'Manual', closedAt);
+        return closePaperTrade(t, exitPrice, 'EOD', closedAt);
       }));
       closeAllPaperPositions().catch(() => {});
-      setApprovalMessage(`EOD 4:32 PM — closed ${openTrades.length} open position(s) flat.`);
+      setApprovalMessage(`EOD 3:57 PM — closed ${openTrades.length} open position(s) flat.`);
     }, 60_000); // check every minute
     return () => clearInterval(interval);
   }, [paperTrades, snapshot?.rows]);
@@ -1893,7 +2007,7 @@ export function ProTradeScannerScreen() {
         const todayClosed = paperTrades.filter((t) => t.status === 'Closed' && new Date(t.openedAt).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === todayET);
         // Use outcome label — not pnl — to determine wins/losses (pnl may be stale/zero from prior bugs)
         const todayWins = todayClosed.filter((t) => t.outcome === 'Target' || t.outcome === 'T1 Profit').length;
-        const todayLosses = todayClosed.filter((t) => t.outcome === 'Stop' || t.outcome === 'Manual').length;
+        const todayLosses = todayClosed.filter((t) => t.outcome === 'Stop').length;
         const priceMap = new Map(rows.map((r) => [baseSymbol(r.symbol), r.price]));
         const openTrades = paperTrades.filter((t) => t.status === 'Open');
         const openPnl = openTrades.reduce((sum, t) => {
@@ -1946,6 +2060,9 @@ export function ProTradeScannerScreen() {
                   <span className={tradeReadyCount > 0 ? 'text-emerald-400 font-black' : 'text-slate-400'}>
                     {tradeReadyCount} ready
                   </span>
+                  {pendingConfirmCount > 0 && (
+                    <span className="text-amber-400 font-black"> · {pendingConfirmCount} confirming</span>
+                  )}
                   {' '}· {scanAge}s ago
                 </p>
               </div>
@@ -1988,7 +2105,7 @@ export function ProTradeScannerScreen() {
               )}
               {!stale && etMins >= cutoffMins && etMins < 16 * 60 + 35 && (
                 <span className="ml-auto px-3 py-1 rounded-full border border-rose-500/30 bg-rose-500/10 text-rose-300 text-[10px] font-black uppercase tracking-widest">
-                  Entry cutoff — EOD in {Math.max(0, 16 * 60 + 32 - etMins)}m
+                  Entry cutoff — EOD in {Math.max(0, 15 * 60 + 57 - etMins)}m
                 </span>
               )}
             </div>
@@ -2159,6 +2276,8 @@ export function ProTradeScannerScreen() {
       <PaperTradeMonitor
         trades={paperTrades}
         rows={rows}
+        monitorDate={monitorDate}
+        onMonitorDateChange={setMonitorDate}
         onCloseTrade={manualClosePaperTrade}
         onClearClosed={clearClosedTrades}
         onFixZeroPnl={fixZeroPnlTrades}
