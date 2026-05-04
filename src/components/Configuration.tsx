@@ -805,7 +805,7 @@ export function SettingsScreen(_props: SettingsScreenProps) {
           {[
             'Trade window: 9:30 AM – 3:50 PM ET',
             'S5 earliest: ≥5 RTH bars (~9:55 AM)',
-            'EOD flat: 4:32 PM ET',
+            'EOD flat: 3:57 PM ET',
             'Min R:R ≥ 1.5 for Trade Ready',
             'RVOL ≥ 1.2× hard gate: S1, S3, S5',
             'RVOL ≥ 1.0 soft: S2, S4, S6',
