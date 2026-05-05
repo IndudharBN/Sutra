@@ -7,14 +7,12 @@ import type { StrategyChecklistItem, StrategyId, StrategyInput, StrategySignal, 
 import { STRATEGY_LABELS, workflowStageRank } from './workflowTypes';
 
 const MIN_RR = 1.5;
-const PREFERRED_RR = 2.5;
-// Structural buffer: space below/above the anchor candle extreme (was 0.08–0.12)
-const STOP_BUFFER_ATR = 0.5;
-// Noise floor: minimum stop distance from entry — stop can never be tighter than this.
-// 0.75×ATR covers normal intraday bid-ask noise and 1-minute wicks for most liquid stocks.
-// (User-referenced 1.5×ATR is valid for large-caps; 0.75× is the practical floor for
-//  high-ATR-% names like biotechs where 1.5×ATR targets become unrealistic intraday.)
-const NOISE_FLOOR_ATR = 0.75;
+const PREFERRED_RR = 3.0;   // T2 at 3R (was 2.5 — swing-trade width)
+const T1_RR = 1.5;          // T1 scale-out at 1.5R (was 2R — easier intraday hit)
+// Structural buffer: just outside the anchor, not 0.5×ATR beyond it (was 0.5)
+const STOP_BUFFER_ATR = 0.12;
+// Noise floor: min stop distance from entry — 0.30×ATR covers bid-ask noise for liquid names (was 0.75)
+const NOISE_FLOOR_ATR = 0.30;
 
 function pass(label: string, detail: string): StrategyChecklistItem {
   return { label, passed: true, detail };
@@ -74,7 +72,7 @@ function planFromLevelsT1T2(
     target1: round(t1, 2),
     target2: round(t2, 2),
     rr: round(rrT2, 2),
-    rr1: 2,
+    rr1: T1_RR,
     riskPerShare: round(Math.abs(entry - stop), 2),
     triggerCandleTime: trigger?.time || new Date().toISOString(),
     invalidation: input.direction === 'BULL' ? 'Price closes below stop or loses VWAP with volume.' : 'Price closes above stop or reclaims VWAP with volume.',
@@ -258,7 +256,7 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const orRange = range ? range.high - range.low : 0;
   const breakoutLevel = range ? (input.direction === 'BULL' ? range.high : range.low) : entry;
   const measuredMove = input.direction === 'BULL' ? breakoutLevel + orRange : breakoutLevel - orRange;
-  const t1 = input.direction === 'BULL' ? entry + risk * 2 : entry - risk * 2;
+  const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = input.direction === 'BULL' ? Math.max(measuredMove, t1) : Math.min(measuredMove, t1);
   const tradePlan = directionOk(input) && range ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const checklist = [
@@ -293,7 +291,7 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const rawStop = input.direction === 'BULL' ? swing - input.atr20 * STOP_BUFFER_ATR : swing + input.atr20 * STOP_BUFFER_ATR;
   const stop = noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20);
   const risk = Math.abs(entry - stop);
-  const t1 = input.direction === 'BULL' ? entry + risk * 2 : entry - risk * 2;
+  const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
   const tradePlan = directionOk(input) && recent.length >= 4 ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const checklist = [
@@ -323,7 +321,7 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
   const rawStop = input.direction === 'BULL' ? microLow - input.atr20 * STOP_BUFFER_ATR : microHigh + input.atr20 * STOP_BUFFER_ATR;
   const stop = noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20);
   const risk = Math.abs(entry - stop);
-  const t1 = input.direction === 'BULL' ? entry + risk * 2 : entry - risk * 2;
+  const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
   const tradePlan = directionOk(input) && recent.length >= 6 ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   // 1H directional: compare current 15m close to close from 4 bars ago (≈ 1 hour)
@@ -383,7 +381,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   // T1 = 2R (scale 50%, move stop to breakeven)
   // T2 = OR opposite side (range expansion target); fall back to 2.5R if OR opposite is closer than T1
   const orOpposite = range ? (input.direction === 'BULL' ? range.high : range.low) : null;
-  const t1 = input.direction === 'BULL' ? entry + risk * 2 : entry - risk * 2;
+  const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2Raw = orOpposite ?? (input.direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR);
   const t2 = input.direction === 'BULL' ? Math.max(t2Raw, t1) : Math.min(t2Raw, t1);
 
@@ -454,7 +452,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
     : (dir === 'BULL' ? entry - input.atr20 * NOISE_FLOOR_ATR : entry + input.atr20 * NOISE_FLOOR_ATR);
   const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20);
   const risk = Math.abs(entry - stop);
-  const t1 = dir === 'BULL' ? entry + risk * 2 : entry - risk * 2;
+  const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
   const tradePlan = hasStructure ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
 
@@ -530,12 +528,9 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
   const swingStop = dir === 'BULL'
     ? Math.min(...five.slice(-5).map((c) => c.low)) - input.atr20 * STOP_BUFFER_ATR
     : Math.max(...five.slice(-5).map((c) => c.high)) + input.atr20 * STOP_BUFFER_ATR;
-  // S6 keeps its own 1.2×ATR hard floor (stronger than NOISE_FLOOR_ATR) — MSS needs more room.
-  const stop = dir === 'BULL'
-    ? Math.min(swingStop, entry - input.atr20 * 1.2)
-    : Math.max(swingStop, entry + input.atr20 * 1.2);
+  const stop = noiseFlooredStop(dir, entry, swingStop, input.atr20);
   const risk = Math.abs(entry - stop);
-  const t1 = dir === 'BULL' ? entry + risk * 2 : entry - risk * 2;
+  const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
   const tradePlan = mssOk && bar2Ok && !zoneBlocked ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
 
