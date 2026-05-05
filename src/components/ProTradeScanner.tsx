@@ -5,6 +5,7 @@ import { placePaperBracketOrder, closeAllPaperPositions, closePaperPosition, get
 import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, getDailyStartBalance, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
 import { alpacaBarStream } from '../lib/alpacaBarStream';
 import { clearBarCache } from '../lib/alpacaClient';
+import { fetchIntradayRegime, REGIME_SIZE_MULT, REGIME_COLOR, type IntradayRegime, type IntradayRegimeType } from '../lib/intradayRegime';
 import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
 import {
   STRATEGY_CODES,
@@ -109,6 +110,7 @@ interface PaperTrade {
   exitPrice?: number;
   pnl?: number;
   pnlPercent?: number;
+  mae?: number;   // Maximum Adverse Excursion: worst price move against entry during trade life
   reason: string;
 }
 
@@ -416,14 +418,14 @@ function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT
   return Boolean(plan && plan.rr >= 1.5 && availablePaperNotional(settings, trades) > 0);
 }
 
-function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000): PaperTrade | null {
+function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, regimeSizeMult = 1.0): PaperTrade | null {
   const plan = effectiveTradePlan(row, settings);
   if (!plan || plan.rr < 1.5) return null;
   const budgetCap = settings.tradingAmount > 0
     ? availablePaperNotional(settings, currentTrades)
-    : accountBalance * 0.05; // 5% of account balance per trade when no explicit budget set
+    : accountBalance * 0.05;
   const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop);
-  const riskNotional = riskQty * plan.entry;
+  const riskNotional = riskQty * plan.entry * regimeSizeMult;  // halved on CHOPPY days
   const notional = Math.min(budgetCap, riskNotional);
   if (notional <= 0) return null;
   const strategyId = row.primaryStrategy?.strategyId || null;
@@ -688,6 +690,7 @@ function WorkflowTable({
                   <th className="py-2.5 px-3 border-r border-white/5">Exit Time</th>
                   <th className="py-2.5 px-3 border-r border-white/5 text-right">Profit / Loss</th>
                   <th className="py-2.5 px-3 border-r border-white/5 text-right">P&L %</th>
+                  <th className="py-2.5 px-3 border-r border-white/5 text-right">MAE $</th>
                 </>
               )}
               <th className="py-2.5 px-3 border-r border-white/5">Reason</th>
@@ -760,6 +763,9 @@ function WorkflowTable({
                         </td>
                         <td className={`py-3 px-3 border-r border-white/5 text-right font-black ${(livePnl?.pnlPercent || 0) >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
                           {livePnl ? `${livePnl.pnlPercent >= 0 ? '+' : ''}${livePnl.pnlPercent.toFixed(2)}%` : '--'}
+                        </td>
+                        <td className="py-3 px-3 border-r border-white/5 text-right text-amber-300 font-mono">
+                          {orderedTrade?.mae != null ? `$${orderedTrade.mae.toFixed(2)}` : '--'}
                         </td>
                       </>
                     )}
@@ -1525,6 +1531,7 @@ export function ProTradeScannerScreen() {
   const [watchlistOnly, setWatchlistOnly] = React.useState(false);
   const [viewMode, setViewMode] = React.useState<'premarket' | 'workflow'>(() => isPremarketWindow() ? 'premarket' : 'workflow');
   const [cbTick, setCbTick] = React.useState(0);
+  const [intradayRegime, setIntradayRegime] = React.useState<IntradayRegime>({ regime: 'NORMAL', spyRangePct: 0.5, spyRange: 0, spyAdr: 0 });
 
   async function load(manual = false) {
     try {
@@ -1554,7 +1561,12 @@ export function ProTradeScannerScreen() {
     migrateCbKeys();
     alpacaBarStream.connect();
     void load();
-    return () => alpacaBarStream.destroy();
+    // Fetch intraday regime on mount and refresh every 5 minutes
+    void fetchIntradayRegime().then(setIntradayRegime);
+    const regimeInterval = setInterval(() => {
+      void fetchIntradayRegime().then(setIntradayRegime);
+    }, 5 * 60_000);
+    return () => { alpacaBarStream.destroy(); clearInterval(regimeInterval); };
   }, []);
 
   // Full universe scan every 60s
@@ -1769,6 +1781,20 @@ export function ProTradeScannerScreen() {
         const alpacaPositions = await getPaperPositions();
         const alpacaSymbols = new Set(alpacaPositions.map((p) => p.symbol.toUpperCase()));
 
+        // Update MAE (Maximum Adverse Excursion) for each open trade using current Alpaca price
+        const posMap = new Map(alpacaPositions.map((p) => [p.symbol.toUpperCase(), p]));
+        setPaperTrades((current) => current.map((t) => {
+          if (t.status !== 'Open') return t;
+          const pos = posMap.get(t.symbol.toUpperCase());
+          const curPrice = pos?.current_price ? parseFloat(pos.current_price) : null;
+          if (!curPrice) return t;
+          const adverseMove = t.direction === 'BULL'
+            ? Math.max(0, t.entry - curPrice)
+            : Math.max(0, curPrice - t.entry);
+          const newMae = Math.max(t.mae ?? 0, adverseMove);
+          return newMae !== (t.mae ?? 0) ? { ...t, mae: Math.round(newMae * 100) / 100 } : t;
+        }));
+
         // Grace: ignore trades opened in the last 2 minutes — Alpaca position may not be registered yet
         const SYNC_GRACE_MS = 120_000;
         const closedInAlpaca = openTrades.filter((t) =>
@@ -1913,7 +1939,7 @@ export function ProTradeScannerScreen() {
         const row = snap.rows.find((r) => baseSymbol(r.symbol) === sym);
         if (!row || row.workflowStage !== 'trade_ready') { pending.delete(sym); continue; }
 
-        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance);
+        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance, REGIME_SIZE_MULT[intradayRegime.regime]);
         if (!trade) { pending.delete(sym); continue; }
 
         confirmedTrades.push(trade);
@@ -1999,7 +2025,7 @@ export function ProTradeScannerScreen() {
     if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
     const posCheck = checkMaxPositions(paperTrades);
     if (!posCheck.ok) { setApprovalMessage(posCheck.reason!); return; }
-    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance);
+    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, REGIME_SIZE_MULT[intradayRegime.regime]);
     if (!trade) {
       const plan = effectiveTradePlan(row, settings);
       if (!plan) {
@@ -2151,6 +2177,10 @@ export function ProTradeScannerScreen() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                <span className={`px-2 py-0.5 rounded border text-[9px] font-black uppercase ${REGIME_COLOR[intradayRegime.regime]}`}>
+                  {intradayRegime.regime} {intradayRegime.spyRangePct > 0 ? `${Math.round(intradayRegime.spyRangePct * 100)}% ADR` : ''}
+                  {intradayRegime.regime === 'CHOPPY' ? ' · ½ size' : ''}
+                </span>
                 {pausedStrats.length > 0 ? (
                   <>
                     <span className="text-[9px] uppercase tracking-widest text-rose-400 font-black">CB Paused:</span>
