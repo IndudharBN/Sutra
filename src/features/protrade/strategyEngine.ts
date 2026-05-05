@@ -7,12 +7,12 @@ import type { StrategyChecklistItem, StrategyId, StrategyInput, StrategySignal, 
 import { STRATEGY_LABELS, workflowStageRank } from './workflowTypes';
 
 const MIN_RR = 1.5;
-const PREFERRED_RR = 3.0;   // T2 at 3R (was 2.5 — swing-trade width)
-const T1_RR = 1.5;          // T1 scale-out at 1.5R (was 2R — easier intraday hit)
-// Structural buffer: just outside the anchor, not 0.5×ATR beyond it (was 0.5)
-const STOP_BUFFER_ATR = 0.12;
-// Noise floor: min stop distance from entry — 0.30×ATR covers bid-ask noise for liquid names (was 0.75)
-const NOISE_FLOOR_ATR = 0.30;
+const PREFERRED_RR = 2.5;   // fallback T2 when no daily data (PDH/PDL is primary)
+const T1_RR = 1.5;          // T1 scale-out at 1.5R — easier intraday hit, move to BE
+// Structural buffer: clears institutional stop-hunt zone (0.10–0.20×ATR probes)
+const STOP_BUFFER_ATR = 0.25;
+// Noise floor: min stop distance from entry — covers bid-ask + 1m wick noise
+const NOISE_FLOOR_ATR = 0.35;
 
 function pass(label: string, detail: string): StrategyChecklistItem {
   return { label, passed: true, detail };
@@ -97,8 +97,8 @@ function prevDayLevels(input: StrategyInput): { pdh: number; pdl: number } | nul
   return { pdh: prev.high, pdl: prev.low };
 }
 
-// Compute structural T2: PDH (bull) or PDL (bear), capped at max 3R to stay realistic.
-// Falls back to PREFERRED_RR if no daily data.
+// Structural T2: PDH (bull) or PDL (bear) — the real structural magnet.
+// Falls back to PREFERRED_RR only when no daily data is available.
 function structuralT2(
   input: StrategyInput,
   entry: number,
@@ -111,10 +111,8 @@ function structuralT2(
     : entry - risk * PREFERRED_RR;
   if (!prev) return fallback;
   const raw = input.direction === 'BULL' ? prev.pdh : prev.pdl;
-  // Must be beyond T1 and no more than 3R away (avoids chasing distant levels)
-  const cap3R = input.direction === 'BULL' ? entry + risk * 3 : entry - risk * 3;
-  const capped = input.direction === 'BULL' ? Math.min(raw, cap3R) : Math.max(raw, cap3R);
-  return input.direction === 'BULL' ? Math.max(capped, t1) : Math.min(capped, t1);
+  // PDH/PDL is the structural target — must be beyond T1 to be valid
+  return input.direction === 'BULL' ? Math.max(raw, t1) : Math.min(raw, t1);
 }
 
 // Returns 'closed' outside 9:30–16:00 ET, 'blackout' during 9:30–10:00 (first 30m), 'open' otherwise.
