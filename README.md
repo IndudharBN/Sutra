@@ -96,16 +96,18 @@ This eliminates entries on the breakout bar itself and low-volume fakes.
 
 ---
 
-## Stop Loss Architecture
+## Stop Loss / Take Profit Architecture
 
-Stops are computed per strategy using two constants:
+Stops and targets are computed per strategy using these constants (`strategyEngine.ts`):
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `STOP_BUFFER_ATR` | 0.5× ATR20 | Structural buffer below/above anchor candle extreme |
-| `NOISE_FLOOR_ATR` | 0.75× ATR20 | Minimum stop distance from entry — no stop tighter than this |
+| `STOP_BUFFER_ATR` | 0.25× ATR20 | Buffer beyond structural anchor — clears institutional stop-hunt probes (0.10–0.20×ATR) |
+| `NOISE_FLOOR_ATR` | 0.35× ATR20 | Minimum stop distance from entry — covers 1m wick + bid-ask noise |
+| `T1_RR` | 1.5R | Scale-out at T1 — easier intraday hit; stop moves to breakeven after T1 |
+| T2 | Structural (PDH/PDL) | Previous day's high (BULL) or low (BEAR) — real price level, not a mechanical multiplier |
 
-All six strategies use `noiseFlooredStop()` to enforce the floor. Stops are always at least 0.75× the daily ATR away from entry, preventing the stop from sitting inside normal intraday noise.
+All six strategies use `noiseFlooredStop()` which picks the wider of (structural anchor − buffer) and (entry − noise floor), ensuring stops sit just outside the institutional probe zone without excessive swing-trader room.
 
 ---
 
@@ -167,8 +169,10 @@ src/
     proTradeScannerApi.ts   # Scanner snapshot fetch + workflow stage logic
   lib/
     alpacaBroker.ts         # Paper bracket orders, positions, fills
-    alpacaClient.ts         # Market data bars, snapshots, news
+    alpacaClient.ts         # Market data bars, snapshots, news (TTL cache + dedup)
+    alpacaBarStream.ts      # WebSocket 5m bar stream (IEX real-time)
     riskManager.ts          # Daily loss limit, circuit breaker, position sizing
+    intradayRegime.ts       # Intraday regime detection (SPY range vs ADR)
     tradeStore.ts           # Server-side trade persistence client
 trade-server.mjs            # Local Node.js HTTP server — reads/writes data/trades.json
 data/trades.json            # Trade history (auto-created, gitignored)
@@ -178,8 +182,47 @@ docs/
 
 ---
 
+## Branch History
+
+### `Stoplossadjusymay5` — 2026-05-05
+Tightened SL/TP from swing-trader to intraday parameters:
+- `STOP_BUFFER_ATR` 0.50 → 0.25 (avoids institutional stop-hunt zone)
+- `NOISE_FLOOR_ATR` 0.75 → 0.35 (covers 1m wick + spread noise)
+- T1 2R → 1.5R (faster hit, move to breakeven sooner)
+- T2 mechanical 2.5R → structural PDH/PDL (real level, no cap)
+- Fixed 429 on `/v2/stocks/snapshots`: clearBarCache scoped to bars/hist only; snapshot TTL 15s→45s; in-flight deduplication on fetchBars + fetchSnapshots
+- Fixed CB unpause: added `cbTick` + `accountBalance` to auto-execute effect deps
+- Fixed CB daily reset: consecutive loss count resets each new trading day
+
+### `MARKETREGIMEDETECTION` — 2026-05-05
+Added intraday session intelligence — system now adapts to market character:
+
+**1. Intraday Regime Detection** (`src/lib/intradayRegime.ts`)
+- Fetches SPY 5m bars (today's range) + SPY daily bars (20-day ADR)
+- CHOPPY: range < 40% ADR → 50% position size
+- NORMAL: 40–65% ADR → 100% size
+- TRENDING: > 65% ADR → 100% size
+- HUD badge shows live regime + % ADR used (e.g. `CHOPPY 32% ADR · ½ size`)
+- Pre-market defaults to NORMAL (no today bars yet)
+
+**2. MAE Tracking** (Maximum Adverse Excursion)
+- `mae` field added to every paper trade
+- Updated each Alpaca position sync using live `current_price`
+- Shown as `MAE $` column in trade table (amber)
+- Tells you over time whether stops are tight enough or too wide
+
+**3. Regime-Adjusted Position Sizing**
+- Applied consistently: auto-execute, manual paper trade, and Alpaca approve
+- CHOPPY day → 50% notional → halves dollar loss before circuit breaker fires
+
+### `WINRATE55` — open
+Experimental win-rate filters for S1 (RVOL ≥ 1.2, ADR gate) and S5 (VWAP, RVOL, RSI14, RTH bars, ADR). Under observation.
+
+---
+
 ## Pending Work
 
-- **Hard gate restoration** (`docs/hard-gates-stop-loss-plan.md`): restore RVOL ≥ 1.2 and VWAP alignment as hard `fail` gates for S1/S2, restore MIN_RR to 1.8
+- **WINRATE55 validation**: need 30–50 trade sample to confirm edge vs noise
+- **MAE analysis**: watch MAE vs stop floor over 2–3 weeks to confirm 0.25×/0.35× ATR parameters
 - **Date P&L calendar click-to-filter**: clicking a calendar day sets the monitor date
-- **Entry confirmation for manual trades**: currently only auto-execute has the confirmation bar gate
+- **Entry confirmation for manual trades**: currently only auto-execute has the 1m confirmation bar gate
