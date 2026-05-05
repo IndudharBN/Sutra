@@ -1934,7 +1934,7 @@ export function ProTradeScannerScreen() {
         }).catch((err: unknown) => console.warn(`Alpaca order skipped for ${trade.symbol}:`, err instanceof Error ? err.message : err));
       });
     })();
-  }, [snapshot?.rows, orderedSymbols, paperTrades, settings]);
+  }, [snapshot?.rows, orderedSymbols, paperTrades, settings, cbTick, accountBalance]);
 
   // EOD flat: at 3:57 PM ET close all open positions before 4:00 PM market close
   React.useEffect(() => {

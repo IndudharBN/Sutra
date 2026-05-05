@@ -35,10 +35,23 @@ function cacheSet<T>(key: string, data: T, ttlMs: number) {
   _cache.set(key, { data, expiresAt: Date.now() + ttlMs });
 }
 
-// Evict all cache entries for a specific symbol (called after WebSocket bar close).
+// In-flight deduplication: concurrent callers for same key share one request
+const _inflight = new Map<string, Promise<unknown>>();
+function dedupe<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const existing = _inflight.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+  const p = fn().finally(() => _inflight.delete(key));
+  _inflight.set(key, p as Promise<unknown>);
+  return p;
+}
+
+// Evict bar/hist cache entries for a symbol after WebSocket bar close.
+// Snapshot/news/sector caches are intentionally preserved — they have their own TTLs.
 export function clearBarCache(symbol: string): void {
   for (const key of _cache.keys()) {
-    if (key.includes(symbol)) _cache.delete(key);
+    if ((key.startsWith('bars:') || key.startsWith('hist:')) && key.includes(symbol)) {
+      _cache.delete(key);
+    }
   }
 }
 
@@ -101,13 +114,15 @@ export async function fetchBars(symbols: string[], interval: Interval): Promise<
   const hit = cacheGet<Record<string, Candle[]>>(cacheKey);
   if (hit) return hit;
 
-  const data = await alpacaGet<{ bars: Record<string, AlpacaBar[]> }>('/v2/stocks/bars', {
-    symbols: symbols.join(','),
-    timeframe: ALPACA_TF[interval],
-    limit: String(BAR_LIMIT[interval]),
-    sort: 'asc',
-    feed: 'iex',
-  });
+  const data = await dedupe(cacheKey, () =>
+    alpacaGet<{ bars: Record<string, AlpacaBar[]> }>('/v2/stocks/bars', {
+      symbols: symbols.join(','),
+      timeframe: ALPACA_TF[interval],
+      limit: String(BAR_LIMIT[interval]),
+      sort: 'asc',
+      feed: 'iex',
+    })
+  );
 
   const result: Record<string, Candle[]> = {};
   for (const [sym, bars] of Object.entries(data.bars || {})) {
@@ -120,15 +135,17 @@ export async function fetchBars(symbols: string[], interval: Interval): Promise<
 // ── Snapshots (price, RVOL estimate, gap, current minute bar) ─────────────────
 export async function fetchSnapshots(symbols: string[]): Promise<Record<string, AlpacaSnapshot>> {
   if (!symbols.length) return {};
-  const cacheKey = `snap:${symbols.sort().join(',')}`;
+  const cacheKey = `snap:${symbols.slice().sort().join(',')}`;
   const hit = cacheGet<Record<string, AlpacaSnapshot>>(cacheKey);
   if (hit) return hit;
 
-  const data = await alpacaGet<Record<string, AlpacaSnapshot>>('/v2/stocks/snapshots', {
-    symbols: symbols.join(','),
-    feed: 'iex',
-  });
-  cacheSet(cacheKey, data, 15_000);
+  const data = await dedupe(cacheKey, () =>
+    alpacaGet<Record<string, AlpacaSnapshot>>('/v2/stocks/snapshots', {
+      symbols: symbols.join(','),
+      feed: 'iex',
+    })
+  );
+  cacheSet(cacheKey, data, 45_000);
   return data;
 }
 
