@@ -1783,17 +1783,23 @@ export function ProTradeScannerScreen() {
 
         // Update MAE (Maximum Adverse Excursion) for each open trade using current Alpaca price
         const posMap = new Map(alpacaPositions.map((p) => [p.symbol.toUpperCase(), p]));
-        setPaperTrades((current) => current.map((t) => {
-          if (t.status !== 'Open') return t;
-          const pos = posMap.get(t.symbol.toUpperCase());
-          const curPrice = pos?.current_price ? parseFloat(pos.current_price) : null;
-          if (!curPrice) return t;
-          const adverseMove = t.direction === 'BULL'
-            ? Math.max(0, t.entry - curPrice)
-            : Math.max(0, curPrice - t.entry);
-          const newMae = Math.max(t.mae ?? 0, adverseMove);
-          return newMae !== (t.mae ?? 0) ? { ...t, mae: Math.round(newMae * 100) / 100 } : t;
-        }));
+        setPaperTrades((current) => {
+          let anyChanged = false;
+          const updated = current.map((t) => {
+            if (t.status !== 'Open') return t;
+            const pos = posMap.get(t.symbol.toUpperCase());
+            const curPrice = pos?.current_price ? parseFloat(pos.current_price) : null;
+            if (!curPrice) return t;
+            const adverseMove = t.direction === 'BULL'
+              ? Math.max(0, t.entry - curPrice)
+              : Math.max(0, curPrice - t.entry);
+            const newMae = Math.round(Math.max(t.mae ?? 0, adverseMove) * 100) / 100;
+            if (newMae === (t.mae ?? 0)) return t;
+            anyChanged = true;
+            return { ...t, mae: newMae };
+          });
+          return anyChanged ? updated : current; // return same ref if nothing changed → no re-render
+        });
 
         // Grace: ignore trades opened in the last 2 minutes — Alpaca position may not be registered yet
         const SYNC_GRACE_MS = 120_000;
@@ -2006,7 +2012,7 @@ export function ProTradeScannerScreen() {
         entry: plan.entry,
         stop: plan.stop,
         target: plan.target,
-        notional: qty * plan.entry,
+        notional: qty * plan.entry * REGIME_SIZE_MULT[intradayRegime.regime],
       });
       setApprovalMessage(`Alpaca paper bracket submitted: ${order.id.slice(0, 8)} · ${row.symbol} ${order.side.toUpperCase()} ${order.qty} shares`);
       await load(true);

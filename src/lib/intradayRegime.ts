@@ -44,8 +44,10 @@ export async function fetchIntradayRegime(): Promise<IntradayRegime> {
       : 0;
 
     const spyRangePct = spyAdr > 0 ? spyRange / spyAdr : 0;
-    const regime: IntradayRegimeType =
-      spyRangePct < 0.40 ? 'CHOPPY' : spyRangePct > 0.65 ? 'TRENDING' : 'NORMAL';
+    // Pre-market: no today bars yet → range=0 → would falsely classify as CHOPPY. Default NORMAL.
+    const regime: IntradayRegimeType = todayBars.length < 2
+      ? 'NORMAL'
+      : spyRangePct < 0.40 ? 'CHOPPY' : spyRangePct > 0.65 ? 'TRENDING' : 'NORMAL';
 
     const result: IntradayRegime = { regime, spyRangePct, spyRange: Math.round(spyRange * 100) / 100, spyAdr: Math.round(spyAdr * 100) / 100 };
     _cached = { result, expiresAt: Date.now() + 5 * 60_000 };
