@@ -15,7 +15,8 @@ export type StrategyId =
   | 'rs_continuation'
   | 'liquidity_sweep'
   | 'ob_fvg_retest'
-  | 'mss_breakout';
+  | 'mss_breakout'
+  | 's7_volume_surge';
 
 export type MarketDataProviderId = 'yahoo' | 'alpaca' | 'polygon' | 'ibkr';
 
@@ -123,6 +124,7 @@ export const STRATEGY_LABELS: Record<StrategyId, string> = {
   liquidity_sweep: 'Liquidity Sweep',
   ob_fvg_retest: 'OB/FVG Retest',
   mss_breakout: 'MSS Breakout',
+  s7_volume_surge: 'Volume Surge',
 };
 
 export const STRATEGY_CODES: Record<StrategyId, string> = {
@@ -132,6 +134,7 @@ export const STRATEGY_CODES: Record<StrategyId, string> = {
   liquidity_sweep: 'S4',
   ob_fvg_retest: 'S5',
   mss_breakout: 'S6',
+  s7_volume_surge: 'S7',
 };
 
 export const WORKFLOW_STAGE_ORDER: WorkflowStage[] = [

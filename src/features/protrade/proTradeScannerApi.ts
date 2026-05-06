@@ -76,6 +76,7 @@ export interface ProTradeSnapshot {
   filteredOut: number;
   fetchedAt: string;
   providerStatus: string;
+  spyTrend5m: 'UP' | 'DOWN' | 'FLAT';
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -400,6 +401,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
     fetchNewsFlags(top),
     fetchSectorTrends(),
     fetchBars(['SPY'], '1h'),
+    fetchBars(['SPY'], '5m'),
   ]);
 
   // Warm earnings + float caches in background — never block the scan
@@ -411,6 +413,10 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
   const spyLast = spyH1.length >= 2 ? spyH1[spyH1.length - 1].close : 0;
   const spyPrev = spyH1.length >= 2 ? spyH1[spyH1.length - 2].close : spyLast;
   const spyChangePct = spyPrev > 0 ? (spyLast - spyPrev) / spyPrev : 0;
+
+  // Lead Quant: Compute SPY 5m Intraday Direction
+  const spy5m = (spyBars['SPY'] || []);
+  const spyTrend5m = candleTrend(spy5m);
 
   const fetchedAt = new Date().toISOString();
   const providerStatus = dataProviderStatus(fetchedAt);
@@ -436,5 +442,6 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
     filteredOut: candidates.length - top.length,
     fetchedAt,
     providerStatus: `Alpaca IEX • ${top.length} symbols`,
+    spyTrend5m,
   };
 }

@@ -204,9 +204,8 @@ function StrategyCodeList({ row }: { row: ProTradeRow }) {
         <span
           key={signal.strategyId}
           title={`${STRATEGY_CODES[signal.strategyId]} - ${signal.strategyName}: ${WORKFLOW_STAGE_LABELS[signal.stage]}`}
-          className={`inline-flex items-center rounded px-1.5 py-0.5 text-[9px] uppercase tracking-widest font-black border ${
-            signal.strategyId === row.primaryStrategy?.strategyId ? 'border-indigo-400/40 bg-indigo-500/15 text-indigo-200' : STAGE_TONES[signal.stage]
-          }`}
+          className={`inline-flex items-center rounded px-1.5 py-0.5 text-[9px] uppercase tracking-widest font-black border ${signal.strategyId === row.primaryStrategy?.strategyId ? 'border-indigo-400/40 bg-indigo-500/15 text-indigo-200' : STAGE_TONES[signal.stage]
+            }`}
         >
           {STRATEGY_CODES[signal.strategyId]}
         </span>
@@ -407,7 +406,7 @@ function playTradeReadyAlert() {
       osc.start(ctx.currentTime + i * 0.13);
       osc.stop(ctx.currentTime + i * 0.13 + 0.2);
     });
-    setTimeout(() => void ctx.close().catch(() => {}), 800);
+    setTimeout(() => void ctx.close().catch(() => { }), 800);
   } catch { /* browser may block audio before interaction */ }
 }
 
@@ -672,11 +671,12 @@ function WorkflowTable({
               <th className="py-2.5 px-3 border-r border-white/5">Primary Strategy</th>
               <th className="py-2.5 px-3 border-r border-white/5">Strategies Passed</th>
               <th className="py-2.5 px-3 border-r border-white/5">Dir</th>
-              <th className="py-2.5 px-3 border-r border-white/5 text-right">Entry</th>
-              <th className="py-2.5 px-3 border-r border-white/5 text-right">Stop</th>
-              <th className="py-2.5 px-3 border-r border-white/5 text-right">T1</th>
-              <th className="py-2.5 px-3 border-r border-white/5 text-right">T2</th>
-              <th className="py-2.5 px-3 border-r border-white/5 text-right">R:R</th>
+              <th className="py-2 px-3 border-r border-white/5 text-right">Entry</th>
+              <th className="py-2 px-3 border-r border-white/5 text-right">Stop</th>
+              <th className="py-2 px-3 border-r border-white/5 text-right">T1</th>
+              <th className="py-2 px-3 border-r border-white/5 text-right">T2</th>
+              <th className="py-2 px-3 border-r border-white/5 text-right bg-indigo-500/10">Active Trail</th>
+              <th className="py-2 px-3 border-r border-white/5 text-right">Qty</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">Confidence</th>
               {orderedMode && (
                 <>
@@ -745,7 +745,8 @@ function WorkflowTable({
                     <td className="py-3 px-3 border-r border-white/5 text-right text-rose-300">{fmtMoney(row.tradePlan?.stop)}</td>
                     <td className="py-3 px-3 border-r border-white/5 text-right text-cyan-300">{fmtMoney(row.tradePlan?.target1 || row.tradePlan?.target)}</td>
                     <td className="py-3 px-3 border-r border-white/5 text-right text-emerald-300">{fmtMoney(row.tradePlan?.target2 || row.tradePlan?.target)}</td>
-                    <td className="py-3 px-3 border-r border-white/5 text-right text-slate-200">{row.tradePlan ? row.tradePlan.rr.toFixed(2) : '--'}</td>
+                    <td className="py-3 px-3 border-r border-white/5 text-right text-indigo-300 font-black bg-indigo-500/5">{fmtMoney(row.tradePlan?.trailingStop)}</td>
+                    <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">--</td>
                     <td className="py-3 px-3 border-r border-white/5 text-right text-indigo-300 font-black">{row.confidence || '--'}</td>
                     {orderedMode && (
                       <>
@@ -763,7 +764,9 @@ function WorkflowTable({
                         </td>
                       </>
                     )}
-                    <td className="py-3 px-3 border-r border-white/5 text-slate-400 min-w-[280px]">{reasonMode === 'base' ? row.baseReason : row.primaryStrategy?.reason || row.reason}</td>
+                    <td className="py-3 px-3 border-r border-white/5 text-slate-400 min-w-[280px]">
+                      {reasonMode === 'base' ? row.baseReason : row.primaryStrategy?.reason || row.reason}
+                    </td>
                     <td className="py-3 px-3">
                       <button
                         type="button"
@@ -1042,7 +1045,7 @@ function PaperTradeMonitor({
               <th className="py-2.5 px-3 border-r border-white/5">Dir</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">Entry</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">Current/Exit</th>
-              <th className="py-2.5 px-3 border-r border-white/5 text-right">Exit Amt</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">Exit Price</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">Stop</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">T1</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">T2</th>
@@ -1063,8 +1066,10 @@ function PaperTradeMonitor({
               const current = trade.status === 'Open' ? livePrice : closedExitPrice;
               const livePnl = trade.status === 'Open'
                 ? paperPnl(trade, livePrice)
-                : { pnl: trade.pnl && trade.pnl !== 0 ? trade.pnl : paperPnl(trade, closedExitPrice).pnl,
-                    pnlPercent: trade.pnlPercent && trade.pnlPercent !== 0 ? trade.pnlPercent : paperPnl(trade, closedExitPrice).pnlPercent };
+                : {
+                  pnl: trade.pnl && trade.pnl !== 0 ? trade.pnl : paperPnl(trade, closedExitPrice).pnl,
+                  pnlPercent: trade.pnlPercent && trade.pnlPercent !== 0 ? trade.pnlPercent : paperPnl(trade, closedExitPrice).pnlPercent
+                };
               return (
                 <tr key={trade.id} className="border-b border-white/5 hover:bg-white/5">
                   <td className="py-3 px-3 border-r border-white/5 text-slate-400">{toETTime(trade.openedAt)} ET</td>
@@ -1076,23 +1081,24 @@ function PaperTradeMonitor({
                   <td className={`py-3 px-3 border-r border-white/5 font-black ${trade.direction === 'BULL' ? 'text-emerald-400' : 'text-rose-400'}`}>{trade.direction}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-white">{fmtMoney(trade.entry)}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-white">{fmtMoney(current)}</td>
-                  <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">${(current * trade.quantity).toFixed(2)}</td>
+                  <td className={`py-3 px-3 border-r border-white/5 text-right font-mono font-bold ${trade.status === 'Closed' ? 'text-white' : 'text-slate-500'}`}>
+                    {trade.status === 'Closed' ? fmtMoney(trade.exitPrice) : '--'}
+                  </td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-rose-300">{fmtMoney(trade.stop)}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-cyan-300">{fmtMoney(paperTarget1(trade))}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-emerald-300">{fmtMoney(paperTarget2(trade))}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-amber-300">{fmtMoney(paperTrailingStop(trade))}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">{trade.quantity.toFixed(4)}</td>
                   <td className="py-3 px-3 border-r border-white/5">
-                    <span className={`px-2 py-1 rounded border text-[10px] uppercase tracking-widest font-black ${
-                      trade.status === 'Open'
+                    <span className={`px-2 py-1 rounded border text-[10px] uppercase tracking-widest font-black ${trade.status === 'Open'
                         ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
                         : trade.outcome === 'Target' || trade.outcome === 'T1 Profit'
                           ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
                           : trade.outcome === 'Stop'
                             ? 'border-rose-500/30 bg-rose-500/10 text-rose-300'
                             : 'border-slate-600/40 bg-slate-800/30 text-slate-400'
-                    }`}>
-                      {trade.status === 'Open' ? (trade.t1HitAt ? 'T1 Hit' : 'Open') : trade.outcome}
+                      }`}>
+                      {trade.status === 'Open' ? (trade.t1HitAt ? 'T1 Hit' : 'Open') : (trade.outcome === 'T1 Profit' ? 'T1 HIT / TRAILED' : trade.outcome)}
                     </span>
                   </td>
                   <td className={`py-3 px-3 border-r border-white/5 text-right font-black ${livePnl.pnl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
@@ -1462,20 +1468,22 @@ function PremarketGapPanel({
                   <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">{row.atrPct.toFixed(1)}%</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-indigo-300 font-black">{row.pmScore.toFixed(1)}</td>
                   <td className="py-3 px-3 border-r border-white/5">
-                    {(() => { const setups = pmSetups(row); return (
-                      <div className="flex flex-wrap gap-1">
-                        {setups.map((id) => (
-                          <span
-                            key={id}
-                            title={STRATEGY_LABELS[id]}
-                            className="inline-flex items-center rounded px-1.5 py-0.5 text-[9px] uppercase tracking-widest font-black border border-indigo-400/40 bg-indigo-500/15 text-indigo-200"
-                          >
-                            {STRATEGY_CODES[id]}
-                          </span>
-                        ))}
-                        {!setups.length && <span className="text-slate-700 text-[9px]">—</span>}
-                      </div>
-                    ); })()}
+                    {(() => {
+                      const setups = pmSetups(row); return (
+                        <div className="flex flex-wrap gap-1">
+                          {setups.map((id) => (
+                            <span
+                              key={id}
+                              title={STRATEGY_LABELS[id]}
+                              className="inline-flex items-center rounded px-1.5 py-0.5 text-[9px] uppercase tracking-widest font-black border border-indigo-400/40 bg-indigo-500/15 text-indigo-200"
+                            >
+                              {STRATEGY_CODES[id]}
+                            </span>
+                          ))}
+                          {!setups.length && <span className="text-slate-700 text-[9px]">—</span>}
+                        </div>
+                      );
+                    })()}
                   </td>
                   <td className="py-3 px-3">
                     <button
@@ -1635,14 +1643,16 @@ export function ProTradeScannerScreen() {
 
   const alertedTradeReadyRef = React.useRef<Set<string>>(new Set());
 
+  // Confirmation queue: symbols that hit trade_ready but haven't fired yet.
+  // Keyed by base symbol; value holds context needed to fire after confirmation.
+  interface ConfirmationEntry {
+    row: ProTradeRow;
+    level: number;           // structural breakout price to confirm above/below
+    direction: 'BULL' | 'BEAR';
+    addedAt: number;
+  }
   const awaitingConfirmRef = React.useRef<Map<string, ConfirmationEntry>>(new Map());
   const [pendingConfirmCount, setPendingConfirmCount] = React.useState(0);
-
-  // Lead Quant: Execution Safety Refs
-  // 1. Double-Tap Prevention: tracks symbols currently in the async confirmation/order pipeline
-  const firingSymbolsRef = React.useRef<Set<string>>(new Set());
-  // 2. EOD Robustness: tracks if EOD flat has already triggered today
-  const lastEodTriggeredRef = React.useRef<string>('');
 
   const orderedSymbols = React.useMemo(() => buildOrderedSymbols(brokerSnapshot), [brokerSnapshot]);
   const rows = React.useMemo(() => withOrderedStage(snapshot?.rows || [], orderedSymbols, paperTrades), [snapshot?.rows, orderedSymbols, paperTrades]);
@@ -1851,8 +1861,25 @@ export function ProTradeScannerScreen() {
       if (orderedSymbols.has(sym) || tradedSymbols.has(sym) || pending.has(sym)) return;
       if (row.earningsDays !== null && Math.abs(row.earningsDays) <= 1) return;
       if (!checkStrategyCircuitBreaker(row.primaryStrategy?.strategyId || row.symbol).ok) return;
+
       const level = row.tradePlan?.entry;
       if (!level) return;
+
+      // Aggressive Entry: S1 (ORB) and S7 (Volume Surge) fire INSTANTLY without 1m confirmation
+      const stratId = row.primaryStrategy?.strategyId;
+      if (stratId === 'orb_retest' || stratId === 's7_volume_surge') {
+        const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance);
+        if (trade) {
+          setPaperTrades((current) => [trade, ...current]);
+          placePaperBracketOrder({
+            symbol: trade.symbol,
+            direction: trade.direction === 'BEAR' ? 'BEAR' : 'BULL',
+            entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional,
+          }).catch(() => {});
+          return;
+        }
+      }
+
       pending.set(sym, { row, level, direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL', addedAt: now });
     });
 
@@ -1870,13 +1897,9 @@ export function ProTradeScannerScreen() {
     // Phase 2 — async: 1m bar confirmation check
     const snap = snapshot; // capture before async
     void (async () => {
-      // Filter out symbols already in the firing pipeline to prevent "Double-Tap" race conditions
-      const symbolsToConfirm = [...pending.keys()].filter(sym => !firingSymbolsRef.current.has(sym));
-      if (!symbolsToConfirm.length) return;
-
       let barMap: Record<string, { time: string; open: number; high: number; low: number; close: number; volume: number }[]>;
       try {
-        barMap = await fetchBars(symbolsToConfirm, '1m');
+        barMap = await fetchBars([...pending.keys()], '1m');
       } catch {
         return; // data unavailable — wait for next cycle
       }
@@ -1884,30 +1907,27 @@ export function ProTradeScannerScreen() {
       const confirmedTrades: PaperTrade[] = [];
       const openedAt = new Date().toISOString();
 
-      for (const sym of symbolsToConfirm) {
-        const entry = pending.get(sym);
-        if (!entry) continue;
-
+      for (const [sym, entry] of pending) {
         if (!checkMaxPositions([...paperTrades, ...confirmedTrades]).ok) break;
-
-        // Double-check one more time before firing
-        if (firingSymbolsRef.current.has(sym)) continue;
 
         const candles = barMap[sym];
         if (!candles || candles.length < 5) continue;
 
+        // candles[length-1] = current in-progress bar (not closed yet)
+        // candles[length-2] = last CONFIRMED closed 1m bar
         const closedBar = candles[candles.length - 2];
-        const priorBars = candles.slice(-22, -2);
+        const priorBars = candles.slice(-22, -2); // 20 bars before the closed bar
         const avgVol = priorBars.length > 0
           ? priorBars.reduce((s, b) => s + b.volume, 0) / priorBars.length
           : 0;
 
         const priceConfirmed = entry.direction === 'BULL'
-          ? closedBar.close > entry.level
-          : closedBar.close < entry.level;
-        const volConfirmed = avgVol <= 0 || closedBar.volume >= avgVol * 1.1;
+          ? closedBar.close > entry.level          // 1m bar closed above structural level
+          : closedBar.close < entry.level;          // 1m bar closed below structural level
+        const volConfirmed = avgVol <= 0 || closedBar.volume >= avgVol * 1.1; // above-average volume
 
         if (!priceConfirmed || !volConfirmed) {
+          // If bar closed significantly BACK THROUGH the level → setup failed, remove
           const setupFailed = entry.direction === 'BULL'
             ? closedBar.close < entry.level * 0.998
             : closedBar.close > entry.level * 1.002;
@@ -1918,15 +1938,8 @@ export function ProTradeScannerScreen() {
         const row = snap.rows.find((r) => baseSymbol(r.symbol) === sym);
         if (!row || row.workflowStage !== 'trade_ready') { pending.delete(sym); continue; }
 
-        // Lock the symbol in the firing registry
-        firingSymbolsRef.current.add(sym);
-
         const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance);
-        if (!trade) { 
-          firingSymbolsRef.current.delete(sym); 
-          pending.delete(sym); 
-          continue; 
-        }
+        if (!trade) { pending.delete(sym); continue; }
 
         confirmedTrades.push(trade);
         pending.delete(sym);
@@ -1938,53 +1951,33 @@ export function ProTradeScannerScreen() {
       setPaperTrades((current) => [...confirmedTrades, ...current]);
       setApprovalMessage(`1m confirmed: ${confirmedTrades.map((t) => t.symbol).join(', ')} — entry after close above level.`);
 
-      // Fire and forget orders, but cleanup the firing registry afterwards
-      Promise.all(confirmedTrades.map(async (trade) => {
-        try {
-          await placePaperBracketOrder({
-            symbol: trade.symbol,
-            direction: trade.direction === 'BEAR' ? 'BEAR' : 'BULL',
-            entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional,
-          });
-        } catch (err: unknown) {
-          console.warn(`Alpaca order skipped for ${trade.symbol}:`, err instanceof Error ? err.message : err);
-        } finally {
-          // Release the lock so the symbol can be traded again if closed/stopped
-          firingSymbolsRef.current.delete(baseSymbol(trade.symbol));
-        }
-      })).catch(() => {});
+      confirmedTrades.forEach((trade) => {
+        placePaperBracketOrder({
+          symbol: trade.symbol,
+          direction: trade.direction === 'BEAR' ? 'BEAR' : 'BULL',
+          entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional,
+        }).catch((err: unknown) => console.warn(`Alpaca order skipped for ${trade.symbol}:`, err instanceof Error ? err.message : err));
+      });
     })();
   }, [snapshot?.rows, orderedSymbols, paperTrades, settings]);
 
   // EOD flat: at 3:57 PM ET close all open positions before 4:00 PM market close
   React.useEffect(() => {
     const interval = setInterval(() => {
-      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-      if (lastEodTriggeredRef.current === today) return; // Already fired today
-
       const mins = etMinutesNow();
-      if (mins < 15 * 60 + 57 || mins > 16 * 60) return; // 3:57–4:00 window
-
+      if (mins < 15 * 60 + 57 || mins > 16 * 60) return; // fires once in 3:57–4:00 window
       const openTrades = paperTrades.filter((t) => t.status === 'Open');
-      if (!openTrades.length) {
-        // If nothing is open, we still mark today as triggered so we stop checking
-        lastEodTriggeredRef.current = today;
-        return;
-      }
-
+      if (!openTrades.length) return;
       const closedAt = new Date().toISOString();
-      lastEodTriggeredRef.current = today;
-
       setPaperTrades((current) => current.map((t) => {
         if (t.status !== 'Open') return t;
         const row = snapshot?.rows.find((r) => baseSymbol(r.symbol) === baseSymbol(t.symbol));
         const exitPrice = row?.price ?? t.entry;
         return closePaperTrade(t, exitPrice, 'EOD', closedAt);
       }));
-
-      closeAllPaperPositions().catch(() => {});
-      setApprovalMessage(`EOD 3:57 PM — Auto-closed ${openTrades.length} position(s) flat for ${today}.`);
-    }, 10_000); // Check every 10 seconds for higher precision
+      closeAllPaperPositions().catch(() => { });
+      setApprovalMessage(`EOD 3:57 PM — closed ${openTrades.length} open position(s) flat.`);
+    }, 60_000); // check every minute
     return () => clearInterval(interval);
   }, [paperTrades, snapshot?.rows]);
 
@@ -2089,7 +2082,7 @@ export function ProTradeScannerScreen() {
     if (closed.pnl !== undefined) {
       recordTradeResult(trade.strategyName, closed.pnl, accountBalance);
     }
-    closePaperPosition(trade.symbol).catch(() => {});
+    closePaperPosition(trade.symbol).catch(() => { });
   }
 
   return (
@@ -2253,6 +2246,9 @@ export function ProTradeScannerScreen() {
             )}
             <span className="px-3 py-1 rounded-full border border-slate-600/40 text-slate-400 bg-slate-800/30">
               Auto refresh: {activeStage === 'forming' || activeStage === 'confirmed' || activeStage === 'locked' || activeStage === 'trade_ready' ? '15s hot set' : '60s'}
+            </span>
+            <span className="px-3 py-1 rounded-full border border-slate-600/40 text-slate-400 bg-slate-800/30">
+              SPY Tide: <span className={`font-black ${rows[0]?.spyTrend5m === 'BULL' ? 'text-emerald-400' : rows[0]?.spyTrend5m === 'BEAR' ? 'text-rose-400' : 'text-slate-300'}`}>{rows[0]?.spyTrend5m || 'FLAT'}</span>
             </span>
             {(() => {
               const mins = etMinutesNow();
@@ -2420,4 +2416,10 @@ export function ProTradeScannerScreen() {
       )}
     </div>
   );
+}
+function isTideBlocked(row: ProTradeRow, sig?: StrategySignal): boolean {
+  if (!sig || !row.spyTrend5m) return false;
+  if (row.spyTrend5m === 'BEAR' && sig.direction === 'BULL') return true;
+  if (row.spyTrend5m === 'BULL' && sig.direction === 'BEAR') return true;
+  return false;
 }

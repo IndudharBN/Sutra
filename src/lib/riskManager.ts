@@ -1,6 +1,6 @@
 const RISK_KEY = 'sutra.riskManager.v1';
 const SETTINGS_KEY = 'sutra.riskSettings.v1';
-const CB_PAUSE_MS = 2 * 60 * 60 * 1000;
+const CB_PAUSE_MS = 60 * 60 * 1000;
 
 // ── User-configurable risk settings ──────────────────────────────────────────
 
@@ -23,7 +23,10 @@ export const DEFAULT_RISK_SETTINGS: RiskSettings = {
 export function getRiskSettings(): RiskSettings {
   try {
     const raw = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') as Partial<RiskSettings>;
-    return { ...DEFAULT_RISK_SETTINGS, ...raw };
+    const settings = { ...DEFAULT_RISK_SETTINGS, ...raw };
+    // Lead Quant Fix: Force threshold to 3 if it was accidentally set lower in old browser data
+    if (settings.cbLossThreshold < 3) settings.cbLossThreshold = 3;
+    return settings;
   } catch { return { ...DEFAULT_RISK_SETTINGS }; }
 }
 

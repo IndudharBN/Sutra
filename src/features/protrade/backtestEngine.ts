@@ -254,7 +254,7 @@ export function runBacktest(
           });
           openPos = null;
         }
-        continue; // one position per day
+        continue; 
       }
 
       // ── Entry evaluation ───────────────────────────────────────────────────
