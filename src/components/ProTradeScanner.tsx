@@ -1635,16 +1635,14 @@ export function ProTradeScannerScreen() {
 
   const alertedTradeReadyRef = React.useRef<Set<string>>(new Set());
 
-  // Confirmation queue: symbols that hit trade_ready but haven't fired yet.
-  // Keyed by base symbol; value holds context needed to fire after confirmation.
-  interface ConfirmationEntry {
-    row: ProTradeRow;
-    level: number;           // structural breakout price to confirm above/below
-    direction: 'BULL' | 'BEAR';
-    addedAt: number;
-  }
   const awaitingConfirmRef = React.useRef<Map<string, ConfirmationEntry>>(new Map());
   const [pendingConfirmCount, setPendingConfirmCount] = React.useState(0);
+
+  // Lead Quant: Execution Safety Refs
+  // 1. Double-Tap Prevention: tracks symbols currently in the async confirmation/order pipeline
+  const firingSymbolsRef = React.useRef<Set<string>>(new Set());
+  // 2. EOD Robustness: tracks if EOD flat has already triggered today
+  const lastEodTriggeredRef = React.useRef<string>('');
 
   const orderedSymbols = React.useMemo(() => buildOrderedSymbols(brokerSnapshot), [brokerSnapshot]);
   const rows = React.useMemo(() => withOrderedStage(snapshot?.rows || [], orderedSymbols, paperTrades), [snapshot?.rows, orderedSymbols, paperTrades]);
@@ -1872,9 +1870,13 @@ export function ProTradeScannerScreen() {
     // Phase 2 — async: 1m bar confirmation check
     const snap = snapshot; // capture before async
     void (async () => {
+      // Filter out symbols already in the firing pipeline to prevent "Double-Tap" race conditions
+      const symbolsToConfirm = [...pending.keys()].filter(sym => !firingSymbolsRef.current.has(sym));
+      if (!symbolsToConfirm.length) return;
+
       let barMap: Record<string, { time: string; open: number; high: number; low: number; close: number; volume: number }[]>;
       try {
-        barMap = await fetchBars([...pending.keys()], '1m');
+        barMap = await fetchBars(symbolsToConfirm, '1m');
       } catch {
         return; // data unavailable — wait for next cycle
       }
@@ -1882,27 +1884,30 @@ export function ProTradeScannerScreen() {
       const confirmedTrades: PaperTrade[] = [];
       const openedAt = new Date().toISOString();
 
-      for (const [sym, entry] of pending) {
+      for (const sym of symbolsToConfirm) {
+        const entry = pending.get(sym);
+        if (!entry) continue;
+
         if (!checkMaxPositions([...paperTrades, ...confirmedTrades]).ok) break;
+
+        // Double-check one more time before firing
+        if (firingSymbolsRef.current.has(sym)) continue;
 
         const candles = barMap[sym];
         if (!candles || candles.length < 5) continue;
 
-        // candles[length-1] = current in-progress bar (not closed yet)
-        // candles[length-2] = last CONFIRMED closed 1m bar
         const closedBar = candles[candles.length - 2];
-        const priorBars = candles.slice(-22, -2); // 20 bars before the closed bar
+        const priorBars = candles.slice(-22, -2);
         const avgVol = priorBars.length > 0
           ? priorBars.reduce((s, b) => s + b.volume, 0) / priorBars.length
           : 0;
 
         const priceConfirmed = entry.direction === 'BULL'
-          ? closedBar.close > entry.level          // 1m bar closed above structural level
-          : closedBar.close < entry.level;          // 1m bar closed below structural level
-        const volConfirmed = avgVol <= 0 || closedBar.volume >= avgVol * 1.1; // above-average volume
+          ? closedBar.close > entry.level
+          : closedBar.close < entry.level;
+        const volConfirmed = avgVol <= 0 || closedBar.volume >= avgVol * 1.1;
 
         if (!priceConfirmed || !volConfirmed) {
-          // If bar closed significantly BACK THROUGH the level → setup failed, remove
           const setupFailed = entry.direction === 'BULL'
             ? closedBar.close < entry.level * 0.998
             : closedBar.close > entry.level * 1.002;
@@ -1913,8 +1918,15 @@ export function ProTradeScannerScreen() {
         const row = snap.rows.find((r) => baseSymbol(r.symbol) === sym);
         if (!row || row.workflowStage !== 'trade_ready') { pending.delete(sym); continue; }
 
+        // Lock the symbol in the firing registry
+        firingSymbolsRef.current.add(sym);
+
         const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance);
-        if (!trade) { pending.delete(sym); continue; }
+        if (!trade) { 
+          firingSymbolsRef.current.delete(sym); 
+          pending.delete(sym); 
+          continue; 
+        }
 
         confirmedTrades.push(trade);
         pending.delete(sym);
@@ -1926,33 +1938,53 @@ export function ProTradeScannerScreen() {
       setPaperTrades((current) => [...confirmedTrades, ...current]);
       setApprovalMessage(`1m confirmed: ${confirmedTrades.map((t) => t.symbol).join(', ')} — entry after close above level.`);
 
-      confirmedTrades.forEach((trade) => {
-        placePaperBracketOrder({
-          symbol: trade.symbol,
-          direction: trade.direction === 'BEAR' ? 'BEAR' : 'BULL',
-          entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional,
-        }).catch((err: unknown) => console.warn(`Alpaca order skipped for ${trade.symbol}:`, err instanceof Error ? err.message : err));
-      });
+      // Fire and forget orders, but cleanup the firing registry afterwards
+      Promise.all(confirmedTrades.map(async (trade) => {
+        try {
+          await placePaperBracketOrder({
+            symbol: trade.symbol,
+            direction: trade.direction === 'BEAR' ? 'BEAR' : 'BULL',
+            entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional,
+          });
+        } catch (err: unknown) {
+          console.warn(`Alpaca order skipped for ${trade.symbol}:`, err instanceof Error ? err.message : err);
+        } finally {
+          // Release the lock so the symbol can be traded again if closed/stopped
+          firingSymbolsRef.current.delete(baseSymbol(trade.symbol));
+        }
+      })).catch(() => {});
     })();
   }, [snapshot?.rows, orderedSymbols, paperTrades, settings]);
 
   // EOD flat: at 3:57 PM ET close all open positions before 4:00 PM market close
   React.useEffect(() => {
     const interval = setInterval(() => {
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      if (lastEodTriggeredRef.current === today) return; // Already fired today
+
       const mins = etMinutesNow();
-      if (mins < 15 * 60 + 57 || mins > 16 * 60) return; // fires once in 3:57–4:00 window
+      if (mins < 15 * 60 + 57 || mins > 16 * 60) return; // 3:57–4:00 window
+
       const openTrades = paperTrades.filter((t) => t.status === 'Open');
-      if (!openTrades.length) return;
+      if (!openTrades.length) {
+        // If nothing is open, we still mark today as triggered so we stop checking
+        lastEodTriggeredRef.current = today;
+        return;
+      }
+
       const closedAt = new Date().toISOString();
+      lastEodTriggeredRef.current = today;
+
       setPaperTrades((current) => current.map((t) => {
         if (t.status !== 'Open') return t;
         const row = snapshot?.rows.find((r) => baseSymbol(r.symbol) === baseSymbol(t.symbol));
         const exitPrice = row?.price ?? t.entry;
         return closePaperTrade(t, exitPrice, 'EOD', closedAt);
       }));
+
       closeAllPaperPositions().catch(() => {});
-      setApprovalMessage(`EOD 3:57 PM — closed ${openTrades.length} open position(s) flat.`);
-    }, 60_000); // check every minute
+      setApprovalMessage(`EOD 3:57 PM — Auto-closed ${openTrades.length} position(s) flat for ${today}.`);
+    }, 10_000); // Check every 10 seconds for higher precision
     return () => clearInterval(interval);
   }, [paperTrades, snapshot?.rows]);
 

@@ -6,15 +6,15 @@ import { findOrderBlockZone, rejectionCandle } from '../scanner/smc';
 import type { StrategyChecklistItem, StrategyId, StrategyInput, StrategySignal, TradePlan, WorkflowStage } from './workflowTypes';
 import { STRATEGY_LABELS, workflowStageRank } from './workflowTypes';
 
-const MIN_RR = 1.5;
-const PREFERRED_RR = 2.5;
-// Structural buffer: space below/above the anchor candle extreme (was 0.08–0.12)
-const STOP_BUFFER_ATR = 0.5;
-// Noise floor: minimum stop distance from entry — stop can never be tighter than this.
-// 0.75×ATR covers normal intraday bid-ask noise and 1-minute wicks for most liquid stocks.
-// (User-referenced 1.5×ATR is valid for large-caps; 0.75× is the practical floor for
-//  high-ATR-% names like biotechs where 1.5×ATR targets become unrealistic intraday.)
-const NOISE_FLOOR_ATR = 0.75;
+const MIN_RR = 1.3;
+const PREFERRED_RR = 2.0;
+// Structural buffer: space below/above the anchor candle extreme. 
+// Standardizing to 0.25 ATR (Breathing Room Fix)
+const STOP_BUFFER_ATR = 0.25;
+// Noise floor: minimum stop distance from entry.
+// 0.35 ATR provides enough room for bid-ask noise without over-extending risk.
+const NOISE_FLOOR_ATR = 0.35;
+const SLIPPAGE_CENTS = 0.03; // Institutional slippage buffer
 
 function pass(label: string, detail: string): StrategyChecklistItem {
   return { label, passed: true, detail };
@@ -54,27 +54,33 @@ function planFromLevels(input: StrategyInput, entry: number, stop: number, targe
   };
 }
 
-// T1/T2 explicit plan: T1=2R (scale out, move stop to BE), T2=structural level
+// T1/T2 explicit plan: T1=1.5R (High-probability scale out), T2=structural level
 function planFromLevelsT1T2(
   input: StrategyInput,
-  entry: number,
+  rawEntry: number,
   stop: number,
   t1: number,
   t2: number,
   trigger?: Candle,
 ): TradePlan | null {
+  // Apply slippage buffer to entry
+  const entry = input.direction === 'BULL' ? rawEntry + SLIPPAGE_CENTS : rawEntry - SLIPPAGE_CENTS;
   const risk = input.direction === 'BULL' ? entry - stop : stop - entry;
   if (!Number.isFinite(risk) || risk <= 0) return null;
   const rrT2 = rr(entry, stop, t2, input.direction);
   if (!Number.isFinite(rrT2) || rrT2 < MIN_RR) return null;
+  
+  // Recalculate T1 based on 1.5R for higher hit rate
+  const adjustedT1 = input.direction === 'BULL' ? entry + risk * 1.5 : entry - risk * 1.5;
+
   return {
     entry: round(entry, 2),
     stop: round(stop, 2),
     target: round(t2, 2),
-    target1: round(t1, 2),
+    target1: round(adjustedT1, 2),
     target2: round(t2, 2),
     rr: round(rrT2, 2),
-    rr1: 2,
+    rr1: 1.5,
     riskPerShare: round(Math.abs(entry - stop), 2),
     triggerCandleTime: trigger?.time || new Date().toISOString(),
     invalidation: input.direction === 'BULL' ? 'Price closes below stop or loses VWAP with volume.' : 'Price closes above stop or reclaims VWAP with volume.',
