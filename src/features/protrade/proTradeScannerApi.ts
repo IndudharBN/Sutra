@@ -1,4 +1,6 @@
-import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNewsFlags, fetchSectorTrends, SYMBOL_SECTOR, type CatalystTier } from '../../lib/alpacaClient';
+import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNewsFlags, fetchSectorTrends, fetchSpyDailyBars, SYMBOL_SECTOR, type CatalystTier } from '../../lib/alpacaClient';
+import { classifyMarketRegime } from '../marketRegime/marketRegimeLogic';
+import type { MarketRegime } from '../marketRegime/marketRegimeTypes';
 import type { SymbolMeta } from '../../lib/alpacaClient';
 import { ema, vwapLatest } from '../scanner/indicators';
 import type { Candle, CandleSet } from '../scanner/ohlcv';
@@ -77,6 +79,7 @@ export interface ProTradeSnapshot {
   fetchedAt: string;
   providerStatus: string;
   spyTrend5m: 'UP' | 'DOWN' | 'FLAT';
+  regime: MarketRegime;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -392,7 +395,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
   // Guarantee pinned watchlist symbols are always scanned regardless of score rank
   const top = [...new Set([...scored, ...pinnedSymbols])];
 
-  const [bars1m, bars5m, bars15m, bars1h, bars1d, newsFlags, sectorTrends, spyBars] = await Promise.all([
+  const [bars1m, bars5m, bars15m, bars1h, bars1d, newsFlags, sectorTrends, spyBars, spyRegimeData] = await Promise.all([
     fetchBars(top, '1m'),
     fetchBars(top, '5m'),
     fetchBars(top, '15m'),
@@ -401,7 +404,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
     fetchNewsFlags(top),
     fetchSectorTrends(),
     fetchBars(['SPY'], '1h'),
-    fetchBars(['SPY'], '5m'),
+    fetchSpyDailyBars(),
   ]);
 
   // Warm earnings + float caches in background — never block the scan
@@ -414,9 +417,16 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
   const spyPrev = spyH1.length >= 2 ? spyH1[spyH1.length - 2].close : spyLast;
   const spyChangePct = spyPrev > 0 ? (spyLast - spyPrev) / spyPrev : 0;
 
-  // Lead Quant: Compute SPY 5m Intraday Direction
   const spy5m = (spyBars['SPY'] || []);
   const spyTrend5m = candleTrend(spy5m);
+
+  // Macro regime: SPY EMA200 (daily) + VIX
+  const spyDailyCloses = spyRegimeData.spyBars.map((c) => c.close);
+  const spyEma200Series = ema(spyDailyCloses, 200);
+  const spyEma200 = spyEma200Series.length >= 200 ? last(spyEma200Series) : null;
+  const spyDailyPrice = spyRegimeData.spyBars.length ? last(spyRegimeData.spyBars).close : null;
+  const vixLevel = spyRegimeData.vixBars.length ? last(spyRegimeData.vixBars).close : null;
+  const regime = classifyMarketRegime({ spyPrice: spyDailyPrice, spyEma200, vixLevel });
 
   const fetchedAt = new Date().toISOString();
   const providerStatus = dataProviderStatus(fetchedAt);
@@ -443,5 +453,6 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
     fetchedAt,
     providerStatus: `Alpaca IEX • ${top.length} symbols`,
     spyTrend5m,
+    regime,
   };
 }

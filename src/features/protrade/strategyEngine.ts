@@ -592,7 +592,17 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
       !adrExhausted(input.candles.five, input.atr20) ? pass('ADR room', '< 80% ATR used') : fail('ADR room', '>80% ATR used'),
       input.vwapAligned ? pass('VWAP aligned', `${direction === 'BULL' ? 'Above' : 'Below'} VWAP ✓`) : fail('VWAP aligned', 'Wrong VWAP side'),
     ];
-    return signal('s7_volume_surge', input, checklist, tradePlan, 'S7: Institutional 2× volume surge on 15m range break.');
+    const sig = signal('s7_volume_surge', input, checklist, tradePlan, 'S7: Institutional 2× volume surge on 15m range break.');
+    // Pre-blackout gap fire: allow S7 to fire at 9:30–9:45 AM on strong gap days (>3% gap + live data)
+    if (
+      sig.stage === 'locked' &&
+      sessionGate() === 'blackout' &&
+      input.dataStatus.mode === 'live' && !input.dataStatus.stale &&
+      ((direction === 'BULL' && input.gapPct >= 3) || (direction === 'BEAR' && input.gapPct <= -3))
+    ) {
+      return { ...sig, stage: 'trade_ready' as const };
+    }
+    return sig;
   }
   return null;
 }

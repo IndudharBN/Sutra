@@ -430,14 +430,14 @@ function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT
   return Boolean(plan && plan.rr >= 1.5 && availablePaperNotional(settings, trades) > 0);
 }
 
-function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000): PaperTrade | null {
+function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, sizeMult = 1.0): PaperTrade | null {
   const plan = effectiveTradePlan(row, settings);
   if (!plan || plan.rr < 1.5) return null;
   const budgetCap = settings.tradingAmount > 0
     ? availablePaperNotional(settings, currentTrades)
     : accountBalance * 0.05; // 5% of account balance per trade when no explicit budget set
   const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop);
-  const riskNotional = riskQty * plan.entry;
+  const riskNotional = riskQty * plan.entry * sizeMult; // regime scales position: BULL=1.0, SIDEWAYS=0.75, BEAR=0.5
   const notional = Math.min(budgetCap, riskNotional);
   if (notional <= 0) return null;
   const strategyId = row.primaryStrategy?.strategyId || null;
@@ -1883,7 +1883,7 @@ export function ProTradeScannerScreen() {
       // Aggressive Entry: S1 (ORB) and S7 (Volume Surge) fire INSTANTLY without 1m confirmation
       const stratId = row.primaryStrategy?.strategyId;
       if (stratId === 'orb_retest' || stratId === 's7_volume_surge') {
-        const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance);
+        const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0);
         if (trade) {
           setPaperTrades((current) => [trade, ...current]);
           placePaperBracketOrder({
@@ -1953,7 +1953,7 @@ export function ProTradeScannerScreen() {
         const row = snap.rows.find((r) => baseSymbol(r.symbol) === sym);
         if (!row || row.workflowStage !== 'trade_ready') { pending.delete(sym); continue; }
 
-        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance);
+        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance, snap.regime?.sizeMult ?? 1.0);
         if (!trade) { pending.delete(sym); continue; }
 
         confirmedTrades.push(trade);
@@ -2039,7 +2039,7 @@ export function ProTradeScannerScreen() {
     if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
     const posCheck = checkMaxPositions(paperTrades);
     if (!posCheck.ok) { setApprovalMessage(posCheck.reason!); return; }
-    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance);
+    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0);
     if (!trade) {
       const plan = effectiveTradePlan(row, settings);
       if (!plan) {
@@ -2265,6 +2265,13 @@ export function ProTradeScannerScreen() {
             <span className="px-3 py-1 rounded-full border border-slate-600/40 text-slate-400 bg-slate-800/30">
               SPY Tide: <span className={`font-black ${rows[0]?.spyTrend5m === 'BULL' ? 'text-emerald-400' : rows[0]?.spyTrend5m === 'BEAR' ? 'text-rose-400' : 'text-slate-300'}`}>{rows[0]?.spyTrend5m || 'FLAT'}</span>
             </span>
+            {snapshot?.regime && (
+              <span className={`px-3 py-1 rounded-full border text-xs font-semibold ${snapshot.regime.regime === 'BULL' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : snapshot.regime.regime === 'BEAR' ? 'border-rose-500/40 bg-rose-500/10 text-rose-300' : 'border-amber-500/40 bg-amber-500/10 text-amber-300'}`}>
+                Regime: {snapshot.regime.regime} · {Math.round(snapshot.regime.sizeMult * 100)}% size
+                {snapshot.regime.spyEma200 ? ` · SPY ${snapshot.regime.spyPrice?.toFixed(0)} / EMA200 ${snapshot.regime.spyEma200.toFixed(0)}` : ''}
+                {snapshot.regime.vixLevel ? ` · VIX ${snapshot.regime.vixLevel.toFixed(1)}` : ''}
+              </span>
+            )}
             {(() => {
               const mins = etMinutesNow();
               const cutoff = mins >= 15 * 60 + 50;

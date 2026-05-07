@@ -94,6 +94,26 @@ export async function fetchHistoricalBars(
   return all;
 }
 
+// ── SPY daily bars (250 bars) + VIX attempt — for macro regime classification ──
+export async function fetchSpyDailyBars(): Promise<{ spyBars: Candle[]; vixBars: Candle[] }> {
+  const cacheKey = 'spy_regime_daily';
+  const hit = cacheGet<{ spyBars: Candle[]; vixBars: Candle[] }>(cacheKey);
+  if (hit) return hit;
+  const [spyRes, vixRes] = await Promise.allSettled([
+    alpacaGet<{ bars: Record<string, AlpacaBar[]> }>('/v2/stocks/bars', {
+      symbols: 'SPY', timeframe: '1Day', limit: '250', sort: 'asc', feed: 'iex',
+    }),
+    alpacaGet<{ bars: Record<string, AlpacaBar[]> }>('/v2/stocks/bars', {
+      symbols: 'VIX', timeframe: '1Day', limit: '5', sort: 'asc', feed: 'iex',
+    }),
+  ]);
+  const spyBars = spyRes.status === 'fulfilled' ? (spyRes.value.bars?.['SPY'] ?? []).map(toCandle) : [];
+  const vixBars = vixRes.status === 'fulfilled' ? (vixRes.value.bars?.['VIX'] ?? []).map(toCandle) : [];
+  const result = { spyBars, vixBars };
+  cacheSet(cacheKey, result, 3_600_000); // re-classify at most once per hour
+  return result;
+}
+
 // ── Multi-symbol bars (batch — 1 API call for all symbols) ───────────────────
 export async function fetchBars(symbols: string[], interval: Interval): Promise<Record<string, Candle[]>> {
   if (!symbols.length) return {};
