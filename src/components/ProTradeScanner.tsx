@@ -1621,7 +1621,8 @@ export function ProTradeScannerScreen() {
         r.strategySignals.some((s) =>
           s.strategyId === 'rs_continuation' ||
           s.strategyId === 'liquidity_sweep' ||
-          s.strategyId === 'mss_breakout'
+          s.strategyId === 'mss_breakout' ||
+          s.strategyId === 's7_volume_surge'
         )
       )
       .map((r) => r.symbol);

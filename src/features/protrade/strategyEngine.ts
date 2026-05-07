@@ -288,7 +288,7 @@ function ema1mCheck(input: StrategyInput): StrategyChecklistItem {
 }
 
 export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
-  const range = openingRange(input.candles.five, 3);
+  const range = todayOpeningRange(input.candles.five);
   const trigger = last(input.candles.five);
   const rangeBreak = range ? directionalBreak(input, input.price, range.high, range.low) : false;
   const retest = range ? recentRetest(input, input.direction === 'BULL' ? range.high : range.low) : false;
