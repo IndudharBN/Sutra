@@ -1008,6 +1008,7 @@ function PaperTradeMonitor({
 }) {
   const priceBySymbol = new Map(rows.map((row) => [baseSymbol(row.symbol), row.price]));
   const filteredTrades = trades.filter((t) => tradeDateET(t) === monitorDate);
+  const sortedTrades = [...filteredTrades].sort((a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime());
   const open = filteredTrades.filter((trade) => trade.status === 'Open');
   const closed = filteredTrades.filter((trade) => trade.status === 'Closed');
   const isToday = monitorDate === todayET();
@@ -1050,9 +1051,9 @@ function PaperTradeMonitor({
           )}
         </div>
       </div>
-      <div className="overflow-auto">
+      <div className="overflow-auto max-h-[480px]">
         <table className="w-full min-w-[1120px] text-left border-collapse">
-          <thead className="text-[9px] uppercase text-slate-500 font-bold tracking-widest bg-slate-900/50">
+          <thead className="text-[9px] uppercase text-slate-500 font-bold tracking-widest bg-slate-900/50 sticky top-0 z-10">
             <tr>
               <th className="py-2.5 px-3 border-r border-white/5">Opened</th>
               <th className="py-2.5 px-3 border-r border-white/5">Symbol</th>
@@ -1072,13 +1073,16 @@ function PaperTradeMonitor({
             </tr>
           </thead>
           <tbody className="font-mono text-[11px]">
-            {filteredTrades.map((trade) => {
+            {sortedTrades.map((trade) => {
               const livePrice = priceBySymbol.get(baseSymbol(trade.symbol)) || trade.entry;
               // For closed trades: use exit price; fall back to estimated stop/target price (fixes $0.00 display)
               const closedExitPrice = trade.exitPrice && trade.exitPrice !== trade.entry
                 ? trade.exitPrice
                 : estimatedExitPrice(trade);
               const current = trade.status === 'Open' ? livePrice : closedExitPrice;
+              const currentColor = trade.status === 'Open'
+                ? ((trade.direction === 'BULL' ? current > trade.entry : current < trade.entry) ? 'text-emerald-300' : 'text-rose-300')
+                : 'text-white';
               const livePnl = trade.status === 'Open'
                 ? paperPnl(trade, livePrice)
                 : {
@@ -1095,7 +1099,7 @@ function PaperTradeMonitor({
                   <td className="py-3 px-3 border-r border-white/5 text-slate-300">{trade.strategyCode} {trade.strategyName}</td>
                   <td className={`py-3 px-3 border-r border-white/5 font-black ${trade.direction === 'BULL' ? 'text-emerald-400' : 'text-rose-400'}`}>{trade.direction}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-white">{fmtMoney(trade.entry)}</td>
-                  <td className="py-3 px-3 border-r border-white/5 text-right text-white">{fmtMoney(current)}</td>
+                  <td className={`py-3 px-3 border-r border-white/5 text-right font-bold ${currentColor}`}>{fmtMoney(current)}</td>
                   <td className={`py-3 px-3 border-r border-white/5 text-right font-mono font-bold ${trade.status === 'Closed' ? 'text-white' : 'text-slate-500'}`}>
                     {trade.status === 'Closed' ? fmtMoney(trade.exitPrice) : '--'}
                   </td>
