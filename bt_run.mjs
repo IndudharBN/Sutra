@@ -283,7 +283,8 @@ function evalS1_ORBRetest(input) {
   const breakoutLevel = direction === 'BULL' ? range.high : range.low;
   const measuredMove = direction === 'BULL' ? breakoutLevel + orRange : breakoutLevel - orRange;
   const t1 = direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
-  const t2 = direction === 'BULL' ? Math.max(measuredMove, t1) : Math.min(measuredMove, t1);
+  const preferredTarget = direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
+  const t2 = direction === 'BULL' ? Math.max(measuredMove, preferredTarget) : Math.min(measuredMove, preferredTarget);
   const rrT2 = direction === 'BULL' ? (t2 - entry) / risk : (entry - t2) / risk;
   if (rrT2 < MIN_RR) return null;
   return { strategyId: 'orb_retest', entry, stop, t1, t2, rr: rrT2 };
@@ -308,11 +309,12 @@ function evalS2_VWAPPullback(input) {
   const risk = Math.abs(entry - stop);
   if (risk <= 0) return null;
   const t1 = direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
-  // PDH/PDL as structural T2, capped at 3R, floor at T1
+  // PDH/PDL as structural T2, capped at 3R, floor at PREFERRED_RR (2.5R) — never collapse to T1
   const structural = direction === 'BULL' ? (prevDayHigh ?? entry + risk * PREFERRED_RR) : (prevDayLow ?? entry - risk * PREFERRED_RR);
   const cap = direction === 'BULL' ? entry + risk * 3 : entry - risk * 3;
   const capped = direction === 'BULL' ? Math.min(structural, cap) : Math.max(structural, cap);
-  const t2 = direction === 'BULL' ? Math.max(capped, t1) : Math.min(capped, t1);
+  const fallback = direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
+  const t2 = direction === 'BULL' ? Math.max(capped, fallback) : Math.min(capped, fallback);
   const rrT2 = direction === 'BULL' ? (t2 - entry) / risk : (entry - t2) / risk;
   if (rrT2 < MIN_RR) return null;
   return { strategyId: 'vwap_pullback', entry, stop, t1, t2, rr: rrT2 };
@@ -345,7 +347,8 @@ function evalS3_RSContinuation(input) {
   const structural = direction === 'BULL' ? (prevDayHigh ?? entry + risk * PREFERRED_RR) : (prevDayLow ?? entry - risk * PREFERRED_RR);
   const cap = direction === 'BULL' ? entry + risk * 3 : entry - risk * 3;
   const capped = direction === 'BULL' ? Math.min(structural, cap) : Math.max(structural, cap);
-  const t2 = direction === 'BULL' ? Math.max(capped, t1) : Math.min(capped, t1);
+  const fallback = direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
+  const t2 = direction === 'BULL' ? Math.max(capped, fallback) : Math.min(capped, fallback);
   const rrT2 = direction === 'BULL' ? (t2 - entry) / risk : (entry - t2) / risk;
   if (rrT2 < MIN_RR) return null;
   return { strategyId: 'rs_continuation', entry, stop, t1, t2, rr: rrT2 };
@@ -381,7 +384,8 @@ function evalS4_LiquiditySweep(input) {
   const orOpposite = direction === 'BULL' ? range.high : range.low;
   const t1 = direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2Raw = orOpposite;
-  const t2 = direction === 'BULL' ? Math.max(t2Raw, t1) : Math.min(t2Raw, t1);
+  const fallback = direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
+  const t2 = direction === 'BULL' ? Math.max(t2Raw, fallback) : Math.min(t2Raw, fallback);
   const rrT2 = direction === 'BULL' ? (t2 - entry) / risk : (entry - t2) / risk;
   if (rrT2 < MIN_RR) return null;
   return { strategyId: 'liquidity_sweep', entry, stop, t1, t2, rr: rrT2 };
@@ -421,7 +425,8 @@ function evalS5_OBFVGRetest(input) {
   const structural = direction === 'BULL' ? (prevDayHigh ?? entry + risk * PREFERRED_RR) : (prevDayLow ?? entry - risk * PREFERRED_RR);
   const cap = direction === 'BULL' ? entry + risk * 3 : entry - risk * 3;
   const capped = direction === 'BULL' ? Math.min(structural, cap) : Math.max(structural, cap);
-  const t2 = direction === 'BULL' ? Math.max(capped, t1) : Math.min(capped, t1);
+  const fallback = direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
+  const t2 = direction === 'BULL' ? Math.max(capped, fallback) : Math.min(capped, fallback);
   const rrT2 = direction === 'BULL' ? (t2 - entry) / risk : (entry - t2) / risk;
   if (rrT2 < MIN_RR) return null;
   return { strategyId: 'ob_fvg_retest', entry, stop, t1, t2, rr: rrT2 };
@@ -464,7 +469,8 @@ function evalS6_MSS(input) {
   const structural = direction === 'BULL' ? (prevDayHigh ?? entry + risk * PREFERRED_RR) : (prevDayLow ?? entry - risk * PREFERRED_RR);
   const cap = direction === 'BULL' ? entry + risk * 3 : entry - risk * 3;
   const capped = direction === 'BULL' ? Math.min(structural, cap) : Math.max(structural, cap);
-  const t2 = direction === 'BULL' ? Math.max(capped, t1) : Math.min(capped, t1);
+  const fallback = direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
+  const t2 = direction === 'BULL' ? Math.max(capped, fallback) : Math.min(capped, fallback);
   const rrT2 = direction === 'BULL' ? (t2 - entry) / risk : (entry - t2) / risk;
   if (rrT2 < MIN_RR) return null;
   return { strategyId: 'mss_breakout', entry, stop, t1, t2, rr: rrT2 };

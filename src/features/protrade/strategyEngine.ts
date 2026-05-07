@@ -112,7 +112,8 @@ function structuralT2(
   // Must be beyond T1 and no more than 3R away (avoids chasing distant levels)
   const cap3R = input.direction === 'BULL' ? entry + risk * 3 : entry - risk * 3;
   const capped = input.direction === 'BULL' ? Math.min(raw, cap3R) : Math.max(raw, cap3R);
-  return input.direction === 'BULL' ? Math.max(capped, t1) : Math.min(capped, t1);
+  // T2 must be at least PREFERRED_RR (2.5R) — never collapse to T1 (2.0R)
+  return input.direction === 'BULL' ? Math.max(capped, fallback) : Math.min(capped, fallback);
 }
 
 // Returns 'closed' outside 9:30–16:00 ET, 'blackout' during 9:30–10:00 (first 30m), 'open' otherwise.
@@ -304,7 +305,8 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const confirmedBreak = breakoutDistance >= minBreakout;
   const measuredMove = input.direction === 'BULL' ? breakoutLevel + orRange : breakoutLevel - orRange;
   const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
-  const t2 = input.direction === 'BULL' ? Math.max(measuredMove, t1) : Math.min(measuredMove, t1);
+  const preferredTarget = input.direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
+  const t2 = input.direction === 'BULL' ? Math.max(measuredMove, preferredTarget) : Math.min(measuredMove, preferredTarget);
   const tradePlan = directionOk(input) && range && confirmedBreak ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
@@ -418,7 +420,8 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   const orOpposite = range ? (input.direction === 'BULL' ? range.high : range.low) : null;
   const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2Raw = orOpposite ?? (input.direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR);
-  const t2 = input.direction === 'BULL' ? Math.max(t2Raw, t1) : Math.min(t2Raw, t1);
+  const preferredTarget = input.direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
+  const t2 = input.direction === 'BULL' ? Math.max(t2Raw, preferredTarget) : Math.min(t2Raw, preferredTarget);
   const sweepWickOk = sweepCandle ? (() => {
     const cRange = sweepCandle.high - sweepCandle.low;
     if (cRange < 1e-8) return false;
