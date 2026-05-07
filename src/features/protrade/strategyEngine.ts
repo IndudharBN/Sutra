@@ -350,10 +350,10 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
     input.vwapAligned || input.trendAligned ? pass('Value context', 'Price near VWAP/EMA support') : fail('Value context', 'Price overextended'),
-    input.trendAligned ? pass('5m trend aligned', input.trend5m) : fail('5m trend aligned', 'EMA9/EMA21 not aligned'),
+    pass('5m trend', `${input.trend5m}${input.trendAligned ? ' aligned ✓' : ' — pullback phase, watch'} — informational`),
     touchedValue ? pass('Pullback into value', 'Recent candles tested VWAP/EMA zone') : fail('Pullback into value', 'Waiting for pullback'),
     reclaimed ? pass('Reclaim candle', 'Latest candle reclaimed direction') : fail('Reclaim candle', 'Waiting for reclaim'),
-    input.rvol >= 1.0 ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — need ≥1.0× for VWAP pullback`),
+    input.rvol >= 0.8 ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — need ≥0.8× for VWAP pullback`),
     ema1mCheck(input),
   ];
   return signal('vwap_pullback', input, checklist, tradePlan, 'VWAP pullback continuation with trend alignment, reclaim, and 1m entry timing.');
@@ -390,7 +390,7 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
     pass('RS vs SPY', `${rsLabel}${rsEdge ? ' ✓ leading' : ' — neutral'} — informational`),
     input.trendAligned ? pass('5m trend aligned', input.trend5m) : fail('5m trend aligned', 'EMA9/EMA21 not aligned'),
     breakout ? pass('Micro range break', 'Latest candle broke the local range') : fail('Micro range break', 'Waiting for micro breakout'),
-    input.rvol >= 1.2 ? pass('RVOL ≥1.2×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.2×', `${round(input.rvol, 2)}× — breakout needs ≥1.2×`),
+    input.rvol >= 1.0 ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — breakout needs ≥1.0×`),
     pass('VWAP context', `${input.vwapAligned ? 'VWAP ✓' : 'VWAP (below — watch for reclaim)'} — informational`),
     ema1mCheck(input),
   ];
@@ -517,20 +517,20 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
   const dir = input.direction as 'BULL' | 'BEAR';
   const five = input.candles.five;
   const trigger = last(five);
-  if (five.length < 16) {
-    return signal('mss_breakout', input, [fail('Data', 'Need 16+ bars')], null, 'Insufficient candle data.');
+  if (five.length < 22) {
+    return signal('mss_breakout', input, [fail('Data', 'Need 22+ bars')], null, 'Insufficient candle data.');
   }
-  const refBars = five.slice(-16, -3);
+  const refBars = five.slice(-22, -6);
   const protectedHigh = Math.max(...refBars.map((c) => c.high));
   const protectedLow = Math.min(...refBars.map((c) => c.low));
-  const recentThree = five.slice(-3);
+  const recentSix = five.slice(-6);
   const mssOk = dir === 'BULL'
-    ? recentThree.some((c) => c.close > protectedHigh)
-    : recentThree.some((c) => c.close < protectedLow);
+    ? recentSix.some((c) => c.close > protectedHigh)
+    : recentSix.some((c) => c.close < protectedLow);
   const bar2Ok = mssOk && (
     dir === 'BULL'
-      ? input.price > protectedHigh - input.atr20 * 0.5
-      : input.price < protectedLow + input.atr20 * 0.5
+      ? input.price > protectedHigh - input.atr20 * 1.0
+      : input.price < protectedLow + input.atr20 * 1.0
   );
   const aheadOb = findOrderBlockZone(five, dir === 'BULL' ? 'BEAR' : 'BULL', 1.1, 60);
   const zoneBlocked = aheadOb
@@ -590,7 +590,7 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
       volSpike ? pass('Volume surge ≥2×', `${round(bar.volume / avgVol, 1)}× avg ✓`) : fail('Volume surge ≥2×', `${round(bar.volume / avgVol, 1)}× — need ≥2×`),
       isBreakout ? pass('15m range break', `${direction === 'BULL' ? 'Above' : 'Below'} 15m range`) : fail('15m range break', 'No breakout'),
       !adrExhausted(input.candles.five, input.atr20) ? pass('ADR room', '< 80% ATR used') : fail('ADR room', '>80% ATR used'),
-      input.vwapAligned ? pass('VWAP aligned', `${direction === 'BULL' ? 'Above' : 'Below'} VWAP ✓`) : fail('VWAP aligned', 'Wrong VWAP side'),
+      pass('VWAP context', `${input.vwapAligned ? (direction === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'Near VWAP — surge is primary signal'} — informational`),
     ];
     const sig = signal('s7_volume_surge', input, checklist, tradePlan, 'S7: Institutional 2× volume surge on 15m range break.');
     // Pre-blackout gap fire: allow S7 to fire at 9:30–9:45 AM on strong gap days (>3% gap + live data)

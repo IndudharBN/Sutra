@@ -94,15 +94,6 @@ function candleTrend(candles: Candle[]) {
   return 'FLAT' as const;
 }
 
-function computeDirection(h1: Candle[]): 'BULL' | 'BEAR' | 'NEUTRAL' {
-  if (h1.length < 22) return 'NEUTRAL';
-  const e9 = last(ema(closes(h1), 9));
-  const e21 = last(ema(closes(h1), 21));
-  if (!Number.isFinite(e9) || !Number.isFinite(e21)) return 'NEUTRAL';
-  if (e9 > e21 * 1.001) return 'BULL';
-  if (e9 < e21 * 0.999) return 'BEAR';
-  return 'NEUTRAL';
-}
 
 function computeAtr20(daily: Candle[]): number {
   if (daily.length < 2) return 0;
@@ -239,11 +230,6 @@ function buildRowFromAlpaca(
   const daily = (candleSet['1d'] || []).slice(-80);
 
   const price = meta.price;
-  // EMA crossover on 5m candles; falls back to gap direction when < 22 bars (pre-market / early RTH)
-  const _emaDir = computeDirection(five);
-  const direction: 'BULL' | 'BEAR' | 'NEUTRAL' = _emaDir !== 'NEUTRAL'
-    ? _emaDir
-    : meta.gapPct > 0.5 ? 'BULL' : meta.gapPct < -0.5 ? 'BEAR' : 'NEUTRAL';
   const atr20 = computeAtr20(daily);
   const atrPct = price > 0 ? (atr20 / price) * 100 : 0;
   const dollarVolM = (price * meta.todayVolume) / 1_000_000;
@@ -251,6 +237,13 @@ function buildRowFromAlpaca(
   const vwap = five.length ? vwapLatest(five) : price;
   const trend5m = candleTrend(five);
   const trend15m = candleTrend(fifteen);
+  // Direction: 15m EMA is the primary intraday bias (institutional TF, no dead zone).
+  // Gap fallback handles early session before 15m EMA resolves.
+  const direction: 'BULL' | 'BEAR' | 'NEUTRAL' =
+    trend15m === 'UP'   ? 'BULL' :
+    trend15m === 'DOWN' ? 'BEAR' :
+    meta.gapPct >  0.5  ? 'BULL' :
+    meta.gapPct < -0.5  ? 'BEAR' : 'NEUTRAL';
   const vwapAligned = direction === 'BULL' ? price > vwap : direction === 'BEAR' ? price < vwap : false;
   const trendAligned = direction === 'BULL' ? trend5m === 'UP' : direction === 'BEAR' ? trend5m === 'DOWN' : false;
   const trend15mAligned = direction === 'BULL' ? trend15m === 'UP' : direction === 'BEAR' ? trend15m === 'DOWN' : false;
