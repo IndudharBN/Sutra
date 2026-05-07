@@ -8,7 +8,7 @@ const ACCOUNT_BAL      = 100_000;
 const RISK_PCT         = 0.02;
 const MIN_RR           = 1.5;
 const PREFERRED_RR     = 2.5;
-const T1_RR            = 2.0;
+const T1_RR            = 1.5;  // scale out 50% at T1, SL → entry then → T1 on pullback
 const STOP_BUFFER_ATR  = 0.5;   // breathing room beyond anchor extreme
 const NOISE_FLOOR_ATR  = 0.75;  // min stop distance (covers bid-ask + 1m wick noise)
 

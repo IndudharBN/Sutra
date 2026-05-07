@@ -8,7 +8,7 @@ import { STRATEGY_LABELS, workflowStageRank } from './workflowTypes';
 
 const MIN_RR = 1.5;
 const PREFERRED_RR = 2.5;
-const T1_RR = 2.0;           // scale out at T1, move stop to BE
+const T1_RR = 1.5;           // scale out 50% at T1, SL → entry (BE), then → T1 on pullback confirm
 const STOP_BUFFER_ATR = 0.5; // breathing room beyond anchor extreme
 const NOISE_FLOOR_ATR = 0.75; // min stop distance — covers bid-ask + 1m wick noise
 

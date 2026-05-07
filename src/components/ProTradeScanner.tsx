@@ -317,13 +317,28 @@ function monitorPaperTrades(trades: PaperTrade[], rows: ProTradeRow[]) {
       changed = true;
       return closePaperTrade(trade, target2, 'Target');
     }
+    // Phase 1: T1 hit → scale out 50%, SL moves to entry (breakeven)
     if (!trade.t1HitAt && hitT1) {
       changed = true;
       return {
         ...trade,
         t1HitAt: new Date().toISOString(),
-        trailingStop: target1,
+        trailingStop: trade.entry,
       };
+    }
+    // Phase 2: After T1 hit, price pulls back to T1 zone → advance SL from entry to T1 (locks T1 profit)
+    if (trade.t1HitAt) {
+      const t1Level = target1;
+      const slAtEntry = Math.abs(trailingStop - trade.entry) < 0.01;
+      if (slAtEntry) {
+        const pulledBackToT1 = trade.direction === 'BULL'
+          ? current >= t1Level * 0.997 && current > trade.entry
+          : current <= t1Level * 1.003 && current < trade.entry;
+        if (pulledBackToT1) {
+          changed = true;
+          return { ...trade, trailingStop: t1Level };
+        }
+      }
     }
     if (hitStop) {
       changed = true;
