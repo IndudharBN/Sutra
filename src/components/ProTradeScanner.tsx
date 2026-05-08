@@ -1869,7 +1869,7 @@ export function ProTradeScannerScreen() {
     if (!checkDailyLossLimit(accountBalance).ok) return;
 
     const pending = awaitingConfirmRef.current;
-    const tradedSymbols = new Set(paperTrades.map((t) => baseSymbol(t.symbol)));
+    const tradedSymbols = new Set(paperTrades.filter((t) => t.status === 'Open').map((t) => baseSymbol(t.symbol)));
     const CONFIRM_WINDOW_MS = 5 * 60_000; // abandon if no confirmation within 5 minutes
     const now = Date.now();
 

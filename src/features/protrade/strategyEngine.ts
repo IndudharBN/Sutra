@@ -349,14 +349,14 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
-    pass('Value context', `${input.vwapAligned ? 'Above VWAP ✓' : input.trendAligned ? '5m aligned ✓' : 'Pullback zone'} — informational`),
-    pass('5m trend', `${input.trend5m}${input.trendAligned ? ' aligned ✓' : ' — pullback phase, watch'} — informational`),
     touchedValue ? pass('Pullback into value', 'Recent candles tested VWAP/EMA zone') : fail('Pullback into value', 'Waiting for pullback'),
     reclaimed ? pass('Reclaim candle', 'Latest candle reclaimed direction') : fail('Reclaim candle', 'Waiting for reclaim'),
+    input.trendAligned ? pass('5m trend aligned', `${input.trend5m} ✓ — Phase 3 reclaim confirmed`) : fail('5m trend aligned', `5m still ${input.trend5m} — pullback not complete`),
+    pass('VWAP context', `${input.vwapAligned ? 'Above VWAP ✓' : 'Near VWAP'} — informational`),
     pass('RVOL', `${round(input.rvol, 2)}×${input.rvol >= 0.8 ? ' ✓' : ' — low vol pullback'} — informational`),
     ema1mCheck(input),
   ];
-  return signal('vwap_pullback', input, checklist, tradePlan, 'VWAP pullback: touched value zone + reclaim candle. Hard gates: direction, touchedValue, reclaimed.');
+  return signal('vwap_pullback', input, checklist, tradePlan, 'VWAP pullback: touched value zone + reclaim + 5m re-aligned. Hard gates: direction, touchedValue, reclaimed, trendAligned.');
 }
 
 export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
