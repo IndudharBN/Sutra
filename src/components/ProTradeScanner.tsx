@@ -1616,17 +1616,15 @@ export function ProTradeScannerScreen() {
     return () => window.clearInterval(id);
   }, []);
 
-  // WebSocket: subscribe S3/S4/S6 symbols so 5m bar close fires instantly instead of waiting up to 20s
+  // WebSocket: subscribe ALL hot-set symbols so every 5m bar close fires instantly for all 9 strategies.
+  // Previously limited to S3/S4/S6/S7 — now covers forming/confirmed/locked/trade_ready regardless of strategy.
   React.useEffect(() => {
     const wsSymbols = (snapshot?.rows ?? [])
       .filter((r) =>
-        (r.workflowStage === 'forming' || r.workflowStage === 'confirmed') &&
-        r.strategySignals.some((s) =>
-          s.strategyId === 'rs_continuation' ||
-          s.strategyId === 'liquidity_sweep' ||
-          s.strategyId === 'mss_breakout' ||
-          s.strategyId === 's7_volume_surge'
-        )
+        r.workflowStage === 'forming' ||
+        r.workflowStage === 'confirmed' ||
+        r.workflowStage === 'locked' ||
+        r.workflowStage === 'trade_ready'
       )
       .map((r) => r.symbol);
     if (wsSymbols.length) alpacaBarStream.subscribe(wsSymbols);
