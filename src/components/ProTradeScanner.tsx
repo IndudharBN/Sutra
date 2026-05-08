@@ -1885,9 +1885,10 @@ export function ProTradeScannerScreen() {
       const level = row.tradePlan?.entry;
       if (!level) return;
 
-      // Aggressive Entry: S1 (ORB) and S7 (Volume Surge) fire INSTANTLY without 1m confirmation
+      // S7 (Volume Surge) fires INSTANTLY — 2× spike expires in ~60s, no time to wait for bar close
+      // S1 (ORB Retest) uses 1m confirmation — mid-bar entry on snapshot tick carries too much risk
       const stratId = row.primaryStrategy?.strategyId;
-      if (stratId === 'orb_retest' || stratId === 's7_volume_surge') {
+      if (stratId === 's7_volume_surge') {
         const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0);
         if (trade) {
           setPaperTrades((current) => [trade, ...current]);
