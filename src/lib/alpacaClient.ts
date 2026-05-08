@@ -226,7 +226,7 @@ export function selectTopSymbols(metas: SymbolMeta[], n = 60): string[] {
 
 const UNIVERSE_CACHE_KEY = 'dynamic_universe_v2';
 const UNIVERSE_TTL_MS = 6 * 60 * 60 * 1000;   // 6 hours
-const UNIVERSE_TARGET = 75;
+const UNIVERSE_TARGET = 90;
 const BETA_MIN = 1.2;
 const BETA_MAX = 2.8;
 const ADR_PCT_MIN = 2.5;   // matches Stock-analyzer threshold
@@ -283,7 +283,7 @@ function computeBeta(stockBars: Candle[], spyBars: Candle[]): number {
 }
 
 function computeAdrPct(bars: Candle[]): number {
-  const recent = bars.slice(-20);
+  const recent = bars.slice(-15); // 15 trading days = 3 weeks — reflects current volatility regime
   if (!recent.length) return 0;
   return recent.reduce((s, b) => s + (b.close > 0 ? (b.high - b.low) / b.close * 100 : 0), 0) / recent.length;
 }
@@ -318,7 +318,8 @@ export async function buildDynamicUniverse(
       if (computeAdrPct(bars) < ADR_PCT_MIN) return false;
       if (computeAvgDvolM(bars) < DVOL_MIN_M) return false;
       if (spyBars.length >= 20) {
-        const beta = computeBeta(bars, spyBars);
+        // 20-day rolling beta — reflects current volatility regime, not 3-month average
+        const beta = computeBeta(bars.slice(-20), spyBars.slice(-20));
         if (beta < BETA_MIN || beta > BETA_MAX) return false;
       }
       return true;

@@ -383,11 +383,21 @@ export async function fetchHotSetSnapshot(symbols: string[], spyChangePct: numbe
 // ── Main fetch ────────────────────────────────────────────────────────────────
 
 export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = []): Promise<ProTradeSnapshot> {
-  // Dynamic universe: Alpaca screener → beta/ADR% gates → top 75, cached 6h.
+  // Pre-warm earnings calendar so the universe build can filter earnings-day stocks
+  await fetchEarningsCalendar();
+
+  // Dynamic universe: Alpaca screener → beta/ADR% gates → top 90, cached 6h.
   // Falls back to static DEFAULT_LIVE_UNIVERSE if screener is unavailable.
-  const universe = await buildDynamicUniverse(pinnedSymbols, DEFAULT_LIVE_UNIVERSE);
+  const rawUniverse = await buildDynamicUniverse(pinnedSymbols, DEFAULT_LIVE_UNIVERSE);
+
+  // Exclude stocks with earnings today, tomorrow, or yesterday — binary event risk
+  const universe = rawUniverse.filter(sym => {
+    const days = getEarningsDays(sym);
+    return days === null || Math.abs(days) > 1;
+  });
+
   const metas = await fetchUniverseMeta(universe);
-  const scored = selectTopSymbols(metas, 75);
+  const scored = selectTopSymbols(metas, 90);
   // Guarantee pinned watchlist symbols are always scanned regardless of score rank
   const top = [...new Set([...scored, ...pinnedSymbols])];
 
@@ -403,8 +413,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
     fetchSpyDailyBars(),
   ]);
 
-  // Warm earnings + float caches in background — never block the scan
-  void fetchEarningsCalendar();
+  // Warm float cache in background — earnings already pre-warmed above
   void fetchSharesOutstanding(top);
 
   // Compute SPY hourly change for RS vs benchmark
