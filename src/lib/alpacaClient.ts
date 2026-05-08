@@ -35,10 +35,12 @@ function cacheSet<T>(key: string, data: T, ttlMs: number) {
   _cache.set(key, { data, expiresAt: Date.now() + ttlMs });
 }
 
-// Evict all cache entries for a specific symbol (called after WebSocket bar close).
+// Evict bar cache entries for a specific symbol (called after WebSocket bar close).
+// snap:* keys are intentionally preserved — snapshot TTL handles staleness without
+// hammering /v2/stocks/snapshots on every bar close and triggering 429s.
 export function clearBarCache(symbol: string): void {
   for (const key of _cache.keys()) {
-    if (key.includes(symbol)) _cache.delete(key);
+    if (key.includes(symbol) && !key.startsWith('snap:')) _cache.delete(key);
   }
 }
 
@@ -148,7 +150,7 @@ export async function fetchSnapshots(symbols: string[]): Promise<Record<string, 
     symbols: symbols.join(','),
     feed: 'iex',
   });
-  cacheSet(cacheKey, data, 15_000);
+  cacheSet(cacheKey, data, 30_000);
   return data;
 }
 
