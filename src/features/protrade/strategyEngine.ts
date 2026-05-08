@@ -440,7 +440,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     pass('Volume confirmation', `${round(input.rvol, 2)}x${input.rvol >= 0.8 ? ' — confirmed' : ' — low, sweep structure is the primary signal'}`),
     ema1mCheck(input),
   ];
-  return signal('liquidity_sweep', input, checklist, tradePlan, `S4 Sweep: T1=${orOpposite ? 'OR opposite' : '2R'} T2=${orOpposite ? round(orOpposite,2) : '2.5R'}`, true);
+  return signal('liquidity_sweep', input, checklist, tradePlan, `S4 Sweep: T1=${orOpposite ? 'OR opposite' : '2R'} T2=${orOpposite ? round(orOpposite,2) : '2.5R'}`);
 }
 
 export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
@@ -505,7 +505,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
     pass('ADR room', `${adrExhausted(input.candles.five, input.atr20) ? '>80% ATR used — watch' : '< 80% ATR used ✓'} — informational`),
     ema1mCheck(input),
   ];
-  return signal('ob_fvg_retest', input, checklist, tradePlan, 'S5: OB or FVG retest — either zone qualifies. FVG must be ≥0.25×ATR. OB needs rejection candle.', true);
+  return signal('ob_fvg_retest', input, checklist, tradePlan, 'S5: OB or FVG retest — either zone qualifies. FVG must be ≥0.25×ATR. OB needs rejection candle.');
 }
 
 export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
