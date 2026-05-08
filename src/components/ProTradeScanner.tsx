@@ -995,7 +995,6 @@ function PaperTradeMonitor({
   onCloseTrade,
   onClearClosed,
   onFixZeroPnl,
-  realDayPnl,
 }: {
   trades: PaperTrade[];
   rows: ProTradeRow[];
@@ -1004,7 +1003,6 @@ function PaperTradeMonitor({
   onCloseTrade: (trade: PaperTrade, price: number) => void;
   onClearClosed: () => void;
   onFixZeroPnl: () => void;
-  realDayPnl: number | null;
 }) {
   const priceBySymbol = new Map(rows.map((row) => [baseSymbol(row.symbol), row.price]));
   const filteredTrades = trades.filter((t) => tradeDateET(t) === monitorDate);
@@ -1012,8 +1010,9 @@ function PaperTradeMonitor({
   const open = filteredTrades.filter((trade) => trade.status === 'Open');
   const closed = filteredTrades.filter((trade) => trade.status === 'Closed');
   const isToday = monitorDate === todayET();
-  // Use Alpaca equity delta as ground truth for today; fall back to estimated for historical dates
-  const totalPnl = isToday && realDayPnl !== null ? realDayPnl : filteredTrades.reduce((total, trade) => {
+  // Sum stored trade.pnl — same source as Performance screen so the two always agree.
+  // The HUD "Today P&L" widget separately shows the Alpaca equity delta.
+  const totalPnl = filteredTrades.reduce((total, trade) => {
     if (trade.status === 'Open') return total;
     const pnl = (!trade.pnl || trade.pnl === 0)
       ? paperPnl(trade, estimatedExitPrice(trade)).pnl
@@ -2408,7 +2407,6 @@ export function ProTradeScannerScreen() {
         onCloseTrade={manualClosePaperTrade}
         onClearClosed={clearClosedTrades}
         onFixZeroPnl={fixZeroPnlTrades}
-        realDayPnl={getDailyStartBalance() > 0 ? accountBalance - getDailyStartBalance() : null}
       />
 
       <WatchlistHistoryPanel />
