@@ -349,14 +349,14 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
-    input.vwapAligned || input.trendAligned ? pass('Value context', 'Price near VWAP/EMA support') : fail('Value context', 'Price overextended'),
+    pass('Value context', `${input.vwapAligned ? 'Above VWAP ✓' : input.trendAligned ? '5m aligned ✓' : 'Pullback zone'} — informational`),
     pass('5m trend', `${input.trend5m}${input.trendAligned ? ' aligned ✓' : ' — pullback phase, watch'} — informational`),
     touchedValue ? pass('Pullback into value', 'Recent candles tested VWAP/EMA zone') : fail('Pullback into value', 'Waiting for pullback'),
     reclaimed ? pass('Reclaim candle', 'Latest candle reclaimed direction') : fail('Reclaim candle', 'Waiting for reclaim'),
-    input.rvol >= 0.8 ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — need ≥0.8× for VWAP pullback`),
+    pass('RVOL', `${round(input.rvol, 2)}×${input.rvol >= 0.8 ? ' ✓' : ' — low vol pullback'} — informational`),
     ema1mCheck(input),
   ];
-  return signal('vwap_pullback', input, checklist, tradePlan, 'VWAP pullback continuation with trend alignment, reclaim, and 1m entry timing.');
+  return signal('vwap_pullback', input, checklist, tradePlan, 'VWAP pullback: touched value zone + reclaim candle. Hard gates: direction, touchedValue, reclaimed.');
 }
 
 export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
@@ -383,18 +383,16 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
     : 'FLAT';
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
-    input.trend15mAligned
-      ? pass('15m trend', `${input.trend15m} ✓ — aligned with direction`)
-      : fail('15m trend', `${input.trend15m} — must be aligned for RS entry`),
+    pass('15m trend', `${input.trend15m}${input.trend15mAligned ? ' ✓ aligned' : ' — context'} — informational`),
     pass('1H directional', `${trend1h} — macro bias`),
     pass('RS vs SPY', `${rsLabel}${rsEdge ? ' ✓ leading' : ' — neutral'} — informational`),
-    input.trendAligned ? pass('5m trend aligned', input.trend5m) : fail('5m trend aligned', 'EMA9/EMA21 not aligned'),
+    pass('5m trend', `${input.trend5m}${input.trendAligned ? ' aligned ✓' : ' — pullback entry phase'} — informational`),
     breakout ? pass('Micro range break', 'Latest candle broke the local range') : fail('Micro range break', 'Waiting for micro breakout'),
     input.rvol >= 1.0 ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — breakout needs ≥1.0×`),
     pass('VWAP context', `${input.vwapAligned ? 'VWAP ✓' : 'VWAP (below — watch for reclaim)'} — informational`),
     ema1mCheck(input),
   ];
-  return signal('rs_continuation', input, checklist, tradePlan, 'Relative strength continuation after local range break with RVOL confirmation.');
+  return signal('rs_continuation', input, checklist, tradePlan, 'RS continuation: micro range break + RVOL≥1.0. Hard gates: direction, breakout, rvol. Trend gates informational.');
 }
 
 export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
@@ -547,18 +545,18 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
-  const tradePlan = mssOk && bar2Ok && !zoneBlocked ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = mssOk && !zoneBlocked ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
     mssOk ? pass('MSS detected', 'Structural high/low broken') : fail('MSS detected', 'Waiting for break'),
-    bar2Ok ? pass('Bar-2 hold', 'MSS level maintained') : fail('Bar-2 hold', 'MSS reversed'),
+    pass('Bar-2 hold', `${bar2Ok ? 'MSS level maintained ✓' : 'Price extended from break — watch'} — informational`),
     !zoneBlocked ? pass('Zone clearance', 'Clear path ahead') : fail('Zone clearance', 'Overhead OB blocking'),
     pass('VWAP context', `${input.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP side mismatch — watch'} — informational`),
-    input.rvol >= 1.0 ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — breakout needs volume`),
+    pass('RVOL', `${round(input.rvol, 2)}×${input.rvol >= 1.0 ? ' ✓' : ' — low vol structural break'} — informational`),
     ema1mCheck(input),
   ];
-  return signal('mss_breakout', input, checklist, tradePlan, 'S6 MSS: Structural break.');
+  return signal('mss_breakout', input, checklist, tradePlan, 'S6 MSS: structural break + clear path. Hard gates: direction, mssOk, zoneBlocked. bar2Ok + RVOL informational.');
 }
 
 function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
