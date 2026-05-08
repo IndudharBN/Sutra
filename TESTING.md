@@ -1,123 +1,89 @@
-# Testing Plan
+# Testing
 
-## Completed In This Build
-
-- Project structure created.
-- AI Studio design imported.
-- Sutra branding applied.
-- Supabase config scaffolded.
-- Broker adapter scaffolded.
-- SQL schema drafted.
-- Dependency install completed.
-- TypeScript check completed.
-- Production build completed.
-- npm audit completed with zero vulnerabilities.
-- Local dev server started.
-
-## Local Verification Commands
+## Local Verification
 
 ```bash
 npm install
-npm run lint
-npm run build
-npm run dev
+npm run build      # TypeScript compile + Vite production build
+npm run dev        # Dev server on :3006 + trade server on :3009
 ```
 
-## Latest Local Test Result
+There are no automated unit tests in the active test suite. The `src/__tests__/` directory contains a backtest audit scaffold that is not part of the main test run.
 
-Date: 2026-04-21
+---
 
-```text
-npm install: PASS
-npm run lint: PASS
-npm run test: PASS, 6 files / 19 tests
-npm run build: PASS
-npm audit --audit-level=moderate: PASS, 0 vulnerabilities
-HTTP check http://localhost:3000: PASS, 200
-Trading212 local bridge health: PASS
-Trading212 demo snapshot: PASS, GBP account, 20 positions, 2 open orders
-Supabase schema apply: PASS, 7 expected public tables verified
-Supabase functions deploy: PASS, 5 active functions verified
-Supabase Trading212 function invoke: PASS, GBP account, 20 positions, 2 open orders
-Trading212 snapshot requests are sequential to respect demo rate limits.
-Playwright visual check: BLOCKED by local MCP profile permission issue
+## Manual Verification Checklist
+
+### Scanner
+
+- [ ] Full scan runs on page load — stocks appear in the scanner table
+- [ ] Regime badge shows BULL/SIDEWAYS/BEAR with SPY/EMA200 levels
+- [ ] SPY Tide shows UP/DOWN/FLAT
+- [ ] Strategy signals populate checklist items in the detail panel
+- [ ] Workflow stages progress: `raw_candidates → forming → confirmed → trade_ready`
+- [ ] S1 and S7 fire instantly on `trade_ready` (no confirmation delay)
+- [ ] S2–S6 enter confirmation queue — "N confirming" shown in status bar
+
+### Paper Trade Monitor
+
+- [ ] Trades sorted newest-first (latest `openedAt` at top)
+- [ ] Table shows max 10 rows with scroll; sticky header visible while scrolling
+- [ ] Current/Exit column: green when move is in profit direction, red when adverse
+- [ ] Closed trades show exit price in white
+- [ ] P&L column updates live for open trades
+- [ ] Fix P&L button appears only when zero-P&L closed trades exist
+
+### Risk Guards
+
+- [ ] Daily loss limit blocks new entries when breached (amber warning in UI)
+- [ ] Circuit breaker pauses strategy after 3 consecutive losses
+- [ ] Max positions guard blocks when limit reached
+- [ ] basePass filter rejects stocks outside price/ATR%/dollar-vol range
+
+### Data / API
+
+- [ ] Only one browser tab open — multiple tabs cause 429 rate limit errors
+- [ ] No `bt_run.mjs` or `diag_run.mjs` running alongside (share the same Alpaca key)
+- [ ] 429 errors on `/v2/stocks/snapshots` resolve after reducing to one tab
+- [ ] WebSocket bar stream subscribes to forming/confirmed/locked/trade_ready symbols
+- [ ] Bar cache evicts on WebSocket bar close; snapshot cache persists (30s TTL)
+
+---
+
+## Strategy Gate Verification
+
+For each strategy, verify in the checklist panel that:
+
+| Strategy | Expected hard failures | Expected soft items |
+|---|---|---|
+| S2 VWAP Pullback | `Pullback into value`, `Reclaim candle` | Value context, RVOL, 5m trend |
+| S3 RS Continuation | `Micro range break`, `RVOL ≥1.0×` | 15m trend, 5m trend, VWAP |
+| S4 Liquidity Sweep | `Liquidity swept`, `Sweep rejection wick`, `Level reclaimed`, `Entry proximity` | Volume |
+| S5 OB/FVG Retest | `Structure zone`, `FVG quality`, `Entry confirmation` | VWAP, RVOL, RSI, ADR |
+| S6 MSS Breakout | `MSS detected`, `Zone clearance` | Bar-2 hold, RVOL, VWAP |
+| S7 Volume Surge | `Volume surge ≥2×`, `15m range break` | VWAP, ADR |
+
+---
+
+## Backtest
+
+```bash
+node bt_run.mjs SYMBOL YYYY-MM-DD YYYY-MM-DD
 ```
 
-## Migrated Logic Covered By Automated Tests
+Runs the strategy engine offline against historical Alpaca bars. Output shows signal hits, entry/stop/target levels, and estimated P&L. Useful for verifying gate logic on known market dates.
 
-- US/Eastern session windows: pre-market, warming, regular, post-market.
-- Session engine allowances and order type rules.
-- Market regime classification from SPY / EMA200 / VIX.
-- E1-E5 scanner state classification rules.
-- E4-alone rule: E4 does not confirm by itself.
-- Entry drift / chasing prevention.
-- Group classification: GOLD, BLUE, TREND, FVG.
-- Best-signal priority by group.
-- Exposure and sector concentration limits.
-- Beta-adjusted order sizing.
-- Order lifecycle close detection.
-- Candle-based FVG detection.
-- Candle-based E1/E2 order-block engine shape.
-- Candle-based E3 MSS engine shape.
-- Candle-based E5 FVG engine shape.
-- Full E1-E5 scan result shape.
+```bash
+node diag_run.mjs SYMBOL
+```
 
-## Not Yet Covered
+Fetches today's bars for a symbol and prints the full strategy signal output including all checklist items and computed levels. Use this to debug why a strategy is or isn't firing.
 
-- Live OHLCV data-provider network integration.
-- Full E1-E5 Python-vs-TypeScript parity against recorded historical market data.
-- Real Supabase deployment.
-- Supabase-hosted broker API deployment.
-- Supabase broker credential secrets.
+---
 
-## Supabase Deployment Status
+## Known Limitations
 
-Completed:
-
-- Database schema was applied directly to the remote Supabase Postgres database.
-- Edge Functions were deployed to the remote Supabase project.
-- Trading212 demo secrets were set in Supabase.
-- Deployed Trading212 function was invoked successfully.
-- Sutra local app is configured to use the Supabase function path, not the local bridge.
-- Verified tables:
-  - `app_orders`
-  - `broker_connections`
-  - `broker_positions`
-  - `performance_events`
-  - `scan_runs`
-  - `scanner_signals`
-  - `user_settings`
-
-Verified functions:
-
-- `broker-trading212`
-- `broker-capital`
-- `broker-ig`
-- `broker-ibkr`
-- `scanner-run`
-
-## Functional Tests To Run
-
-1. App opens on the local dev URL.
-2. Sidebar navigation changes screens.
-3. Live Scanner table renders mock signals.
-4. Selecting a scanner row updates the detail panel.
-5. Orders table shows open and closed lifecycle fields.
-6. Positions table shows broker positions separately from app orders.
-7. Performance screen renders all cards and tables.
-8. Settings screen shows broker connection area.
-9. Layout remains usable at desktop and narrow widths.
-
-## Future Parity Tests
-
-For scanner migration, each test should compare Python output and TypeScript output for the same ticker/universe input:
-
-- signal status
-- direction
-- group
-- engines
-- entry
-- stop loss
-- target
-- risk state
-- order eligibility
+- No automated regression tests against strategy signal output
+- TypeScript errors exist in `scratch/` and `src/__tests__/` (pre-existing, not in production build path)
+- VIX unavailable on Alpaca IEX free feed — regime falls back to SPY-only classification
+- Earnings calendar via Finnhub requires a separate API key (`VITE_FINNHUB_KEY`)

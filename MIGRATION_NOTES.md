@@ -1,73 +1,65 @@
 # Migration Notes
 
-## Current Python Logic To Preserve
+## Status: Migration Complete
 
-The following areas must remain behaviorally equivalent:
+The original Python scanner (E1–E5 engine) has been fully superseded by the TypeScript ProTrade engine (S1–S7). There is no Python dependency. All logic runs in the browser against Alpaca's IEX feed.
 
-- Watchlist/universe selection.
-- Ticker lock handling.
-- E1, E2, E3, E4, E5 engine behavior.
-- Forming and confirmed signal classification.
-- Entry, stop loss, target, distance, R:R, and signal age calculations.
-- Risk sizing and kill-switch behavior.
-- Broker connection and order placement gates.
-- Position reconciliation.
-- Open/closed order lifecycle.
-- Realized and unrealized P&L.
+---
 
-## Known Simplification Targets
+## Strategy Mapping (Python → TypeScript)
 
-These can be simplified only after parity tests are available:
+| Original Engine | TypeScript Strategy | Notes |
+|---|---|---|
+| E1 — Order Block | S5 OB/FVG Retest | `findOrderBlockZone()` in `smc.ts` |
+| E2 — FVG | S5 OB/FVG Retest | `detectFvg()` in `fvg.ts` |
+| E3 — MSS | S6 MSS Breakout | Structural high/low break with 6-bar window |
+| E4 — ORB | S1 ORB Retest | Today's opening range via `todayOpeningRange()` |
+| E5 — Volume | S7 Volume Surge | 2× avg volume on 5m bar + range break |
+| — | S2 VWAP Pullback | New: trend continuation after VWAP reclaim |
+| — | S3 RS Continuation | New: relative strength micro range break |
+| — | S4 Liquidity Sweep | New: stop-hunt reversal after OR sweep |
 
-- Split the current large Live Scanner page into scanner, broker, order, and performance modules.
-- Remove repeated forming-detail calculations.
-- Centralize broker credential/connection state.
-- Normalize scanner table rows into one typed object.
-- Keep manual broker positions separate from app-triggered orders.
+---
 
-## First Migration Phase
+## Broker Migration
 
-The first phase is UI plus data model parity:
+| Original | Current |
+|---|---|
+| Trading212 (demo read-only) | Removed |
+| Supabase Edge Functions | Removed |
+| Capital.com / IG / IBKR adapters | Removed (scaffolds only, never activated) |
+| **Alpaca Paper API** | **Active — all paper order execution** |
 
-1. Keep mock data visible.
-2. Add Supabase tables.
-3. Add broker adapter contracts.
-4. Port scanner logic in small pieces.
-5. Compare Python output to TypeScript output for the same ticker inputs.
+All bracket orders, positions, and fills go through `alpacaBroker.ts` → Alpaca Paper Trading API.
 
-## Current Migration Status
+---
 
-Completed:
+## Data Provider Migration
 
-- Session logic has been ported.
-- Market regime classification has been ported.
-- OHLCV data-provider scaffold has been added.
-- Indicator helpers have been ported: EMA, RSI, MACD histogram, ATR, VWAP, volume ratio.
-- FVG detection has been ported.
-- Order-block and rejection-candle helpers have been ported.
-- HTF context has been ported into a candle-based TypeScript module.
-- E1-E5 candle-based engine internals have been ported into TypeScript.
-- Scanner state classification has been ported.
-- Group classification has been ported.
-- Best signal selection has been ported.
-- Exposure limits have been ported.
-- Sector concentration checks have been ported.
-- Beta-adjusted sizing has been ported.
-- Order lifecycle close marking has been ported.
-- Supabase schema has been expanded for scan runs, signals, orders, positions, and performance events.
-- Supabase Edge Function scaffolds exist for scanner-run and all requested broker families.
-- Trading212 read-only local bridge is implemented for immediate demo testing.
-- Trading212 demo account snapshot is verified locally.
-- Sutra frontend is wired to live Trading212 demo positions and open orders through the local bridge.
-- Supabase database schema has been applied to the remote project and verified.
-- Supabase Edge Functions have been deployed.
-- Trading212 secrets have been set in Supabase.
-- The deployed Trading212 function returns live demo account, positions, and open orders.
-- Trading212 snapshot requests are sequential to avoid demo API rate-limit bursts.
+| Original | Current |
+|---|---|
+| Yahoo Finance (Python) | Removed |
+| Supabase scanner-run Edge Function | Removed |
+| **Alpaca IEX feed** | **Active — all market data** |
 
-Remaining:
+Bar intervals: 1m, 5m, 15m, 1h, 1d. Snapshots for price/RVOL/gap. WebSocket for real-time bar stream.
 
-- Add Python-versus-TypeScript parity fixtures.
-- Harden live Yahoo data fetching inside Supabase Edge Functions.
-- Add more real historical ticker fixtures for edge cases.
-- Add demo order placement flow after read-only testing is accepted.
+---
+
+## Key Decisions Made
+
+- **No cloud backend**: all data fetches from browser → Alpaca directly. No middleware.
+- **No Supabase**: trade persistence via local `trade-server.mjs` → `data/trades.json`.
+- **Direction from 15m EMA**: replaces the Python `computeDirection` approach. 15m is the institutional timeframe for intraday bias.
+- **Gate philosophy**: 2–3 hard gates per strategy max. Everything else informational. Removed the "Christmas tree" of 5–7 simultaneous hard gates that prevented any trades from firing.
+- **Two-phase trailing stop**: T1 at 1.5R (scale out 50%, move to BE), T2 at 2.5R or PDH/PDL.
+- **Macro regime sizing**: SPY EMA200 daily + VIX → 0.5×/0.75×/1.0× position size multiplier.
+
+---
+
+## Removed Files / Features
+
+- `supabase/` directory and all Edge Functions
+- `src/features/brokers/trading212LiveApi.ts` — kept as legacy file but unused
+- `PARITY_TEST_PLAN.md` — Python parity tests no longer relevant
+- `hard-gates-stop-loss-plan.md` — superseded by current gate design
