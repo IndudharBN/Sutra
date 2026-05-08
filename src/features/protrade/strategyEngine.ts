@@ -693,6 +693,9 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
   const flagFormed = flagRange < input.atr20 * 1.0;
   const breakout = dir === 'BULL' ? trigger.close > flagHigh : trigger.close < flagLow;
   const rvolOk = input.rvol >= 1.0;
+  const flagMaxVol = Math.max(...flagBars.map((c) => c.volume));
+  // Break bar must show more urgency than any consolidation bar — filters lunch drifts
+  const volExpansion = trigger.volume > flagMaxVol;
 
   const entry = input.price;
   const rawStop = dir === 'BULL'
@@ -702,7 +705,7 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
-  const tradePlan = flagFormed && breakout && rvolOk
+  const tradePlan = flagFormed && breakout && rvolOk && volExpansion
     ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger)
     : null;
 
@@ -715,15 +718,18 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
       ? pass('Flag break', `Close ${dir === 'BULL' ? 'above flag high' : 'below flag low'} (${round(dir === 'BULL' ? flagHigh : flagLow, 2)}) ✓`)
       : fail('Flag break', `Waiting for close ${dir === 'BULL' ? 'above' : 'below'} ${round(dir === 'BULL' ? flagHigh : flagLow, 2)}`),
     rvolOk
-      ? pass('Volume expansion', `${round(input.rvol, 2)}× RVOL ✓`)
-      : fail('Volume expansion', `${round(input.rvol, 2)}× RVOL — needs ≥1.0× on breakout`),
+      ? pass('RVOL', `${round(input.rvol, 2)}× ✓`)
+      : fail('RVOL', `${round(input.rvol, 2)}× — needs ≥1.0×`),
+    volExpansion
+      ? pass('Volume expansion', `Break bar ${round(trigger.volume / Math.max(flagMaxVol, 1), 1)}× flag max vol ✓`)
+      : fail('Volume expansion', `Break bar vol below flag max (${flagMaxVol.toLocaleString()}) — drift break, not institutional`),
     htfTrendCheck(input),
     pass('VWAP context', `${input.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP misaligned — watch'} — informational`),
     ema1mCheck(input),
   ];
 
   return signal('flag_break', input, checklist, tradePlan,
-    'S9 Flag Break: 7-bar compression < 1×ATR + close through flag + RVOL≥1.0. Hard gates: direction, flagFormed, breakout, rvolOk.');
+    'S9 Flag Break: 7-bar compression < 1×ATR + close through flag + RVOL≥1.0 + vol expansion. Hard gates: direction, flagFormed, breakout, rvolOk, volExpansion.');
 }
 
 const SYMBOL_STRATEGY_EXCLUSIONS: Partial<Record<string, StrategyId[]>> = {
