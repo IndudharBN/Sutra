@@ -450,7 +450,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
     return signal('ob_fvg_retest', input, [fail('Directional bias', 'No BULL/BEAR bias')], null, 'No directional bias.');
   }
   const dir = input.direction as 'BULL' | 'BEAR';
-  const ob = findOrderBlockZone(five, dir, 1.1, 40);
+  const ob = findOrderBlockZone(five, dir, 1.1, 20);
   const atOb = ob
     ? (dir === 'BULL'
       ? input.price <= ob.high + input.atr20 * 0.2 && input.price >= ob.low - input.atr20 * 0.2
@@ -477,7 +477,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
-  const tradePlan = hasStructure ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = hasStructure && input.trendAligned ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const fvgSizeOk = fvgAligned && gap ? (gap.gapHigh - gap.gapLow) >= input.atr20 * 0.25 : false;
   const structureLabel = atOb && atFvg
     ? `OB+FVG confluence`
@@ -495,6 +495,9 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
     atFvg && !fvgSizeOk
       ? fail('FVG quality', `Gap too small (< 0.25×ATR)`)
       : atFvg ? pass('FVG quality', `Gap size ok`) : pass('FVG quality', 'OB entry — no FVG required'),
+    input.trendAligned
+      ? pass('5m trend aligned', `${input.trend5m} ✓ — structural context supports bounce`)
+      : fail('5m trend aligned', `${input.trend5m} — trend against zone, zone likely breaks not bounces`),
     obReject || atFvg
       ? pass('Entry confirmation', 'Structure zone retest')
       : fail('Entry confirmation', 'No confirmation'),
@@ -505,7 +508,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
     pass('ADR room', `${adrExhausted(input.candles.five, input.atr20) ? '>80% ATR used — watch' : '< 80% ATR used ✓'} — informational`),
     ema1mCheck(input),
   ];
-  return signal('ob_fvg_retest', input, checklist, tradePlan, 'S5: OB or FVG retest — either zone qualifies. FVG must be ≥0.25×ATR. OB needs rejection candle.');
+  return signal('ob_fvg_retest', input, checklist, tradePlan, 'S5: OB or FVG retest — either zone qualifies. FVG must be ≥0.25×ATR. OB needs rejection candle. Hard gates: direction, hasStructure, trendAligned, entryConfirmation.');
 }
 
 export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
