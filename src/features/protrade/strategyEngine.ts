@@ -533,8 +533,8 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
   const aheadOb = findOrderBlockZone(five, dir === 'BULL' ? 'BEAR' : 'BULL', 1.1, 60);
   const zoneBlocked = aheadOb
     ? (dir === 'BULL'
-        ? input.price < aheadOb.low && aheadOb.low <= input.price + input.atr20 * 2
-        : input.price > aheadOb.high && aheadOb.high >= input.price - input.atr20 * 2)
+        ? input.price < aheadOb.low && aheadOb.low <= input.price + input.atr20 * 1
+        : input.price > aheadOb.high && aheadOb.high >= input.price - input.atr20 * 1)
     : false;
   const volOk = input.rvol >= 0.8;
   const entry = input.price;
