@@ -84,7 +84,7 @@ function usePaperStats() {
     const sw = sc.filter(isWin).length;
     const sl = sc.filter(isLoss).length;
     return { id: sid, code: STRATEGY_CODES[sid], name: STRATEGY_LABELS[sid], trades: sc.length, wins: sw, losses: sl, pnl: sp };
-  }).filter((s) => s.trades > 0);
+  });
 
   const recentTrades = [...closed].sort((a, b) => (b.closedAt ?? '').localeCompare(a.closedAt ?? '')).slice(0, 10);
 
@@ -510,8 +510,7 @@ export function PerformanceScreen() {
 
       <div className="grid grid-cols-3 gap-6">
         <div className="col-span-2 space-y-5">
-          {stats.byStrategy.length > 0 && (
-            <div className="glass p-5 rounded-xl">
+          <div className="glass p-5 rounded-xl">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2 mb-4">
                 <BarChart size={14} className="text-indigo-400" />Strategy P&L (Paper)
               </h3>
@@ -545,7 +544,6 @@ export function PerformanceScreen() {
                 </tbody>
               </table>
             </div>
-          )}
 
           {stats.recentTrades.length > 0 && (
             <div className="glass p-5 rounded-xl">

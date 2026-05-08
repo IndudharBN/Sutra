@@ -2,7 +2,7 @@ import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
 import { fetchTrading212Snapshot } from '../features/brokers/trading212LiveApi';
 import { placePaperBracketOrder, closeAllPaperPositions, closePaperPosition, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
-import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, getDailyStartBalance, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
+import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
 import { alpacaBarStream } from '../lib/alpacaBarStream';
 import { clearBarCache } from '../lib/alpacaClient';
 import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
@@ -2125,9 +2125,7 @@ export function ProTradeScannerScreen() {
           const px = priceMap.get(baseSymbol(t.symbol)) ?? t.entry;
           return sum + paperPnl(t, px).pnl;
         }, 0);
-        // Use Alpaca equity as ground truth for closed P&L — more accurate than stale localStorage pnl fields
-        const startBalance = getDailyStartBalance();
-        const closedPnl = startBalance > 0 ? (accountBalance - startBalance) - openPnl : 0;
+        const closedPnl = todayClosed.reduce((sum, t) => sum + (t.pnl ?? 0), 0);
         const hudPnl = closedPnl + openPnl;
         const totalClosed = todayWins + todayLosses;
         const wr = totalClosed > 0 ? Math.round((todayWins / totalClosed) * 100) : 0;
