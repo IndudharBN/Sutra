@@ -72,7 +72,13 @@ export function initDailyBalance(accountBalance: number): void {
   const state = load();
   const today = toETDate();
   if (state.dailyDate !== today) {
-    save({ ...state, dailyDate: today, dailyStartBalance: accountBalance, dailyRealizedPnl: 0 });
+    // New day: reset P&L and consecutive-loss counts.
+    // Preserve pauseUntil so a late-session CB triggered yesterday still blocks early today.
+    const resetCb: Record<string, CbState> = {};
+    for (const [key, cb] of Object.entries(state.strategyCb)) {
+      resetCb[key] = { count: 0, pauseUntil: cb.pauseUntil };
+    }
+    save({ ...state, dailyDate: today, dailyStartBalance: accountBalance, dailyRealizedPnl: 0, strategyCb: resetCb });
   } else if (state.dailyStartBalance <= 0) {
     save({ ...state, dailyStartBalance: accountBalance });
   }
