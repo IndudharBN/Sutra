@@ -587,8 +587,8 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
       pass('Directional bias', direction),
       volSpike ? pass('Volume surge ≥2×', `${round(bar.volume / avgVol, 1)}× avg ✓`) : fail('Volume surge ≥2×', `${round(bar.volume / avgVol, 1)}× — need ≥2×`),
       isBreakout ? pass('15m range break', `${direction === 'BULL' ? 'Above' : 'Below'} 15m range`) : fail('15m range break', 'No breakout'),
-      !adrExhausted(input.candles.five, input.atr20) ? pass('ADR room', '< 80% ATR used') : fail('ADR room', '>80% ATR used'),
-      pass('VWAP context', `${input.vwapAligned ? (direction === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'Near VWAP — surge is primary signal'} — informational`),
+      input.vwapAligned ? pass('VWAP aligned', `${direction === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓'}`) : fail('VWAP aligned', `${direction === 'BULL' ? 'Below VWAP' : 'Above VWAP'} — surge against session anchor`),
+      pass('ADR room', `${!adrExhausted(input.candles.five, input.atr20) ? '< 80% ATR used ✓' : '>80% ATR used — watch sizing'} — informational`),
     ];
     const sig = signal('s7_volume_surge', input, checklist, tradePlan, 'S7: Institutional 2× volume surge on 15m range break.');
     // Pre-blackout gap fire: allow S7 to fire at 9:30–9:45 AM on strong gap days (>3% gap + live data)
