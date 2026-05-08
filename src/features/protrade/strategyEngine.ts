@@ -605,6 +605,127 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
   return null;
 }
 
+// ─── S8: EMA20 Bounce ────────────────────────────────────────────────────────
+// Trend-continuation entry when price pulls back to the 5m EMA20, holds, and a
+// recovery candle closes back above it. EMA must be sloping in trend direction
+// so we avoid mean-reversion traps on flat/declining EMAs.
+// Hard gates: direction, emaRising, touchedEma, reclaimed.
+export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
+  if (!directionOk(input)) {
+    return signal('ema20_bounce', input, [fail('Directional bias', 'No BULL/BEAR bias')], null, 'No directional bias.');
+  }
+  const dir = input.direction as 'BULL' | 'BEAR';
+  const five = input.candles.five;
+  const trigger = last(five);
+  if (five.length < 22 || !trigger) {
+    return signal('ema20_bounce', input, [fail('Data', 'Need 22+ 5m bars')], null, 'Insufficient candle data.');
+  }
+
+  const ema20Series = ema(closes(five), 20);
+  const ema20Now = last(ema20Series);
+  const ema20Prev3 = ema20Series[ema20Series.length - 4];
+  if (!Number.isFinite(ema20Now) || !Number.isFinite(ema20Prev3)) {
+    return signal('ema20_bounce', input, [fail('Data', 'EMA20 unavailable')], null, 'EMA20 computation failed.');
+  }
+
+  const emaRising = dir === 'BULL' ? ema20Now > ema20Prev3 : ema20Now < ema20Prev3;
+  const tolerance = input.atr20 * 0.3;
+  const recent3 = five.slice(-4, -1);
+  const touchedEma = dir === 'BULL'
+    ? recent3.some((c) => c.low <= ema20Now + tolerance)
+    : recent3.some((c) => c.high >= ema20Now - tolerance);
+  const reclaimed = dir === 'BULL' ? trigger.close > ema20Now : trigger.close < ema20Now;
+
+  const entry = input.price;
+  const swingStop = dir === 'BULL'
+    ? Math.min(...five.slice(-4).map((c) => c.low)) - input.atr20 * STOP_BUFFER_ATR
+    : Math.max(...five.slice(-4).map((c) => c.high)) + input.atr20 * STOP_BUFFER_ATR;
+  const stop = noiseFlooredStop(dir, entry, swingStop, input.atr20);
+  const risk = Math.abs(entry - stop);
+  const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
+  const t2 = structuralT2(input, entry, risk, t1);
+  const tradePlan = emaRising && touchedEma && reclaimed
+    ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger)
+    : null;
+
+  const checklist = [
+    directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
+    emaRising
+      ? pass('EMA slope', `EMA20 ${dir === 'BULL' ? 'rising' : 'falling'} ✓`)
+      : fail('EMA slope', `EMA20 ${dir === 'BULL' ? 'flat/falling — mean-reversion risk' : 'flat/rising — mean-reversion risk'}`),
+    touchedEma
+      ? pass('EMA touch', `Recent bar tested EMA20 (${round(ema20Now, 2)})`)
+      : fail('EMA touch', `No touch of EMA20 (${round(ema20Now, 2)}) in last 3 bars`),
+    reclaimed
+      ? pass('Recovery candle', `Close ${dir === 'BULL' ? 'above' : 'below'} EMA20 ✓`)
+      : fail('Recovery candle', 'Waiting for bar to close back through EMA20'),
+    htfTrendCheck(input),
+    pass('VWAP context', `${input.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP misaligned — watch'} — informational`),
+    pass('RVOL', `${round(input.rvol, 2)}× ${input.rvol >= 0.8 ? '✓' : '— low vol bounce'} — informational`),
+    ema1mCheck(input),
+  ];
+
+  return signal('ema20_bounce', input, checklist, tradePlan,
+    'S8 EMA20 bounce: rising EMA20 touched + recovery close. Hard gates: direction, emaRising, touchedEma, reclaimed.');
+}
+
+// ─── S9: Flag Break ───────────────────────────────────────────────────────────
+// Tight consolidation (< 1×ATR range over 7 bars) followed by a 5m bar that
+// closes above the flag high (BULL) or below the flag low (BEAR) with RVOL ≥ 1.0.
+// Fires on any timeframe flag — opening drive, mid-session coil, post-spike base.
+// Hard gates: direction, flagFormed, breakout, rvolOk.
+export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
+  if (!directionOk(input)) {
+    return signal('flag_break', input, [fail('Directional bias', 'No BULL/BEAR bias')], null, 'No directional bias.');
+  }
+  const dir = input.direction as 'BULL' | 'BEAR';
+  const five = input.candles.five;
+  const trigger = last(five);
+  if (five.length < 12 || !trigger) {
+    return signal('flag_break', input, [fail('Data', 'Need 12+ 5m bars')], null, 'Insufficient candle data.');
+  }
+
+  const flagBars = five.slice(-8, -1); // 7 closed bars before trigger
+  const flagHigh = Math.max(...flagBars.map((c) => c.high));
+  const flagLow = Math.min(...flagBars.map((c) => c.low));
+  const flagRange = flagHigh - flagLow;
+
+  const flagFormed = flagRange < input.atr20 * 1.0;
+  const breakout = dir === 'BULL' ? trigger.close > flagHigh : trigger.close < flagLow;
+  const rvolOk = input.rvol >= 1.0;
+
+  const entry = input.price;
+  const rawStop = dir === 'BULL'
+    ? flagLow - input.atr20 * STOP_BUFFER_ATR
+    : flagHigh + input.atr20 * STOP_BUFFER_ATR;
+  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20);
+  const risk = Math.abs(entry - stop);
+  const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
+  const t2 = structuralT2(input, entry, risk, t1);
+  const tradePlan = flagFormed && breakout && rvolOk
+    ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger)
+    : null;
+
+  const checklist = [
+    directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
+    flagFormed
+      ? pass('Flag formed', `Range ${round(flagRange, 2)} < 1×ATR (${round(input.atr20, 2)}) ✓`)
+      : fail('Flag formed', `Range ${round(flagRange, 2)} too wide — needs < ${round(input.atr20, 2)} (1×ATR)`),
+    breakout
+      ? pass('Flag break', `Close ${dir === 'BULL' ? 'above flag high' : 'below flag low'} (${round(dir === 'BULL' ? flagHigh : flagLow, 2)}) ✓`)
+      : fail('Flag break', `Waiting for close ${dir === 'BULL' ? 'above' : 'below'} ${round(dir === 'BULL' ? flagHigh : flagLow, 2)}`),
+    rvolOk
+      ? pass('Volume expansion', `${round(input.rvol, 2)}× RVOL ✓`)
+      : fail('Volume expansion', `${round(input.rvol, 2)}× RVOL — needs ≥1.0× on breakout`),
+    htfTrendCheck(input),
+    pass('VWAP context', `${input.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP misaligned — watch'} — informational`),
+    ema1mCheck(input),
+  ];
+
+  return signal('flag_break', input, checklist, tradePlan,
+    'S9 Flag Break: 7-bar compression < 1×ATR + close through flag + RVOL≥1.0. Hard gates: direction, flagFormed, breakout, rvolOk.');
+}
+
 const SYMBOL_STRATEGY_EXCLUSIONS: Partial<Record<string, StrategyId[]>> = {
   TSLA: ['vwap_pullback', 'rs_continuation'],
 };
@@ -619,6 +740,8 @@ export function evaluateStrategies(input: StrategyInput): StrategySignal[] {
     evaluateObFvgRetest(input),
     evaluateMssBreakout(input),
     checkS7VolumeSurge(input),
+    evaluateEma20Bounce(input),
+    evaluateFlagBreak(input),
   ].filter((s): s is StrategySignal => s !== null);
 
   return signals
