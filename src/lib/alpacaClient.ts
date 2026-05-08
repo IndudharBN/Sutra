@@ -218,6 +218,149 @@ export function selectTopSymbols(metas: SymbolMeta[], n = 60): string[] {
     .map((m) => m.symbol);
 }
 
+// ── Dynamic universe builder (replaces static hardcoded list) ────────────────
+// Fetches today's active movers from Alpaca screener, enriches with 60-day
+// daily bars, applies 4 hard gates (beta 1.2–2.8, ADR% ≥2.5%, dollar vol ≥$3M,
+// price $1–$1500), ranks by activity score, caches top 75 for 6 hours.
+// Falls back to the static list passed by the caller if screener is unavailable.
+
+const UNIVERSE_CACHE_KEY = 'dynamic_universe_v2';
+const UNIVERSE_TTL_MS = 6 * 60 * 60 * 1000;   // 6 hours
+const UNIVERSE_TARGET = 75;
+const BETA_MIN = 1.2;
+const BETA_MAX = 2.8;
+const ADR_PCT_MIN = 2.5;   // matches Stock-analyzer threshold
+const DVOL_MIN_M = 3.0;    // $3M avg daily dollar volume
+
+// ETFs and leveraged products that appear in screener results but are never valid setups
+const ETF_BLACKLIST = new Set([
+  'SPY','QQQ','IWM','DIA','GLD','SLV','TLT','VXX','SQQQ','TQQQ',
+  'SPXU','SPXL','UVXY','SVXY','XLF','XLE','XLK','EEM','EFA','HYG',
+  'LQD','IAU','ARKK','ARKG','ARKW','ARKF','ARKQ','SOXS','SOXL',
+  'LABU','LABD','YINN','YANG','NUGT','DUST','JDST','JNUG','BOIL','KOLD',
+]);
+
+interface ScreenerStock { symbol: string; }
+interface MostActivesResp { most_actives: ScreenerStock[]; }
+interface MoversResp { gainers: ScreenerStock[]; losers: ScreenerStock[]; }
+
+async function fetchScreenerCandidates(): Promise<string[]> {
+  const [actives, movers] = await Promise.allSettled([
+    alpacaGet<MostActivesResp>('/v2/screener/stocks/most-actives', { by: 'dollar_volume', top: '50' }),
+    alpacaGet<MoversResp>('/v2/screener/stocks/movers', { top: '25' }),
+  ]);
+  const symbols = new Set<string>();
+  if (actives.status === 'fulfilled') actives.value.most_actives?.forEach(s => symbols.add(s.symbol));
+  if (movers.status === 'fulfilled') {
+    movers.value.gainers?.forEach(s => symbols.add(s.symbol));
+    movers.value.losers?.forEach(s => symbols.add(s.symbol));
+  }
+  // Keep only plain US equity tickers (1–5 uppercase letters, no ETFs)
+  return [...symbols].filter(s => !ETF_BLACKLIST.has(s) && /^[A-Z]{1,5}$/.test(s));
+}
+
+function computeBeta(stockBars: Candle[], spyBars: Candle[]): number {
+  const spyMap = new Map(spyBars.map(b => [b.time.slice(0, 10), b.close]));
+  const pairs: [number, number][] = [];
+  for (let i = 1; i < stockBars.length; i++) {
+    const date = stockBars[i].time.slice(0, 10);
+    const prevDate = stockBars[i - 1].time.slice(0, 10);
+    const spyNow = spyMap.get(date);
+    const spyPrev = spyMap.get(prevDate);
+    if (!spyNow || !spyPrev || spyPrev === 0 || stockBars[i - 1].close === 0) continue;
+    pairs.push([
+      (stockBars[i].close - stockBars[i - 1].close) / stockBars[i - 1].close,
+      (spyNow - spyPrev) / spyPrev,
+    ]);
+  }
+  if (pairs.length < 10) return 1.5; // neutral default
+  const n = pairs.length;
+  const meanS = pairs.reduce((s, p) => s + p[0], 0) / n;
+  const meanM = pairs.reduce((s, p) => s + p[1], 0) / n;
+  let cov = 0, varM = 0;
+  for (const [s, m] of pairs) { cov += (s - meanS) * (m - meanM); varM += (m - meanM) ** 2; }
+  return varM > 0 ? cov / varM : 1.5;
+}
+
+function computeAdrPct(bars: Candle[]): number {
+  const recent = bars.slice(-20);
+  if (!recent.length) return 0;
+  return recent.reduce((s, b) => s + (b.close > 0 ? (b.high - b.low) / b.close * 100 : 0), 0) / recent.length;
+}
+
+function computeAvgDvolM(bars: Candle[]): number {
+  const recent = bars.slice(-20);
+  if (!recent.length) return 0;
+  return recent.reduce((s, b) => s + (b.close * b.volume) / 1_000_000, 0) / recent.length;
+}
+
+export async function buildDynamicUniverse(
+  pinnedSymbols: string[] = [],
+  staticFallback: string[] = [],
+): Promise<string[]> {
+  const cached = cacheGet<string[]>(UNIVERSE_CACHE_KEY);
+  if (cached) return [...new Set([...cached, ...pinnedSymbols])];
+
+  try {
+    const screenerSyms = await fetchScreenerCandidates();
+    if (screenerSyms.length < 10) throw new Error('screener returned too few results');
+
+    // Fetch 60-day daily bars for all candidates + SPY (one batch call)
+    const dailyMap = await fetchBars([...new Set([...screenerSyms, 'SPY'])], '1d');
+    const spyBars = dailyMap['SPY'] ?? [];
+
+    // Hard gates: ADR% ≥2.5%, dollar vol ≥$3M, beta 1.2–2.8, price $1–$1500
+    const qualified = screenerSyms.filter(sym => {
+      const bars = dailyMap[sym];
+      if (!bars || bars.length < 20) return false;
+      const price = bars[bars.length - 1].close;
+      if (price < 1 || price > 1500) return false;
+      if (computeAdrPct(bars) < ADR_PCT_MIN) return false;
+      if (computeAvgDvolM(bars) < DVOL_MIN_M) return false;
+      if (spyBars.length >= 20) {
+        const beta = computeBeta(bars, spyBars);
+        if (beta < BETA_MIN || beta > BETA_MAX) return false;
+      }
+      return true;
+    });
+
+    if (qualified.length < 15) throw new Error(`only ${qualified.length} symbols passed gates — screener may be limited`);
+
+    // Rank by live activity score (gap% + RVOL estimate) and take top 75
+    const snaps = await fetchSnapshots(qualified);
+    const factor = sessionProgressFactor();
+    const ranked = qualified
+      .flatMap(sym => {
+        const snap = snaps[sym];
+        if (!snap) return [];
+        const price = snap.latestTrade?.p || snap.dailyBar?.c || 0;
+        const prevClose = snap.prevDailyBar?.c || 0;
+        const gapAbs = prevClose > 0 ? Math.abs((price - prevClose) / prevClose * 100) : 0;
+        const todayVol = snap.dailyBar?.v || 0;
+        const prevVol = snap.prevDailyBar?.v || 0;
+        const rvolEst = prevVol > 0 && factor > 0 ? todayVol / (prevVol * factor) : 0;
+        return [{ sym, score: gapAbs * 3 + rvolEst * 20 }];
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, UNIVERSE_TARGET)
+      .map(x => x.sym);
+
+    cacheSet(UNIVERSE_CACHE_KEY, ranked, UNIVERSE_TTL_MS);
+    return [...new Set([...ranked, ...pinnedSymbols])];
+  } catch (err) {
+    console.warn('[Universe] Dynamic build failed, using static fallback:', err);
+    // Short-cache fallback so it retries sooner than 6h
+    const fallback = staticFallback.slice(0, UNIVERSE_TARGET);
+    cacheSet(UNIVERSE_CACHE_KEY, fallback, 30 * 60 * 1000);
+    return [...new Set([...fallback, ...pinnedSymbols])];
+  }
+}
+
+// Call this to force a fresh universe rebuild on the next scan cycle
+export function clearUniverseCache(): void {
+  _cache.delete(UNIVERSE_CACHE_KEY);
+}
+
 // ── News: catalyst quality tier per symbol ────────────────────────────────────
 
 export type CatalystTier = 'hard' | 'soft' | 'none';

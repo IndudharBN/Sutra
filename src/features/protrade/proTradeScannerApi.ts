@@ -1,4 +1,4 @@
-import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNewsFlags, fetchSectorTrends, fetchSpyDailyBars, SYMBOL_SECTOR, type CatalystTier } from '../../lib/alpacaClient';
+import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNewsFlags, fetchSectorTrends, fetchSpyDailyBars, buildDynamicUniverse, clearUniverseCache, SYMBOL_SECTOR, type CatalystTier } from '../../lib/alpacaClient';
 import { classifyMarketRegime } from '../marketRegime/marketRegimeLogic';
 import type { MarketRegime } from '../marketRegime/marketRegimeTypes';
 import type { SymbolMeta } from '../../lib/alpacaClient';
@@ -270,7 +270,7 @@ function buildRowFromAlpaca(
 
   const failures: string[] = [];
   if (price < 1 || price > 1500) failures.push('Price outside $1–$1500');
-  if (atrPct < 1.5 || atrPct > 12) failures.push(`ATR% ${atrPct.toFixed(1)}% outside 1.5–12% range`);
+  if (atrPct < 2.5 || atrPct > 12) failures.push(`ATR% ${atrPct.toFixed(1)}% outside 2.5–12% range`);
   if (dollarVolM < 3) failures.push('Dollar volume below $3M');
   const basePass = failures.length === 0;
   const baseReason = failures.length ? failures.join(' | ') : 'Price OK, ATR% OK, dollar vol OK';
@@ -355,6 +355,8 @@ function buildRowFromAlpaca(
 
 // ── Hot-set refresh (20s) — re-evaluates only forming/confirmed/locked stocks ──
 
+export { clearUniverseCache };
+
 export async function fetchHotSetSnapshot(symbols: string[], spyChangePct: number): Promise<ProTradeRow[]> {
   if (!symbols.length) return [];
   const metas = await fetchUniverseMeta(symbols);
@@ -381,10 +383,11 @@ export async function fetchHotSetSnapshot(symbols: string[], spyChangePct: numbe
 // ── Main fetch ────────────────────────────────────────────────────────────────
 
 export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = []): Promise<ProTradeSnapshot> {
-  const candidates = DEFAULT_LIVE_UNIVERSE.filter((s) => !s.endsWith('.L'));
-
-  const metas = await fetchUniverseMeta(candidates);
-  const scored = selectTopSymbols(metas, 100);
+  // Dynamic universe: Alpaca screener → beta/ADR% gates → top 75, cached 6h.
+  // Falls back to static DEFAULT_LIVE_UNIVERSE if screener is unavailable.
+  const universe = await buildDynamicUniverse(pinnedSymbols, DEFAULT_LIVE_UNIVERSE);
+  const metas = await fetchUniverseMeta(universe);
+  const scored = selectTopSymbols(metas, 75);
   // Guarantee pinned watchlist symbols are always scanned regardless of score rank
   const top = [...new Set([...scored, ...pinnedSymbols])];
 
@@ -441,8 +444,8 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
     filteredRows: [],
     qualifiedCount: rows.filter((r) => r.qualified).length,
     scannedCount: rows.length,
-    rawCount: candidates.length,
-    filteredOut: candidates.length - top.length,
+    rawCount: universe.length,
+    filteredOut: universe.length - top.length,
     fetchedAt,
     providerStatus: `Alpaca IEX • ${top.length} symbols`,
     spyTrend5m,
