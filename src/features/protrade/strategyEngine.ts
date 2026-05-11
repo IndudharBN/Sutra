@@ -396,51 +396,89 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
 }
 
 export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
-  const range = todayOpeningRange(input.candles.five);
-  const recent = input.candles.five.slice(-20);
+  const five = input.candles.five;
+  const dir = input.direction as 'BULL' | 'BEAR';
+  const range = todayOpeningRange(five);
+  const recent = five.slice(-20);
   const trigger = last(recent);
-  const sweptLevel = range ? (input.direction === 'BULL' ? range.low : range.high) : null;
-  const sweepCandle = range ? recent.find((c) => input.direction === 'BULL' ? c.low < range.low : c.high > range.high) ?? null : null;
+
+  // ── Sweep source: ORB (primary) or intraday pivot swing (fallback) ────────
+  let sweptLevel: number | null = null;
+  let sweepCandle: Candle | null = null;
+  let sweepSource: 'ORB' | 'Swing' | null = null;
+
+  if (range) {
+    const orbLevel = dir === 'BULL' ? range.low : range.high;
+    const orbSweep = recent.find((c) => dir === 'BULL' ? c.low < orbLevel : c.high > orbLevel) ?? null;
+    if (orbSweep) { sweptLevel = orbLevel; sweepCandle = orbSweep; sweepSource = 'ORB'; }
+  }
+
+  if (!sweepCandle) {
+    // Most recent 3-bar pivot in anchor window (bars -25 to -4, ~20–125 min ago)
+    const anchorBars = five.slice(-25, -4);
+    let pivotLevel: number | null = null;
+    for (let i = anchorBars.length - 2; i >= 1; i--) {
+      if (dir === 'BULL'
+        ? anchorBars[i].low < anchorBars[i - 1].low && anchorBars[i].low < anchorBars[i + 1].low
+        : anchorBars[i].high > anchorBars[i - 1].high && anchorBars[i].high > anchorBars[i + 1].high) {
+        pivotLevel = dir === 'BULL' ? anchorBars[i].low : anchorBars[i].high;
+        break;
+      }
+    }
+    if (pivotLevel !== null) {
+      const swingLast8 = five.slice(-8);
+      const swingSweep = swingLast8.find((c) => dir === 'BULL' ? c.low < pivotLevel! : c.high > pivotLevel!) ?? null;
+      if (swingSweep) { sweptLevel = pivotLevel; sweepCandle = swingSweep; sweepSource = 'Swing'; }
+    }
+  }
+
   const swept = Boolean(sweepCandle);
   const reclaimed = Boolean(sweptLevel !== null && trigger && (
-    input.direction === 'BULL' ? trigger.close > sweptLevel : trigger.close < sweptLevel
+    dir === 'BULL' ? trigger.close > sweptLevel : trigger.close < sweptLevel
   ));
   const entry = sweptLevel ?? input.price;
   const nearLevel = sweptLevel !== null
-    ? (input.direction === 'BULL'
+    ? (dir === 'BULL'
         ? input.price <= sweptLevel + input.atr20 * 3.0
         : input.price >= sweptLevel - input.atr20 * 3.0)
     : false;
-  const sweepRef = input.direction === 'BULL' ? (sweepCandle ? sweepCandle.low : entry) : (sweepCandle ? sweepCandle.high : entry);
-  const rawStop = input.direction === 'BULL' ? sweepRef - input.atr20 * STOP_BUFFER_ATR : sweepRef + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20);
+  const sweepRef = dir === 'BULL' ? (sweepCandle ? sweepCandle.low : entry) : (sweepCandle ? sweepCandle.high : entry);
+  const rawStop = dir === 'BULL' ? sweepRef - input.atr20 * STOP_BUFFER_ATR : sweepRef + input.atr20 * STOP_BUFFER_ATR;
+  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20);
   const risk = Math.abs(entry - stop);
-  const orOpposite = range ? (input.direction === 'BULL' ? range.high : range.low) : null;
-  const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
-  const t2Raw = orOpposite ?? (input.direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR);
-  const preferredTarget = input.direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
-  const t2 = input.direction === 'BULL' ? Math.max(t2Raw, preferredTarget) : Math.min(t2Raw, preferredTarget);
+  const orOpposite = range ? (dir === 'BULL' ? range.high : range.low) : null;
+  const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
+  const t2Raw = orOpposite ?? (dir === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR);
+  const preferredTarget = dir === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
+  const t2 = dir === 'BULL' ? Math.max(t2Raw, preferredTarget) : Math.min(t2Raw, preferredTarget);
   const sweepWickOk = sweepCandle ? (() => {
     const cRange = sweepCandle.high - sweepCandle.low;
     if (cRange < 1e-8) return false;
-    return input.direction === 'BULL'
+    return dir === 'BULL'
       ? (sweepCandle.close - sweepCandle.low) / cRange >= 0.1
       : (sweepCandle.high - sweepCandle.close) / cRange >= 0.1;
   })() : false;
-  const tradePlan = directionOk(input) && range && swept && reclaimed && nearLevel
+  const tradePlan = directionOk(input) && swept && reclaimed && nearLevel
     ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger)
     : null;
+  const sweepDetail = sweptLevel !== null
+    ? (sweepSource === 'ORB'
+        ? `ORB ${dir === 'BULL' ? 'low' : 'high'} ${round(sweptLevel, 2)}`
+        : `Intraday pivot ${dir === 'BULL' ? 'low' : 'high'} ${round(sweptLevel, 2)}`)
+    : 'No sweep level found';
   const checklist = [
-    directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
-    range ? pass('Opening range formed', `${round(range.low, 2)}–${round(range.high, 2)}`) : fail('Opening range formed', 'Need first 15 min of 5m candles'),
-    swept ? pass('Liquidity swept', `Sweep candle: ${sweepCandle ? round(input.direction === 'BULL' ? sweepCandle.low : sweepCandle.high, 2) : '--'}`) : fail('Liquidity swept', 'No sweep below/above opening range yet'),
-    sweepWickOk ? pass('Sweep rejection wick', 'Candle closed back in range') : fail('Sweep rejection wick', 'No rejection, likely continuation'),
-    reclaimed ? pass('Level reclaimed', `Close back ${input.direction === 'BULL' ? 'above' : 'below'} ${sweptLevel ? round(sweptLevel, 2) : '--'}`) : fail('Level reclaimed', 'Waiting for close back through swept level'),
+    directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
+    range
+      ? pass('Opening range', `${round(range.low, 2)}–${round(range.high, 2)}${sweepSource === 'Swing' ? ' (not swept — using intraday pivot)' : ''}`)
+      : pass('Opening range', 'Not formed — using intraday pivot fallback'),
+    swept ? pass('Liquidity swept', sweepDetail) : fail('Liquidity swept', 'No sweep below/above ORB or intraday pivot'),
+    sweepWickOk ? pass('Sweep rejection wick', 'Candle closed back inside level') : fail('Sweep rejection wick', 'No rejection — likely continuation'),
+    reclaimed ? pass('Level reclaimed', `Close back ${dir === 'BULL' ? 'above' : 'below'} ${sweptLevel ? round(sweptLevel, 2) : '--'}`) : fail('Level reclaimed', 'Waiting for close back through swept level'),
     nearLevel ? pass('Entry proximity', 'Price within 3×ATR of level') : fail('Entry proximity', 'Price too far — do not chase'),
-    pass('Volume confirmation', `${round(input.rvol, 2)}x${input.rvol >= 0.8 ? ' — confirmed' : ' — low, sweep structure is the primary signal'}`),
+    pass('Volume confirmation', `${round(input.rvol, 2)}x${input.rvol >= 0.8 ? ' — confirmed' : ' — low, sweep structure is primary signal'}`),
     ema1mCheck(input),
   ];
-  return signal('liquidity_sweep', input, checklist, tradePlan, `S4 Sweep: T1=${orOpposite ? 'OR opposite' : '2R'} T2=${orOpposite ? round(orOpposite,2) : '2.5R'}`);
+  return signal('liquidity_sweep', input, checklist, tradePlan, `S4 Sweep (${sweepSource ?? 'no level'}): T1=${orOpposite ? 'OR opposite' : '2R'} T2=${orOpposite ? round(orOpposite, 2) : '2.5R'}`);
 }
 
 export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
@@ -536,8 +574,8 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
   const aheadOb = findOrderBlockZone(five, dir === 'BULL' ? 'BEAR' : 'BULL', 1.1, 60);
   const zoneBlocked = aheadOb
     ? (dir === 'BULL'
-        ? input.price < aheadOb.low && aheadOb.low <= input.price + input.atr20 * 1
-        : input.price > aheadOb.high && aheadOb.high >= input.price - input.atr20 * 1)
+        ? input.price < aheadOb.low && aheadOb.low <= input.price + input.atr20 * 0.5
+        : input.price > aheadOb.high && aheadOb.high >= input.price - input.atr20 * 0.5)
     : false;
   const volOk = input.rvol >= 0.8;
   const entry = input.price;
@@ -548,18 +586,18 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
-  const tradePlan = mssOk && !zoneBlocked ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = mssOk && bar2Ok && !zoneBlocked && volOk ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
     mssOk ? pass('MSS detected', 'Structural high/low broken') : fail('MSS detected', 'Waiting for break'),
-    pass('Bar-2 hold', `${bar2Ok ? 'MSS level maintained ✓' : 'Price extended from break — watch'} — informational`),
-    !zoneBlocked ? pass('Zone clearance', 'Clear path ahead') : fail('Zone clearance', 'Overhead OB blocking'),
+    bar2Ok ? pass('Bar-2 hold', 'MSS level maintained ✓') : fail('Bar-2 hold', 'Price extended too far from break — do not chase'),
+    !zoneBlocked ? pass('Zone clearance', 'Clear path ahead') : fail('Zone clearance', 'Opposing OB within 0.5×ATR — too close'),
     pass('VWAP context', `${input.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP side mismatch — watch'} — informational`),
-    pass('RVOL', `${round(input.rvol, 2)}×${input.rvol >= 1.0 ? ' ✓' : ' — low vol structural break'} — informational`),
+    volOk ? pass('RVOL', `${round(input.rvol, 2)}× ✓`) : fail('RVOL', `${round(input.rvol, 2)}× — below 0.8 minimum for structural break`),
     ema1mCheck(input),
   ];
-  return signal('mss_breakout', input, checklist, tradePlan, 'S6 MSS: structural break + clear path. Hard gates: direction, mssOk, zoneBlocked. bar2Ok + RVOL informational.');
+  return signal('mss_breakout', input, checklist, tradePlan, 'S6 MSS: structural break + clear path. Hard gates: direction, mssOk, bar2Ok, zoneBlocked (0.5×ATR), RVOL≥0.8.');
 }
 
 function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
