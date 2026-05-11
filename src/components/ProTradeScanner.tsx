@@ -1561,6 +1561,7 @@ export function ProTradeScannerScreen() {
   const [etClock, setEtClock] = React.useState<string>(() =>
     new Date().toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true })
   );
+  const [lastUniverseScanTime, setLastUniverseScanTime] = React.useState<string>('');
   const [watchlistOnly, setWatchlistOnly] = React.useState(false);
   const [viewMode, setViewMode] = React.useState<'premarket' | 'workflow'>(() => isPremarketWindow() ? 'premarket' : 'workflow');
   const [cbTick, setCbTick] = React.useState(0);
@@ -1744,6 +1745,8 @@ export function ProTradeScannerScreen() {
       if (mins < 8 * 60 + 30) return;
       firedDate = today;
       clearUniverseCache();
+      const t = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: true });
+      setLastUniverseScanTime(t);
       void load();
     }, 60_000);
     return () => clearInterval(id);
@@ -2329,6 +2332,9 @@ export function ProTradeScannerScreen() {
             </span>
             <span className="px-3 py-1 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10">
               Provider: Alpaca IEX
+            </span>
+            <span className="px-3 py-1 rounded-full border border-violet-500/20 text-violet-300 bg-violet-500/10">
+              Universe: {lastUniverseScanTime ? `refreshed ${lastUniverseScanTime} ET` : 'pending 8:30 AM ET'}
             </span>
             {watchlist.symbols.length > 0 && (
               <span className="px-3 py-1 rounded-full border border-amber-500/30 text-amber-300 bg-amber-500/10">
