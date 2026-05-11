@@ -27,12 +27,22 @@ function pnlColor(v: number) { return v >= 0 ? 'text-emerald-400' : 'text-rose-4
 
 // ── Alpaca Paper Positions ────────────────────────────────────────────────────
 
+function isMarketHours() {
+  const now = new Date();
+  const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const day = et.getDay();
+  if (day === 0 || day === 6) return false;
+  const mins = et.getHours() * 60 + et.getMinutes();
+  return mins >= 9 * 60 + 30 && mins < 16 * 60;
+}
+
 function AlpacaPositionsScreen() {
   const [account, setAccount] = React.useState<AlpacaAccount | null>(null);
   const [positions, setPositions] = React.useState<AlpacaPosition[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState('');
   const [refreshing, setRefreshing] = React.useState(false);
+  const [lastUpdated, setLastUpdated] = React.useState<Date | null>(null);
 
   async function load(manual = false) {
     try {
@@ -41,6 +51,7 @@ function AlpacaPositionsScreen() {
       const [acct, pos] = await Promise.all([getPaperAccount(), getPaperPositions()]);
       setAccount(acct);
       setPositions(pos);
+      setLastUpdated(new Date());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -49,7 +60,11 @@ function AlpacaPositionsScreen() {
     }
   }
 
-  React.useEffect(() => { void load(); }, []);
+  React.useEffect(() => {
+    void load();
+    const id = setInterval(() => { if (isMarketHours()) void load(); }, 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   const totalUpl = positions.reduce((s, p) => s + parseFloat(p.unrealized_pl || '0'), 0);
 
@@ -73,9 +88,16 @@ function AlpacaPositionsScreen() {
 
       <div className="glass rounded-xl overflow-hidden flex flex-col flex-1">
         <div className="p-3 border-b border-white/5 flex justify-between items-center bg-white/5">
-          <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-            Alpaca Paper Positions ({positions.length})
-          </h2>
+          <div className="flex items-center gap-3">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">
+              Alpaca Paper Positions ({positions.length})
+            </h2>
+            {lastUpdated && (
+              <span className="text-[10px] text-slate-500 font-mono">
+                updated {lastUpdated.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+              </span>
+            )}
+          </div>
           <button
             onClick={() => void load(true)}
             disabled={refreshing}
