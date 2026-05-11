@@ -1921,10 +1921,14 @@ export function ProTradeScannerScreen() {
       pending.set(sym, { row, level, direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL', addedAt: now });
     });
 
-    // Phase 1b — prune: window expired or setup degraded
+    // Phase 1b — prune: window expired, symbol gone, or setup fundamentally failed.
+    // Keep 'locked' (transient: stale data / blackout) and 'confirmed' (minor R:R dip) — they recover.
+    // Only drop 'raw_candidates' or 'forming' — those mean the setup checklist regressed.
     for (const [sym, entry] of pending) {
       const currentRow = snapshot.rows.find((r) => baseSymbol(r.symbol) === sym);
-      if (now - entry.addedAt > CONFIRM_WINDOW_MS || currentRow?.workflowStage !== 'trade_ready') {
+      const stage = currentRow?.workflowStage;
+      const setupRegressed = !currentRow || stage === 'raw_candidates' || stage === 'forming';
+      if (now - entry.addedAt > CONFIRM_WINDOW_MS || setupRegressed) {
         pending.delete(sym);
       }
     }
@@ -1959,16 +1963,25 @@ export function ProTradeScannerScreen() {
           ? priorBars.reduce((s, b) => s + b.volume, 0) / priorBars.length
           : 0;
 
+        // 0.5% tolerance: current price at detection is typically 0.3–0.7% above the
+        // structural level (ORB high, OB zone, micro-range). The last CLOSED 1m bar sits
+        // at that structural level, not at the extended current price. 0.2% wasn't enough.
         const priceConfirmed = entry.direction === 'BULL'
-          ? closedBar.close > entry.level          // 1m bar closed above structural level
-          : closedBar.close < entry.level;          // 1m bar closed below structural level
-        const volConfirmed = avgVol <= 0 || closedBar.volume >= avgVol * 1.1; // above-average volume
+          ? closedBar.close >= entry.level * 0.995
+          : closedBar.close <= entry.level * 1.005;
+
+        // Retest strategies (S1, S5) expect quiet absorption on the retest bar — low volume
+        // is correct. Only breakout strategies (S3, S6) need an elevated-volume confirmation.
+        const retestStrats = new Set(['orb_retest', 'ob_fvg_retest', 'vwap_pullback', 'ema20_bounce']);
+        const needsVolSpike = !retestStrats.has(entry.row.primaryStrategy?.strategyId ?? '');
+        const volConfirmed = !needsVolSpike || avgVol <= 0 || closedBar.volume >= avgVol * 1.1;
 
         if (!priceConfirmed || !volConfirmed) {
-          // If bar closed significantly BACK THROUGH the level → setup failed, remove
+          // Wait zone: 0.5–1.5% below detection price → keep pending, check next bar.
+          // Hard fail: >1.5% below detection price → genuine reversal, delete.
           const setupFailed = entry.direction === 'BULL'
-            ? closedBar.close < entry.level * 0.998
-            : closedBar.close > entry.level * 1.002;
+            ? closedBar.close < entry.level * 0.985
+            : closedBar.close > entry.level * 1.015;
           if (setupFailed) pending.delete(sym);
           continue;
         }
