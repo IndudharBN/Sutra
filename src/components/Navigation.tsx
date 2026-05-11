@@ -80,6 +80,7 @@ function useEtClock() {
     const id = setInterval(() => setTick(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
+  const dayStr = tick.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' });
   const timeStr = tick.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
   const h = parseInt(tick.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
   const m = parseInt(tick.toLocaleString('en-US', { timeZone: 'America/New_York', minute: '2-digit' }), 10);
@@ -91,13 +92,13 @@ function useEtClock() {
   else if (mins < 9 * 60 + 30) { session = 'PRE'; sessionColor = 'text-amber-400'; }
   else if (mins < 16 * 60) { session = 'RTH'; sessionColor = 'text-emerald-400'; }
   else { session = 'AFTER'; sessionColor = 'text-amber-400'; }
-  return { timeStr, session, sessionColor };
+  return { dayStr, timeStr, session, sessionColor };
 }
 
 export function TopBar({ brokerStatus, scannerStatus }: { brokerStatus: string; scannerStatus: string }) {
   const [isRunning, setIsRunning] = React.useState(true);
   const connected = brokerStatus.toLowerCase().includes('connected');
-  const { timeStr, session, sessionColor } = useEtClock();
+  const { dayStr, timeStr, session, sessionColor } = useEtClock();
 
   return (
     <header className="h-14 border-b border-white/5 glass flex items-center justify-between px-6 z-10 shrink-0">
@@ -117,6 +118,7 @@ export function TopBar({ brokerStatus, scannerStatus }: { brokerStatus: string; 
         {/* Live ET clock — always visible top right */}
         <div className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-white/10 bg-white/5">
           <span className={`text-[10px] font-black uppercase tracking-widest ${sessionColor}`}>{session}</span>
+          <span className="text-[10px] font-mono text-slate-400 tabular-nums">{dayStr} ·</span>
           <span className="text-[10px] font-mono font-bold text-white tabular-nums">{timeStr} ET</span>
         </div>
 

@@ -1558,9 +1558,6 @@ export function ProTradeScannerScreen() {
   const [settings, setSettings] = React.useState<ProTradeSettings>(() => loadProTradeSettings());
   const [accountBalance, setAccountBalance] = React.useState(100_000);
   const [watchlist, setWatchlist] = React.useState<DayWatchlist>(() => loadWatchlist());
-  const [etClock, setEtClock] = React.useState<string>(() =>
-    new Date().toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true })
-  );
   const [lastUniverseScanTime, setLastUniverseScanTime] = React.useState<string>('');
   const [watchlistOnly, setWatchlistOnly] = React.useState(false);
   const [viewMode, setViewMode] = React.useState<'premarket' | 'workflow'>(() => isPremarketWindow() ? 'premarket' : 'workflow');
@@ -1725,14 +1722,6 @@ export function ProTradeScannerScreen() {
     setWatchlistOnly(true);
     setViewMode('workflow');
   }
-
-  // ET clock — updates every 30s for the date+time display
-  React.useEffect(() => {
-    const id = setInterval(() => {
-      setEtClock(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }));
-    }, 30_000);
-    return () => clearInterval(id);
-  }, []);
 
   // 8:30 AM ET universe refresh — clears the 6h screener cache once per day at pre-market open
   // so the universe reflects current RVOL/gap data before the watchlist locks at 8:30 AM.
@@ -2234,10 +2223,6 @@ export function ProTradeScannerScreen() {
                 <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">Equity</p>
                 <p className="text-sm font-mono font-bold text-white leading-none">${accountBalance.toLocaleString()}</p>
               </div>
-              <div className="text-right">
-                <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">ET Time</p>
-                <p className="text-xs font-mono text-slate-300 leading-none">{etClock} ET</p>
-              </div>
               <div className="ml-auto text-right">
                 <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">Scan Health</p>
                 <p className="text-xs font-mono text-slate-300 leading-none">
@@ -2334,7 +2319,7 @@ export function ProTradeScannerScreen() {
               Provider: Alpaca IEX
             </span>
             <span className="px-3 py-1 rounded-full border border-violet-500/20 text-violet-300 bg-violet-500/10">
-              Universe: {lastUniverseScanTime ? `refreshed ${lastUniverseScanTime} ET` : 'pending 8:30 AM ET'}
+              Raw candidates: {lastUniverseScanTime ? `scanned ${lastUniverseScanTime} ET` : 'pending 8:30 AM ET'}
             </span>
             {watchlist.symbols.length > 0 && (
               <span className="px-3 py-1 rounded-full border border-amber-500/30 text-amber-300 bg-amber-500/10">
