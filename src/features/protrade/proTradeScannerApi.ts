@@ -50,6 +50,7 @@ export interface ProTradeRow {
   trend15mAligned: boolean;
   prevDayHigh: number;
   prevDayLow: number;
+  prevDayClose: number;
   premarketHigh: number;
   premarketLow: number;
   premarketVolume: number;
@@ -109,9 +110,9 @@ function computeAtr20(daily: Candle[]): number {
   return count > 0 ? total / count : 0;
 }
 
-function computePrevDay(daily: Candle[]): { high: number; low: number } {
+function computePrevDay(daily: Candle[]): { high: number; low: number; close: number } {
   const bar = daily.length >= 2 ? daily[daily.length - 2] : null;
-  return { high: bar?.high ?? 0, low: bar?.low ?? 0 };
+  return { high: bar?.high ?? 0, low: bar?.low ?? 0, close: bar?.close ?? 0 };
 }
 
 function etHour(isoTime: string): number {
@@ -339,6 +340,7 @@ function buildRowFromAlpaca(
     trend15mAligned,
     prevDayHigh: round(prevDay.high, 2),
     prevDayLow: round(prevDay.low, 2),
+    prevDayClose: round(prevDay.close, 2),
     premarketHigh: round(premarket.high, 2),
     premarketLow: round(premarket.low, 2),
     premarketVolume: premarket.volume,

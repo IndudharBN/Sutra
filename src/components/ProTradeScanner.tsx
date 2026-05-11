@@ -5,7 +5,7 @@ import { placePaperBracketOrder, closeAllPaperPositions, closePaperPosition, get
 import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
 import { alpacaBarStream } from '../lib/alpacaBarStream';
 import { clearBarCache } from '../lib/alpacaClient';
-import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
+import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot, clearUniverseCache, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
 import {
   STRATEGY_CODES,
   STRATEGY_LABELS,
@@ -1558,6 +1558,9 @@ export function ProTradeScannerScreen() {
   const [settings, setSettings] = React.useState<ProTradeSettings>(() => loadProTradeSettings());
   const [accountBalance, setAccountBalance] = React.useState(100_000);
   const [watchlist, setWatchlist] = React.useState<DayWatchlist>(() => loadWatchlist());
+  const [etClock, setEtClock] = React.useState<string>(() =>
+    new Date().toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true })
+  );
   const [watchlistOnly, setWatchlistOnly] = React.useState(false);
   const [viewMode, setViewMode] = React.useState<'premarket' | 'workflow'>(() => isPremarketWindow() ? 'premarket' : 'workflow');
   const [cbTick, setCbTick] = React.useState(0);
@@ -1722,14 +1725,38 @@ export function ProTradeScannerScreen() {
     setViewMode('workflow');
   }
 
-  // P5: Auto-lock Day Watchlist at 9:30 AM ET on first scan of the day
+  // ET clock — updates every 30s for the date+time display
+  React.useEffect(() => {
+    const id = setInterval(() => {
+      setEtClock(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }));
+    }, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // 8:30 AM ET universe refresh — clears the 6h screener cache once per day at pre-market open
+  // so the universe reflects current RVOL/gap data before the watchlist locks at 8:30 AM.
+  React.useEffect(() => {
+    let firedDate = '';
+    const id = setInterval(() => {
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      if (firedDate === today) return;
+      const mins = etMinutesNow();
+      if (mins < 8 * 60 + 30) return;
+      firedDate = today;
+      clearUniverseCache();
+      void load();
+    }, 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // P5: Auto-lock Day Watchlist at 8:30 AM ET on first scan of the day
   React.useEffect(() => {
     if (!rows.length) return;
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     if (watchlist.date === today) return;
     const etH = parseInt(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
     const etM = parseInt(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', minute: '2-digit' }), 10);
-    if (etH < 9 || (etH === 9 && etM < 30)) return;
+    if (etH < 8 || (etH === 8 && etM < 30)) return;
     const top10 = [...rows].sort((a, b) => b.confidence - a.confidence).slice(0, 10).map((r) => r.symbol);
     const nextDayQueue = loadNextDayQueue();
     const merged = [...new Set([...top10, ...nextDayQueue])];
@@ -2203,6 +2230,10 @@ export function ProTradeScannerScreen() {
               <div>
                 <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">Equity</p>
                 <p className="text-sm font-mono font-bold text-white leading-none">${accountBalance.toLocaleString()}</p>
+              </div>
+              <div className="text-right">
+                <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">ET Time</p>
+                <p className="text-xs font-mono text-slate-300 leading-none">{etClock} ET</p>
               </div>
               <div className="ml-auto text-right">
                 <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">Scan Health</p>
