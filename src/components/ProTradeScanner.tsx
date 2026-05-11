@@ -27,6 +27,7 @@ const PAPER_TRADES_STORAGE_KEY = 'sutra.protrade.paperTrades.v1';
 const PROTRADE_SETTINGS_STORAGE_KEY = 'sutra.protrade.settings.v1';
 const WATCHLIST_KEY = 'sutra.dayWatchlist.v1';
 const WATCHLIST_ARCHIVE_KEY = 'sutra.watchlistArchive.v1';
+const WATCHLIST_NEXT_KEY = 'sutra.nextDayWatchlist.v1';
 const PAPER_NOTIONAL = 100;
 
 interface DayWatchlist { date: string; symbols: string[]; }
@@ -40,6 +41,15 @@ function loadWatchlist(): DayWatchlist {
 
 function saveWatchlist(w: DayWatchlist) {
   localStorage.setItem(WATCHLIST_KEY, JSON.stringify(w));
+}
+
+function loadNextDayQueue(): string[] {
+  try { return JSON.parse(localStorage.getItem(WATCHLIST_NEXT_KEY) || '[]') as string[]; }
+  catch { return []; }
+}
+
+function saveNextDayQueue(symbols: string[]) {
+  localStorage.setItem(WATCHLIST_NEXT_KEY, JSON.stringify([...new Set(symbols)]));
 }
 
 interface WatchlistStockResult {
@@ -1659,6 +1669,7 @@ export function ProTradeScannerScreen() {
   }, []);
 
   const alertedTradeReadyRef = React.useRef<Set<string>>(new Set());
+  const firedInstantRef = React.useRef<Set<string>>(new Set());
 
   // Confirmation queue: symbols that hit trade_ready but haven't fired yet.
   // Keyed by base symbol; value holds context needed to fire after confirmation.
@@ -1682,7 +1693,7 @@ export function ProTradeScannerScreen() {
       : rows.filter((row) => row.workflowStage === activeStage);
   const strategyFilteredRows = activeStrategy === 'all'
     ? stageRows
-    : rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === activeStrategy && signal.stage !== 'pro_watchlist'));
+    : rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === activeStrategy && signal.stage !== 'raw_candidates'));
   const watchlistSet = React.useMemo(() => new Set(watchlist.symbols), [watchlist.symbols]);
   // When watchlist filter is active, show ALL stages for watchlist stocks (ignore stage filter)
   const filteredRows = watchlistOnly && watchlist.symbols.length > 0
@@ -1720,7 +1731,10 @@ export function ProTradeScannerScreen() {
     const etM = parseInt(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', minute: '2-digit' }), 10);
     if (etH < 9 || (etH === 9 && etM < 30)) return;
     const top10 = [...rows].sort((a, b) => b.confidence - a.confidence).slice(0, 10).map((r) => r.symbol);
-    const next: DayWatchlist = { date: today, symbols: top10 };
+    const nextDayQueue = loadNextDayQueue();
+    const merged = [...new Set([...top10, ...nextDayQueue])];
+    saveNextDayQueue([]);
+    const next: DayWatchlist = { date: today, symbols: merged };
     setWatchlist(next);
     saveWatchlist(next);
   }, [rows, watchlist.date]);
@@ -1875,7 +1889,7 @@ export function ProTradeScannerScreen() {
       const sym = baseSymbol(row.symbol);
       if (row.workflowStage !== 'trade_ready') return;
       if (!canPaperTradeRow(row, settings, paperTrades)) return;
-      if (orderedSymbols.has(sym) || tradedSymbols.has(sym) || pending.has(sym)) return;
+      if (orderedSymbols.has(sym) || tradedSymbols.has(sym) || pending.has(sym) || firedInstantRef.current.has(sym)) return;
       if (row.earningsDays !== null && Math.abs(row.earningsDays) <= 1) return;
       if (!checkStrategyCircuitBreaker(row.primaryStrategy?.strategyId || row.symbol).ok) return;
 
@@ -1886,6 +1900,7 @@ export function ProTradeScannerScreen() {
       // S1 (ORB Retest) uses 1m confirmation — mid-bar entry on snapshot tick carries too much risk
       const stratId = row.primaryStrategy?.strategyId;
       if (stratId === 's7_volume_surge') {
+        firedInstantRef.current.add(sym);
         const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0);
         if (trade) {
           setPaperTrades((current) => [trade, ...current]);
@@ -1894,6 +1909,11 @@ export function ProTradeScannerScreen() {
             direction: trade.direction === 'BEAR' ? 'BEAR' : 'BULL',
             entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional,
           }).catch(() => {});
+          // ADR exhausted (>80% ATR used) — queue for tomorrow's gap watch
+          const adrDetail = row.primaryStrategy?.checklist?.find((c) => c.label === 'ADR room')?.detail ?? '';
+          if (adrDetail.includes('>80%')) {
+            saveNextDayQueue([...loadNextDayQueue(), sym]);
+          }
           return;
         }
       }
@@ -2371,7 +2391,7 @@ export function ProTradeScannerScreen() {
               <StrategyCard
                 key={strategy}
                 strategy={strategy}
-                count={rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === strategy && signal.stage !== 'pro_watchlist')).length}
+                count={rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === strategy && signal.stage !== 'raw_candidates')).length}
                 active={activeStrategy === strategy}
                 onClick={() => setActiveStrategy((current) => current === strategy ? 'all' : strategy)}
               />

@@ -401,7 +401,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
   // Guarantee pinned watchlist symbols are always scanned regardless of score rank
   const top = [...new Set([...scored, ...pinnedSymbols])];
 
-  const [bars1m, bars5m, bars15m, bars1h, bars1d, newsFlags, sectorTrends, spyBars, spyRegimeData] = await Promise.all([
+  const [bars1m, bars5m, bars15m, bars1h, bars1d, newsFlags, sectorTrends, spyBars, spyRegimeData, spy5mBars] = await Promise.all([
     fetchBars(top, '1m'),
     fetchBars(top, '5m'),
     fetchBars(top, '15m'),
@@ -411,6 +411,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
     fetchSectorTrends(),
     fetchBars(['SPY'], '1h'),
     fetchSpyDailyBars(),
+    fetchBars(['SPY'], '5m'),
   ]);
 
   // Warm float cache in background — earnings already pre-warmed above
@@ -422,7 +423,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
   const spyPrev = spyH1.length >= 2 ? spyH1[spyH1.length - 2].close : spyLast;
   const spyChangePct = spyPrev > 0 ? (spyLast - spyPrev) / spyPrev : 0;
 
-  const spy5m = (spyBars['SPY'] || []);
+  const spy5m = (spy5mBars['SPY'] || []);
   const spyTrend5m = candleTrend(spy5m);
 
   // Macro regime: SPY EMA200 (daily) + VIX
