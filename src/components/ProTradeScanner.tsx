@@ -1762,6 +1762,15 @@ export function ProTradeScannerScreen() {
     saveArchive([{ date: todayET, archivedAt: new Date().toISOString(), symbols: watchlist.symbols, results }, ...archive]);
   }, [rows, watchlist, paperTrades]);
 
+  // Auto-advance Monitor date when the page is left open overnight.
+  // Checks every 5 minutes; resets to today if the date has rolled over.
+  React.useEffect(() => {
+    const tick = () => { const d = todayET(); if (monitorDate !== d) setMonitorDate(d); };
+    tick(); // immediate check on mount
+    const id = setInterval(tick, 5 * 60_000);
+    return () => clearInterval(id);
+  }, [monitorDate]);
+
   // Load all trades from server on mount (server is source of truth; localStorage is fallback)
   const serverLoadDone = React.useRef(false);
   React.useEffect(() => {
@@ -1904,6 +1913,7 @@ export function ProTradeScannerScreen() {
         const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0);
         if (trade) {
           setPaperTrades((current) => [trade, ...current]);
+          setMonitorDate(todayET()); // snap Monitor to today — page may have been open since a previous session
           placePaperBracketOrder({
             symbol: trade.symbol,
             direction: trade.direction === 'BEAR' ? 'BEAR' : 'BULL',
@@ -2000,6 +2010,7 @@ export function ProTradeScannerScreen() {
       if (!confirmedTrades.length) return;
 
       setPaperTrades((current) => [...confirmedTrades, ...current]);
+      setMonitorDate(todayET()); // snap Monitor to today — page may have been open since a previous session
       setApprovalMessage(`1m confirmed: ${confirmedTrades.map((t) => t.symbol).join(', ')} — entry after close above level.`);
 
       confirmedTrades.forEach((trade) => {
