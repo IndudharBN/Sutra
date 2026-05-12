@@ -100,6 +100,8 @@ export interface StrategyInput {
   trend15mAligned: boolean;
   score: number;
   earningsDays?: number | null;
+  vixLevel?: number | null;
+  spyTrend5m?: 'UP' | 'DOWN' | 'FLAT';
   dataStatus: MarketDataProviderStatus;
   candles: {
     one: Candle[];

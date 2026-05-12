@@ -10,7 +10,14 @@ const MIN_RR = 1.5;
 const PREFERRED_RR = 2.5;
 const T1_RR = 1.5;           // scale out 50% at T1, SL → entry (BE), then → T1 on pullback confirm
 const STOP_BUFFER_ATR = 0.5; // breathing room beyond anchor extreme
-const NOISE_FLOOR_ATR = 0.75; // min stop distance — covers bid-ask + 1m wick noise
+
+function noiseFloor(vixLevel?: number | null) {
+  if (!vixLevel) return 0.75;
+  if (vixLevel > 28) return 1.5;
+  if (vixLevel > 22) return 1.0;
+  if (vixLevel < 14) return 0.5;
+  return 0.75;
+}
 
 function pass(label: string, detail: string): StrategyChecklistItem {
   return { label, passed: true, detail };
@@ -81,8 +88,9 @@ function planFromLevelsT1T2(
 // Ensures stop is never tighter than NOISE_FLOOR_ATR from entry.
 // For BULL: picks the lower of (structural stop, noise floor) — more room wins.
 // For BEAR: picks the higher of (structural stop, noise floor) — more room wins.
-function noiseFlooredStop(direction: 'BULL' | 'BEAR', entry: number, rawStop: number, atr20: number): number {
-  const floor = direction === 'BULL' ? entry - atr20 * NOISE_FLOOR_ATR : entry + atr20 * NOISE_FLOOR_ATR;
+function noiseFlooredStop(direction: 'BULL' | 'BEAR', entry: number, rawStop: number, atr20: number, vixLevel?: number | null): number {
+  const nf = noiseFloor(vixLevel);
+  const floor = direction === 'BULL' ? entry - atr20 * nf : entry + atr20 * nf;
   return direction === 'BULL' ? Math.min(rawStop, floor) : Math.max(rawStop, floor);
 }
 
@@ -296,7 +304,7 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const rawStop = input.direction === 'BULL'
     ? Math.min(range?.high ?? entry, trigger?.low ?? entry) - input.atr20 * STOP_BUFFER_ATR
     : Math.max(range?.low ?? entry, trigger?.high ?? entry) + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20);
+  const stop = noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20, input.vixLevel);
   const risk = Math.abs(entry - stop);
   const orRange = range ? range.high - range.low : 0;
   const breakoutLevel = range ? (input.direction === 'BULL' ? range.high : range.low) : entry;
@@ -341,7 +349,7 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const entry = input.price;
   const swing = input.direction === 'BULL' ? Math.min(...recent.map((c) => c.low)) : Math.max(...recent.map((c) => c.high));
   const rawStop = input.direction === 'BULL' ? swing - input.atr20 * STOP_BUFFER_ATR : swing + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20);
+  const stop = noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20, input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
@@ -371,7 +379,7 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
   const rsLabel = `${round(input.rsVsBenchmark, 4)} vs SPY`;
   const entry = input.price;
   const rawStop = input.direction === 'BULL' ? microLow - input.atr20 * STOP_BUFFER_ATR : microHigh + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20);
+  const stop = noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20, input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
@@ -444,7 +452,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     : false;
   const sweepRef = dir === 'BULL' ? (sweepCandle ? sweepCandle.low : entry) : (sweepCandle ? sweepCandle.high : entry);
   const rawStop = dir === 'BULL' ? sweepRef - input.atr20 * STOP_BUFFER_ATR : sweepRef + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20);
+  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
   const risk = Math.abs(entry - stop);
   const orOpposite = range ? (dir === 'BULL' ? range.high : range.low) : null;
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
@@ -510,8 +518,8 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const entry = input.price;
   const rawStop = structureLow !== null && structureHigh !== null
     ? (dir === 'BULL' ? structureLow - input.atr20 * STOP_BUFFER_ATR : structureHigh + input.atr20 * STOP_BUFFER_ATR)
-    : (dir === 'BULL' ? entry - input.atr20 * NOISE_FLOOR_ATR : entry + input.atr20 * NOISE_FLOOR_ATR);
-  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20);
+    : entry;
+  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
@@ -582,7 +590,7 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
   const swingStop = dir === 'BULL'
     ? Math.min(...five.slice(-5).map((c) => c.low)) - input.atr20 * STOP_BUFFER_ATR
     : Math.max(...five.slice(-5).map((c) => c.high)) + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(dir, entry, swingStop, input.atr20);
+  const stop = noiseFlooredStop(dir, entry, swingStop, input.atr20, input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
@@ -619,7 +627,7 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
   
   if (volSpike && isBreakout) {
     const rawStop = direction === 'BULL' ? bar.low : bar.high;
-    const stop = noiseFlooredStop(direction as 'BULL' | 'BEAR', price, rawStop, atr20);
+    const stop = noiseFlooredStop(direction as 'BULL' | 'BEAR', price, rawStop, atr20, input.vixLevel);
     const risk = Math.abs(price - stop);
     const t1 = direction === 'BULL' ? price + risk * T1_RR : price - risk * T1_RR;
     const t2 = direction === 'BULL' ? price + risk * PREFERRED_RR : price - risk * PREFERRED_RR;
@@ -681,7 +689,7 @@ export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
   const swingStop = dir === 'BULL'
     ? Math.min(...five.slice(-4).map((c) => c.low)) - input.atr20 * STOP_BUFFER_ATR
     : Math.max(...five.slice(-4).map((c) => c.high)) + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(dir, entry, swingStop, input.atr20);
+  const stop = noiseFlooredStop(dir, entry, swingStop, input.atr20, input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
@@ -742,7 +750,7 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
   const rawStop = dir === 'BULL'
     ? flagLow - input.atr20 * STOP_BUFFER_ATR
     : flagHigh + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20);
+  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);

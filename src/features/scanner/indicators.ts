@@ -73,6 +73,14 @@ export function vwapLatest(candles: Candle[], period = 20) {
   return last(vwapSeries(candles, period)) ?? last(candles)?.close ?? 0;
 }
 
+export function vwapSlope(candles: Candle[], lookback = 3, period = 20) {
+  const series = vwapSeries(candles, period);
+  if (series.length < lookback + 1) return 0;
+  const current = last(series);
+  const prev = series[series.length - 1 - lookback];
+  return (current - prev) / prev;
+}
+
 export function volRatio(candles: Candle[], period = 20) {
   if (candles.length < period + 1) return null;
   const vols = volumes(candles);
