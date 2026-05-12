@@ -1563,10 +1563,14 @@ export function ProTradeScannerScreen() {
   const [viewMode, setViewMode] = React.useState<'premarket' | 'workflow'>(() => isPremarketWindow() ? 'premarket' : 'workflow');
   const [cbTick, setCbTick] = React.useState(0);
 
-  async function load(manual = false) {
+  async function load(forceRefresh = false) {
     try {
-      if (manual) setManualLoading(true);
-      else setLoading(true);
+      if (forceRefresh) {
+        setManualLoading(true);
+        clearUniverseCache();
+      } else {
+        setLoading(true);
+      }
       setError('');
       const [nextSnapshot, nextBroker, acct] = await Promise.all([
         fetchProTradeScannerSnapshot(watchlist.symbols),
