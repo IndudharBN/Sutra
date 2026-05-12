@@ -1726,13 +1726,15 @@ export function ProTradeScannerScreen() {
   // 8:30 AM ET universe refresh — clears the 6h screener cache once per day at pre-market open
   // so the universe reflects current RVOL/gap data before the watchlist locks at 8:30 AM.
   React.useEffect(() => {
-    let firedDate = '';
     const id = setInterval(() => {
       const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-      if (firedDate === today) return;
+      const lastFired = sessionStorage.getItem('sutra.universe_cleared_date');
+      if (lastFired === today) return;
+
       const mins = etMinutesNow();
       if (mins < 8 * 60 + 30) return;
-      firedDate = today;
+
+      sessionStorage.setItem('sutra.universe_cleared_date', today);
       clearUniverseCache();
       const t = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: true });
       setLastUniverseScanTime(t);
@@ -2507,7 +2509,15 @@ export function ProTradeScannerScreen() {
 }
 function isTideBlocked(row: ProTradeRow, sig?: StrategySignal): boolean {
   if (!sig || !row.spyTrend5m) return false;
+
+  const strategyId = sig.strategyId;
+  // Reversal/Structure strategies are allowed to trade against the 5m tide
+  const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
+  if (isReversal) return false;
+
+  // Trend-following strategies must align with the SPY Tide
   if (row.spyTrend5m === 'BEAR' && sig.direction === 'BULL') return true;
   if (row.spyTrend5m === 'BULL' && sig.direction === 'BEAR') return true;
+
   return false;
 }

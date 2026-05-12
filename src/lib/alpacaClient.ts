@@ -294,10 +294,40 @@ function computeAvgDvolM(bars: Candle[]): number {
   return recent.reduce((s, b) => s + (b.close * b.volume) / 1_000_000, 0) / recent.length;
 }
 
+function toETDate(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
+function getPersistentUniverse(pinnedSymbols: string[]): string[] | null {
+  try {
+    const key = `sutra.universe.${toETDate()}`;
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const symbols = JSON.parse(raw) as string[];
+    return [...new Set([...symbols, ...pinnedSymbols])];
+  } catch {
+    return null;
+  }
+}
+
+function setPersistentUniverse(symbols: string[]) {
+  try {
+    const key = `sutra.universe.${toETDate()}`;
+    localStorage.setItem(key, JSON.stringify(symbols));
+  } catch (err) {
+    console.warn('[Universe] Failed to persist:', err);
+  }
+}
+
 export async function buildDynamicUniverse(
   pinnedSymbols: string[] = [],
   staticFallback: string[] = [],
 ): Promise<string[]> {
+  // 1. Check persistent daily lock (survives refresh)
+  const persistent = getPersistentUniverse(pinnedSymbols);
+  if (persistent) return persistent;
+
+  // 2. Check in-memory cache (fast path)
   const cached = cacheGet<string[]>(UNIVERSE_CACHE_KEY);
   if (cached) return [...new Set([...cached, ...pinnedSymbols])];
 
@@ -347,20 +377,27 @@ export async function buildDynamicUniverse(
       .map(x => x.sym);
 
     cacheSet(UNIVERSE_CACHE_KEY, ranked, UNIVERSE_TTL_MS);
+    cacheSet(UNIVERSE_CACHE_KEY, ranked, UNIVERSE_TTL_MS);
+    setPersistentUniverse(ranked); // Lock for the day
     return [...new Set([...ranked, ...pinnedSymbols])];
-  } catch (err) {
+    } catch (err) {
     console.warn('[Universe] Dynamic build failed, using static fallback:', err);
     // Short-cache fallback so it retries sooner than 6h
     const fallback = staticFallback.slice(0, UNIVERSE_TARGET);
     cacheSet(UNIVERSE_CACHE_KEY, fallback, 30 * 60 * 1000);
     return [...new Set([...fallback, ...pinnedSymbols])];
-  }
-}
+    }
+    }
 
-// Call this to force a fresh universe rebuild on the next scan cycle
-export function clearUniverseCache(): void {
-  _cache.delete(UNIVERSE_CACHE_KEY);
-}
+    // Call this to force a fresh universe rebuild on the next scan cycle
+    export function clearUniverseCache(): void {
+    _cache.delete(UNIVERSE_CACHE_KEY);
+    try {
+    const key = `sutra.universe.${toETDate()}`;
+    localStorage.removeItem(key);
+    } catch { /* ignore */ }
+    }
+
 
 // ── News: catalyst quality tier per symbol ────────────────────────────────────
 
