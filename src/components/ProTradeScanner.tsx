@@ -443,13 +443,30 @@ function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT
 function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, sizeMult = 1.0): PaperTrade | null {
   const plan = effectiveTradePlan(row, settings);
   if (!plan || plan.rr < 1.5) return null;
+
+  // Small Account Adaptive Limits: For accounts < $5,000, we must allow a higher per-trade 
+  // notional cap (90%) so the trader isn't blocked from buying 1 share of expensive stocks (NVDA, MSFT).
+  // The risk (stop-loss distance) is still controlled by the Kelly calculation.
+  const isSmallAccount = accountBalance < 5000;
+  const defaultCapPct = isSmallAccount ? 0.90 : 0.05;
+
   const budgetCap = settings.tradingAmount > 0
     ? availablePaperNotional(settings, currentTrades)
-    : accountBalance * 0.05; // 5% of account balance per trade when no explicit budget set
+    : accountBalance * defaultCapPct;
+
   const strategyId = row.primaryStrategy?.strategyId || null;
   const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop, strategyId || undefined);
-  const riskNotional = riskQty * plan.entry * sizeMult; // regime scales position: BULL=1.0, SIDEWAYS=0.75, BEAR=0.5
-  const notional = Math.min(budgetCap, riskNotional);
+  
+  // Calculate notional needed for the riskQty, but cap it at the budgetCap
+  let riskNotional = riskQty * plan.entry * sizeMult;
+  let notional = Math.min(budgetCap, riskNotional);
+
+  // If budget allows for at least 1 share but Kelly math rounded to 0, or notional < 1 share price
+  // we force 1 share to ensure small accounts can actually execute Big Tech trades.
+  if (notional < plan.entry && budgetCap >= plan.entry) {
+    notional = plan.entry;
+  }
+
   if (notional <= 0) return null;
   const quantity = Math.max(1, Math.floor(notional / plan.entry));
   return {
