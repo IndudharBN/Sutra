@@ -446,11 +446,11 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
   const budgetCap = settings.tradingAmount > 0
     ? availablePaperNotional(settings, currentTrades)
     : accountBalance * 0.05; // 5% of account balance per trade when no explicit budget set
-  const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop);
+  const strategyId = row.primaryStrategy?.strategyId || null;
+  const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop, strategyId || undefined);
   const riskNotional = riskQty * plan.entry * sizeMult; // regime scales position: BULL=1.0, SIDEWAYS=0.75, BEAR=0.5
   const notional = Math.min(budgetCap, riskNotional);
   if (notional <= 0) return null;
-  const strategyId = row.primaryStrategy?.strategyId || null;
   const quantity = Math.max(1, Math.floor(notional / plan.entry));
   return {
     id: `paper-${row.symbol}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -2079,7 +2079,7 @@ export function ProTradeScannerScreen() {
     try {
       setApprovalBusy(true);
       setApprovalMessage('');
-      const qty = computePositionSize(accountBalance, plan.entry, plan.stop);
+      const qty = computePositionSize(accountBalance, plan.entry, plan.stop, row.primaryStrategy?.strategyId || undefined);
       const order = await placePaperBracketOrder({
         symbol: row.symbol,
         direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL',

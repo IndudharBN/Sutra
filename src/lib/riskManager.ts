@@ -84,12 +84,39 @@ export function initDailyBalance(accountBalance: number): void {
   }
 }
 
+// ── Strategy Performance Map for Kelly Sizing ────────────────────────────────
+// Derived from historical backtests (Win Rate % and Average Reward/Risk ratio)
+export const STRATEGY_PERFORMANCE: Record<string, { winRate: number; avgRR: number }> = {
+  orb_retest: { winRate: 0.38, avgRR: 3.5 },      // S1: ORB Retest
+  vwap_pullback: { winRate: 0.45, avgRR: 2.5 },   // S2: VWAP Pullback
+  rs_continuation: { winRate: 0.42, avgRR: 3.0 }, // S3: RS Continuation
+  liquidity_sweep: { winRate: 0.62, avgRR: 1.4 }, // S4: Liquidity Sweep
+  ob_fvg_retest: { winRate: 0.58, avgRR: 1.6 },   // S5: OB/FVG Retest
+  mss_breakout: { winRate: 0.55, avgRR: 2.1 },    // S6: MSS Breakout
+  s7_volume_surge: { winRate: 0.35, avgRR: 4.0 }, // S7: Volume Surge
+  ema20_bounce: { winRate: 0.48, avgRR: 2.2 },    // S8: EMA20 Bounce
+  flag_break: { winRate: 0.40, avgRR: 3.2 },      // S9: Flag Break
+};
+
+const KELLY_SAFETY_FACTOR = 0.15; // Fractional Kelly (15% of full Kelly) to smooth growth curve
+
 // qty = (account × riskPerTradePct) / |entry - stop|
-export function computePositionSize(accountBalance: number, entry: number, stop: number): number {
+export function computePositionSize(accountBalance: number, entry: number, stop: number, strategyId?: string): number {
   const { riskPerTradePct } = getRiskSettings();
+  let effectiveRiskPct = riskPerTradePct;
+
+  // Lead Quant Fix: Use Kelly Criterion if strategyId is provided
+  if (strategyId && STRATEGY_PERFORMANCE[strategyId]) {
+    const { winRate, avgRR } = STRATEGY_PERFORMANCE[strategyId];
+    // Full Kelly Formula: K% = W - ((1 - W) / R)
+    const fullKelly = winRate - (1 - winRate) / avgRR;
+    // Apply safety factor and clamp between 0.5% and 5% of account
+    effectiveRiskPct = Math.max(0.005, Math.min(0.05, fullKelly * KELLY_SAFETY_FACTOR));
+  }
+
   const stopDist = Math.abs(entry - stop);
   if (stopDist <= 0 || entry <= 0) return 1;
-  return Math.max(1, Math.floor((accountBalance * riskPerTradePct) / stopDist));
+  return Math.max(1, Math.floor((accountBalance * effectiveRiskPct) / stopDist));
 }
 
 export function checkDailyLossLimit(accountBalance: number): { ok: boolean; reason?: string } {
