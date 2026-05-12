@@ -2524,7 +2524,15 @@ export function ProTradeScannerScreen() {
 }
 function isTideBlocked(row: ProTradeRow, sig?: StrategySignal): boolean {
   if (!sig || !row.spyTrend5m) return false;
+
+  const strategyId = sig.strategyId;
+  // Reversal/Structure strategies are allowed to trade against the 5m tide
+  const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
+  if (isReversal) return false;
+
+  // Trend-following strategies must align with the SPY Tide
   if (row.spyTrend5m === 'BEAR' && sig.direction === 'BULL') return true;
   if (row.spyTrend5m === 'BULL' && sig.direction === 'BEAR') return true;
+
   return false;
 }
