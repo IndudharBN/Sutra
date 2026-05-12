@@ -440,14 +440,31 @@ function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT
   return Boolean(plan && plan.rr >= 1.5 && availablePaperNotional(settings, trades) > 0);
 }
 
-function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, sizeMult = 1.0): PaperTrade | null {
+function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, sizeMult = 1.0, regimeName: string = 'SIDEWAYS'): PaperTrade | null {
   const plan = effectiveTradePlan(row, settings);
   if (!plan || plan.rr < 1.5) return null;
+
+  // Market Heat Filter: Compare Intraday Tide vs Daily Regime
+  // Conflicting trends = lower probability = 50% reduction in size
+  let heatMult = 1.0;
+  let heatNote = '';
+  const tide = row.spyTrend5m; // UP/DOWN/FLAT
+
+  if (regimeName === 'BULL' && tide === 'DOWN') {
+    heatMult = 0.5;
+    heatNote = ' [Market Heat: Intraday Tide DOWN in BULL regime]';
+  } else if (regimeName === 'BEAR' && tide === 'UP') {
+    heatMult = 0.5;
+    heatNote = ' [Market Heat: Intraday Tide UP in BEAR regime]';
+  }
+
+  const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop);
+  const riskNotional = riskQty * plan.entry * sizeMult * heatMult;
+  
   const budgetCap = settings.tradingAmount > 0
     ? availablePaperNotional(settings, currentTrades)
-    : accountBalance * 0.05; // 5% of account balance per trade when no explicit budget set
-  const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop);
-  const riskNotional = riskQty * plan.entry * sizeMult; // regime scales position: BULL=1.0, SIDEWAYS=0.75, BEAR=0.5
+    : accountBalance * 0.05;
+  
   const notional = Math.min(budgetCap, riskNotional);
   if (notional <= 0) return null;
   const strategyId = row.primaryStrategy?.strategyId || null;
@@ -473,7 +490,7 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
     quantity,
     notional,
     openedAt,
-    reason: row.primaryStrategy?.reason || row.reason,
+    reason: (row.primaryStrategy?.reason || row.reason) + heatNote,
   };
 }
 
@@ -1558,7 +1575,6 @@ export function ProTradeScannerScreen() {
   const [settings, setSettings] = React.useState<ProTradeSettings>(() => loadProTradeSettings());
   const [accountBalance, setAccountBalance] = React.useState(100_000);
   const [watchlist, setWatchlist] = React.useState<DayWatchlist>(() => loadWatchlist());
-  const [lastUniverseScanTime, setLastUniverseScanTime] = React.useState<string>('');
   const [watchlistOnly, setWatchlistOnly] = React.useState(false);
   const [viewMode, setViewMode] = React.useState<'premarket' | 'workflow'>(() => isPremarketWindow() ? 'premarket' : 'workflow');
   const [cbTick, setCbTick] = React.useState(0);
@@ -1725,17 +1741,17 @@ export function ProTradeScannerScreen() {
 
   // 8:30 AM ET universe refresh — clears the 6h screener cache once per day at pre-market open
   // so the universe reflects current RVOL/gap data before the watchlist locks at 8:30 AM.
+  // firedDate is persisted in sessionStorage so remounting the component (navigation, HMR)
+  // does not re-trigger the cache clear and re-scan after 8:30 AM.
   React.useEffect(() => {
-    let firedDate = '';
+    const FIRED_KEY = 'sutra.universe830FiredDate';
     const id = setInterval(() => {
       const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-      if (firedDate === today) return;
+      if (sessionStorage.getItem(FIRED_KEY) === today) return;
       const mins = etMinutesNow();
       if (mins < 8 * 60 + 30) return;
-      firedDate = today;
+      sessionStorage.setItem(FIRED_KEY, today);
       clearUniverseCache();
-      const t = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: true });
-      setLastUniverseScanTime(t);
       void load();
     }, 60_000);
     return () => clearInterval(id);
@@ -1929,7 +1945,7 @@ export function ProTradeScannerScreen() {
       const stratId = row.primaryStrategy?.strategyId;
       if (stratId === 's7_volume_surge') {
         firedInstantRef.current.add(sym);
-        const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0);
+    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0, snapshot?.regime?.regime);
         if (trade) {
           setPaperTrades((current) => [trade, ...current]);
           setMonitorDate(todayET()); // snap Monitor to today — page may have been open since a previous session
@@ -2018,7 +2034,7 @@ export function ProTradeScannerScreen() {
         const row = snap.rows.find((r) => baseSymbol(r.symbol) === sym);
         if (!row || row.workflowStage !== 'trade_ready') { pending.delete(sym); continue; }
 
-        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance, snap.regime?.sizeMult ?? 1.0);
+        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance, snap.regime?.sizeMult ?? 1.0, snap.regime?.regime);
         if (!trade) { pending.delete(sym); continue; }
 
         confirmedTrades.push(trade);
@@ -2105,7 +2121,7 @@ export function ProTradeScannerScreen() {
     if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
     const posCheck = checkMaxPositions(paperTrades);
     if (!posCheck.ok) { setApprovalMessage(posCheck.reason!); return; }
-    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0);
+    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0, snapshot?.regime?.regime);
     if (!trade) {
       const plan = effectiveTradePlan(row, settings);
       if (!plan) {
@@ -2319,7 +2335,7 @@ export function ProTradeScannerScreen() {
               Provider: Alpaca IEX
             </span>
             <span className="px-3 py-1 rounded-full border border-violet-500/20 text-violet-300 bg-violet-500/10">
-              Raw candidates: {lastUniverseScanTime ? `scanned ${lastUniverseScanTime} ET` : 'pending 8:30 AM ET'}
+              Raw candidates: {snapshot?.fetchedAt ? `scanned ${toETTime(snapshot.fetchedAt)} ET` : 'pending 8:30 AM ET'}
             </span>
             {watchlist.symbols.length > 0 && (
               <span className="px-3 py-1 rounded-full border border-amber-500/30 text-amber-300 bg-amber-500/10">
@@ -2507,7 +2523,15 @@ export function ProTradeScannerScreen() {
 }
 function isTideBlocked(row: ProTradeRow, sig?: StrategySignal): boolean {
   if (!sig || !row.spyTrend5m) return false;
+
+  const strategyId = sig.strategyId;
+  // Reversal/Structure strategies are allowed to trade against the 5m tide
+  const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
+  if (isReversal) return false;
+
+  // Trend-following strategies must align with the SPY Tide
   if (row.spyTrend5m === 'BEAR' && sig.direction === 'BULL') return true;
   if (row.spyTrend5m === 'BULL' && sig.direction === 'BEAR') return true;
+
   return false;
 }
