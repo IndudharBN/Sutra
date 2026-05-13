@@ -2,7 +2,7 @@ import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNe
 import { classifyMarketRegime } from '../marketRegime/marketRegimeLogic';
 import type { MarketRegime } from '../marketRegime/marketRegimeTypes';
 import type { SymbolMeta } from '../../lib/alpacaClient';
-import { ema, vwapLatest } from '../scanner/indicators';
+import { ema, vwapLatest, vwapSeries, vwapSlope } from '../scanner/indicators';
 import type { Candle, CandleSet } from '../scanner/ohlcv';
 import { closes, last, round } from '../scanner/ohlcv';
 import { evaluateStrategies } from './strategyEngine';
@@ -90,6 +90,17 @@ function candleTrend(candles: Candle[]) {
   const values = closes(candles);
   const e9 = last(ema(values, 9));
   const e21 = last(ema(values, 21));
+
+  // Lead Indicator Logic: Use VWAP Slope + Price Position
+  const vpx = vwapLatest(candles, 20);
+  const price = last(values);
+  const slope = vwapSlope(candles, 3, 20);
+
+  // Bullish Lead: EMA still bearish but price > VWAP and VWAP turning up
+  if (e9 < e21 && price > vpx && slope > 0.0001) return 'UP' as const;
+  // Bearish Lead: EMA still bullish but price < VWAP and VWAP turning down
+  if (e9 > e21 && price < vpx && slope < -0.0001) return 'DOWN' as const;
+
   if (e9 > e21) return 'UP' as const;
   if (e9 < e21) return 'DOWN' as const;
   return 'FLAT' as const;
@@ -223,6 +234,8 @@ function buildRowFromAlpaca(
   sectorTrends: Record<string, 'UP' | 'DOWN' | 'FLAT'>,
   earningsDays: number | null,
   spyChangePct: number,
+  vixLevel?: number | null,
+  spyTrend5m?: 'UP' | 'DOWN' | 'FLAT',
 ): ProTradeRow {
   const one = (candleSet['1m'] || []).slice(-120);
   const five = (candleSet['5m'] || []).slice(-120);
@@ -298,6 +311,8 @@ function buildRowFromAlpaca(
     trendAligned,
     trend15mAligned,
     earningsDays,
+    vixLevel,
+    spyTrend5m,
     dataStatus: providerStatus,
     candles,
   });
@@ -378,8 +393,9 @@ export async function fetchHotSetSnapshot(symbols: string[], spyChangePct: numbe
     if (!meta) return [];
     const candleSet = buildCandleSet(sym, { '1m': bars1m, '5m': bars5m, '15m': bars15m, '1h': bars1h, '1d': bars1d });
     const earningsDays = getEarningsDays(sym);
-    return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, 'none', sectorTrends, earningsDays, spyChangePct)];
-  });
+    return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, catalyst, sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m)];
+    });
+
 }
 
 // ── Main fetch ────────────────────────────────────────────────────────────────
@@ -446,7 +462,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
       if (!meta) return [];
       const candleSet = buildCandleSet(sym, { '1m': bars1m, '5m': bars5m, '15m': bars15m, '1h': bars1h, '1d': bars1d });
       const earningsDays = getEarningsDays(sym);
-      return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct)];
+      return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m)];
     })
     .sort((a, b) => b.confidence - a.confidence || b.score - a.score);
 
