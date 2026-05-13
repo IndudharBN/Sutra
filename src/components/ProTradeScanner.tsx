@@ -445,10 +445,12 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
   if (!plan || plan.rr < 1.5) return null;
 
   // Market Heat Filter: regime conviction × intraday tide alignment
-  // BULL/BEAR conflict → 50% cut. SIDEWAYS conflict → 75% cut (tide is the ONLY signal; trading against it = no edge).
+  // BULL/BEAR conflict → 50% cut. SIDEWAYS conflict → flat 0.5 effective (sizeMult bypassed —
+  // tide is the only signal; stacking 0.75×0.5 would over-penalise to 0.375).
   // Reversal strategies (S4/S5/S6) are exempt — tide opposition IS their setup.
   let heatMult = 1.0;
   let heatNote = '';
+  let sidewaysConflict = false;
   const tide = row.spyTrend5m;
   const strategyId = row.primaryStrategy?.strategyId ?? null;
   const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
@@ -462,15 +464,19 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
   } else if (regimeName === 'SIDEWAYS' && !isReversal) {
     if (row.direction === 'BULL' && tide === 'DOWN') {
       heatMult = 0.5;
-      heatNote = ' [Market Heat: SIDEWAYS + Tide DOWN — no macro backing → 50% size]';
+      sidewaysConflict = true;
+      heatNote = ' [Market Heat: SIDEWAYS + Tide DOWN → 50% size]';
     } else if (row.direction === 'BEAR' && tide === 'UP') {
       heatMult = 0.5;
-      heatNote = ' [Market Heat: SIDEWAYS + Tide UP — no macro backing → 50% size]';
+      sidewaysConflict = true;
+      heatNote = ' [Market Heat: SIDEWAYS + Tide UP → 50% size]';
     }
   }
 
+  // SIDEWAYS conflict: use heatMult directly (1.0 base) — stacking onto 0.75 sizeMult would give 0.375
+  const effectiveMult = sidewaysConflict ? heatMult : sizeMult * heatMult;
   const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop);
-  const riskNotional = riskQty * plan.entry * sizeMult * heatMult;
+  const riskNotional = riskQty * plan.entry * effectiveMult;
   
   const budgetCap = settings.tradingAmount > 0
     ? availablePaperNotional(settings, currentTrades)
