@@ -199,10 +199,13 @@ function computePremarket(one: Candle[]): { high: number; low: number; volume: n
 
 function computeRsVsBenchmark(h1: Candle[], spyChangePct: number): number {
   if (h1.length < 2) return 1;
-  const last1 = h1[h1.length - 1].close;
-  const prev1 = h1[h1.length - 2].close;
-  if (prev1 <= 0) return 1;
-  const stockChangePct = (last1 - prev1) / prev1;
+  // 3-bar rolling window (≈3h) — single bar was too noisy; sustained RS leaders
+  // hold their edge across multiple bars, not just the latest candle
+  const window = Math.min(3, h1.length - 1);
+  const lastClose = h1[h1.length - 1].close;
+  const baseClose = h1[h1.length - 1 - window].close;
+  if (baseClose <= 0) return 1;
+  const stockChangePct = (lastClose - baseClose) / baseClose;
   return 1 + (stockChangePct - spyChangePct);
 }
 
@@ -421,10 +424,10 @@ function buildRowFromAlpaca(
 
 export { clearUniverseCache };
 
-export async function fetchHotSetSnapshot(symbols: string[], spyChangePct: number): Promise<ProTradeRow[]> {
+export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRow[]> {
   if (!symbols.length) return [];
   const metas = await fetchUniverseMeta(symbols);
-  const [bars1m, bars5m, bars15m, bars1h, bars1d, sectorTrends, newsFlags, spy5mBars, spyRegimeData] = await Promise.all([
+  const [bars1m, bars5m, bars15m, bars1h, bars1d, sectorTrends, newsFlags, spy5mBars, spyH1Bars, spyRegimeData] = await Promise.all([
     fetchBars(symbols, '1m'),
     fetchBars(symbols, '5m'),
     fetchBars(symbols, '15m'),
@@ -433,10 +436,16 @@ export async function fetchHotSetSnapshot(symbols: string[], spyChangePct: numbe
     fetchSectorTrends(),
     fetchNewsFlags(symbols),
     fetchBars(['SPY'], '5m'),
+    fetchBars(['SPY'], '1h'),
     fetchSpyDailyBars(),
   ]);
   const spyTrend5m = candleTrend(spy5mBars['SPY'] || []);
   const vixLevel = spyRegimeData.vixBars.length ? last(spyRegimeData.vixBars).close : null;
+  // 3-bar rolling SPY change — matches computeRsVsBenchmark window; was hardcoded 0 in caller
+  const spyH1 = (spyH1Bars['SPY'] || []).slice(-5);
+  const spyLast = spyH1.length >= 2 ? spyH1[spyH1.length - 1].close : 0;
+  const spyBase = spyH1.length >= 4 ? spyH1[spyH1.length - 4].close : (spyH1.length >= 2 ? spyH1[spyH1.length - 2].close : spyLast);
+  const spyChangePct = spyBase > 0 ? (spyLast - spyBase) / spyBase : 0;
   const fetchedAt = new Date().toISOString();
   const providerStatus = dataProviderStatus(fetchedAt);
   const metaMap = new Map(metas.map((m) => [m.symbol, m]));
@@ -486,11 +495,11 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
   // Warm float cache in background — earnings already pre-warmed above
   void fetchSharesOutstanding(top);
 
-  // Compute SPY hourly change for RS vs benchmark
+  // Compute SPY 3-bar rolling change — matches computeRsVsBenchmark window=3
   const spyH1 = (spyBars['SPY'] || []).slice(-5);
   const spyLast = spyH1.length >= 2 ? spyH1[spyH1.length - 1].close : 0;
-  const spyPrev = spyH1.length >= 2 ? spyH1[spyH1.length - 2].close : spyLast;
-  const spyChangePct = spyPrev > 0 ? (spyLast - spyPrev) / spyPrev : 0;
+  const spyBase = spyH1.length >= 4 ? spyH1[spyH1.length - 4].close : (spyH1.length >= 2 ? spyH1[spyH1.length - 2].close : spyLast);
+  const spyChangePct = spyBase > 0 ? (spyLast - spyBase) / spyBase : 0;
 
   const spy5m = (spy5mBars['SPY'] || []);
   const spyTrend5m = candleTrend(spy5m);

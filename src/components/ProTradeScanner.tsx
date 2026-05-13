@@ -1654,7 +1654,7 @@ export function ProTradeScannerScreen() {
       // Always keep watchlist symbols in the hot set so they're never dropped from monitoring
       const hotSymbols = [...new Set([...hotFromStage, ...watchlist.symbols])];
       if (!hotSymbols.length) return;
-      void fetchHotSetSnapshot(hotSymbols, 0).then((fresh) => {
+      void fetchHotSetSnapshot(hotSymbols).then((fresh) => {
         if (!fresh.length) return;
         setSnapshot((prev) => {
           if (!prev) return prev;
@@ -1684,7 +1684,7 @@ export function ProTradeScannerScreen() {
   React.useEffect(() => {
     return alpacaBarStream.onFiveMinClose((symbol) => {
       clearBarCache(symbol);
-      void fetchHotSetSnapshot([symbol], 0).then((fresh) => {
+      void fetchHotSetSnapshot([symbol]).then((fresh) => {
         if (!fresh.length) return;
         setSnapshot((prev) => {
           if (!prev) return prev;
