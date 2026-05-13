@@ -440,7 +440,7 @@ function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT
   return Boolean(plan && plan.rr >= 1.5 && availablePaperNotional(settings, trades) > 0);
 }
 
-function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, sizeMult = 1.0, regimeName: string = 'SIDEWAYS'): PaperTrade | null {
+function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, sizeMult = 1.0, regimeName: string = 'SIDEWAYS', spyTrend5m?: 'UP' | 'DOWN' | 'FLAT'): PaperTrade | null {
   const plan = effectiveTradePlan(row, settings);
   if (!plan || plan.rr < 1.5) return null;
 
@@ -451,7 +451,7 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
   let heatMult = 1.0;
   let heatNote = '';
   let sidewaysConflict = false;
-  const tide = row.spyTrend5m;
+  const tide = spyTrend5m;
   const strategyId = row.primaryStrategy?.strategyId ?? null;
   const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
 
@@ -1956,6 +1956,7 @@ export function ProTradeScannerScreen() {
       if (orderedSymbols.has(sym) || tradedSymbols.has(sym) || pending.has(sym) || firedInstantRef.current.has(sym)) return;
       if (row.earningsDays !== null && Math.abs(row.earningsDays) <= 1) return;
       if (!checkStrategyCircuitBreaker(row.primaryStrategy?.strategyId || row.symbol).ok) return;
+      if (isTideBlocked(row, snapshot.spyTrend5m, row.primaryStrategy ?? undefined)) return;
 
       const level = row.tradePlan?.entry;
       if (!level) return;
@@ -1965,7 +1966,7 @@ export function ProTradeScannerScreen() {
       const stratId = row.primaryStrategy?.strategyId;
       if (stratId === 's7_volume_surge') {
         firedInstantRef.current.add(sym);
-    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0, snapshot?.regime?.regime);
+    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0, snapshot?.regime?.regime, snapshot?.spyTrend5m);
         if (trade) {
           setPaperTrades((current) => [trade, ...current]);
           setMonitorDate(todayET()); // snap Monitor to today — page may have been open since a previous session
@@ -2054,7 +2055,7 @@ export function ProTradeScannerScreen() {
         const row = snap.rows.find((r) => baseSymbol(r.symbol) === sym);
         if (!row || row.workflowStage !== 'trade_ready') { pending.delete(sym); continue; }
 
-        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance, snap.regime?.sizeMult ?? 1.0, snap.regime?.regime);
+        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance, snap.regime?.sizeMult ?? 1.0, snap.regime?.regime, snap.spyTrend5m);
         if (!trade) { pending.delete(sym); continue; }
 
         confirmedTrades.push(trade);
@@ -2141,7 +2142,7 @@ export function ProTradeScannerScreen() {
     if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
     const posCheck = checkMaxPositions(paperTrades);
     if (!posCheck.ok) { setApprovalMessage(posCheck.reason!); return; }
-    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0, snapshot?.regime?.regime);
+    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0, snapshot?.regime?.regime, snapshot?.spyTrend5m);
     if (!trade) {
       const plan = effectiveTradePlan(row, settings);
       if (!plan) {
@@ -2366,7 +2367,7 @@ export function ProTradeScannerScreen() {
               Auto refresh: {activeStage === 'forming' || activeStage === 'confirmed' || activeStage === 'locked' || activeStage === 'trade_ready' ? '15s hot set' : '60s'}
             </span>
             <span className="px-3 py-1 rounded-full border border-slate-600/40 text-slate-400 bg-slate-800/30">
-              SPY Tide: <span className={`font-black ${rows[0]?.spyTrend5m === 'BULL' ? 'text-emerald-400' : rows[0]?.spyTrend5m === 'BEAR' ? 'text-rose-400' : 'text-slate-300'}`}>{rows[0]?.spyTrend5m || 'FLAT'}</span>
+              SPY Tide: <span className={`font-black ${snapshot?.spyTrend5m === 'UP' ? 'text-emerald-400' : snapshot?.spyTrend5m === 'DOWN' ? 'text-rose-400' : 'text-slate-300'}`}>{snapshot?.spyTrend5m || 'FLAT'}</span>
             </span>
             {snapshot?.regime && (
               <span className={`px-3 py-1 rounded-full border text-xs font-semibold ${snapshot.regime.regime === 'BULL' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : snapshot.regime.regime === 'BEAR' ? 'border-rose-500/40 bg-rose-500/10 text-rose-300' : 'border-amber-500/40 bg-amber-500/10 text-amber-300'}`}>
@@ -2541,17 +2542,16 @@ export function ProTradeScannerScreen() {
     </div>
   );
 }
-function isTideBlocked(row: ProTradeRow, sig?: StrategySignal): boolean {
-  if (!sig || !row.spyTrend5m) return false;
+function isTideBlocked(row: ProTradeRow, spyTrend: 'UP' | 'DOWN' | 'FLAT' | undefined, sig?: ProTradeRow['primaryStrategy']): boolean {
+  if (!sig || !spyTrend || spyTrend === 'FLAT') return false;
 
   const strategyId = sig.strategyId;
-  // Reversal/Structure strategies are allowed to trade against the 5m tide
   const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
   if (isReversal) return false;
 
-  // Trend-following strategies must align with the SPY Tide
-  if (row.spyTrend5m === 'BEAR' && sig.direction === 'BULL') return true;
-  if (row.spyTrend5m === 'BULL' && sig.direction === 'BEAR') return true;
+  // spyTrend is 'UP'|'DOWN' — block trend-following strategies trading against confirmed tide
+  if (spyTrend === 'DOWN' && sig.direction === 'BULL') return true;
+  if (spyTrend === 'UP' && sig.direction === 'BEAR') return true;
 
   return false;
 }
