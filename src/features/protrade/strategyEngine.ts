@@ -241,9 +241,9 @@ function todayOpeningRange(candles: Candle[]): ReturnType<typeof openingRange> {
 }
 
 function recentRetest(input: StrategyInput, level: number) {
-  const recent = input.candles.five.slice(-4); // 20-min window — retest must be fresh (4 bars of 5m)
+  const recent = input.candles.five.slice(-6); // 30-min window — institutional retests can take 25-30m
   if (!recent.length) return false;
-  const tolerance = Math.max(input.atr20 * 0.08, input.price * 0.0015);
+  const tolerance = Math.max(input.atr20 * 0.15, input.price * 0.0015); // 15% ATR — real retests rarely touch to the penny
   return input.direction === 'BULL'
     ? recent.some((c) => c.low <= level + tolerance && c.close >= level)
     : recent.some((c) => c.high >= level - tolerance && c.close <= level);
@@ -322,7 +322,7 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
     range ? pass('Opening range formed', `${round(range.low, 2)}–${round(range.high, 2)}`) : fail('Opening range formed', 'Need first 15 min of 5m candles'),
     confirmedBreak ? pass('ORB Breakout', `Clear of noise (+${round(breakoutDistance, 2)})`) : fail('ORB Breakout', `Inside noise floor (${round(minBreakout, 2)})`),
     retest ? pass('Retest hold', 'Breakout level retested and held') : fail('Retest hold', 'Waiting for controlled retest'),
-    pass('RVOL confirmation', `${round(input.rvol, 2)}×${input.rvol >= 0.8 ? ' — confirmed' : ' — low'} — informational`),
+    input.rvol >= 0.8 ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — ORB breakout requires volume confirmation`),
     pass('ADR room', `${adrExhausted(input.candles.five, input.atr20) ? '>80% ATR used — watch' : '< 80% ATR used ✓'} — informational`),
     pass('VWAP context', `${input.vwapAligned ? 'VWAP ✓' : 'early session'} — informational`),
     ema1mCheck(input),
@@ -375,7 +375,7 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
   const microHigh = highs.length ? Math.max(...highs.slice(0, -1)) : 0;
   const microLow = lows.length ? Math.min(...lows.slice(0, -1)) : 0;
   const breakout = trigger ? directionalBreak(input, trigger.close, microHigh, microLow) : false;
-  const rsEdge = input.direction === 'BULL' ? input.rsVsBenchmark >= 1.002 : input.rsVsBenchmark <= 0.998;
+  const rsEdge = input.direction === 'BULL' ? input.rsVsBenchmark >= 1.005 : input.rsVsBenchmark <= 0.995; // 0.5% RS edge — 0.2% was noise-level
   const rsLabel = `${round(input.rsVsBenchmark, 4)} vs SPY`;
   const entry = input.price;
   const rawStop = input.direction === 'BULL' ? microLow - input.atr20 * STOP_BUFFER_ATR : microHigh + input.atr20 * STOP_BUFFER_ATR;
@@ -383,7 +383,7 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
-  const tradePlan = directionOk(input) && recent.length >= 6 ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = directionOk(input) && recent.length >= 6 && rsEdge ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const fifteen = input.candles.fifteen;
   const trend1h: 'UP' | 'DOWN' | 'FLAT' = fifteen.length >= 5
     ? (fifteen[fifteen.length - 1].close > fifteen[fifteen.length - 5].close * 1.001 ? 'UP'
@@ -393,7 +393,7 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
     pass('15m trend', `${input.trend15m}${input.trend15mAligned ? ' ✓ aligned' : ' — context'} — informational`),
     pass('1H directional', `${trend1h} — macro bias`),
-    pass('RS vs SPY', `${rsLabel}${rsEdge ? ' ✓ leading' : ' — neutral'} — informational`),
+    rsEdge ? pass('RS vs SPY ≥0.5%', `${rsLabel} ✓ leading edge`) : fail('RS vs SPY ≥0.5%', `${rsLabel} — need ≥0.5% RS edge vs SPY`),
     pass('5m trend', `${input.trend5m}${input.trendAligned ? ' aligned ✓' : ' — pullback entry phase'} — informational`),
     breakout ? pass('Micro range break', 'Latest candle broke the local range') : fail('Micro range break', 'Waiting for micro breakout'),
     input.rvol >= 1.0 ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — breakout needs ≥1.0×`),
@@ -447,8 +447,8 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   const entry = sweptLevel ?? input.price;
   const nearLevel = sweptLevel !== null
     ? (dir === 'BULL'
-        ? input.price <= sweptLevel + input.atr20 * 3.0
-        : input.price >= sweptLevel - input.atr20 * 3.0)
+        ? input.price <= sweptLevel + input.atr20 * 1.5
+        : input.price >= sweptLevel - input.atr20 * 1.5)
     : false;
   const sweepRef = dir === 'BULL' ? (sweepCandle ? sweepCandle.low : entry) : (sweepCandle ? sweepCandle.high : entry);
   const rawStop = dir === 'BULL' ? sweepRef - input.atr20 * STOP_BUFFER_ATR : sweepRef + input.atr20 * STOP_BUFFER_ATR;
@@ -463,8 +463,8 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     const cRange = sweepCandle.high - sweepCandle.low;
     if (cRange < 1e-8) return false;
     return dir === 'BULL'
-      ? (sweepCandle.close - sweepCandle.low) / cRange >= 0.1
-      : (sweepCandle.high - sweepCandle.close) / cRange >= 0.1;
+      ? (sweepCandle.close - sweepCandle.low) / cRange >= 0.35 // 35% wick — genuine stop-run rejection
+      : (sweepCandle.high - sweepCandle.close) / cRange >= 0.35;
   })() : false;
   const tradePlan = directionOk(input) && swept && reclaimed && nearLevel
     ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger)
@@ -482,7 +482,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     swept ? pass('Liquidity swept', sweepDetail) : fail('Liquidity swept', 'No sweep below/above ORB or intraday pivot'),
     sweepWickOk ? pass('Sweep rejection wick', 'Candle closed back inside level') : fail('Sweep rejection wick', 'No rejection — likely continuation'),
     reclaimed ? pass('Level reclaimed', `Close back ${dir === 'BULL' ? 'above' : 'below'} ${sweptLevel ? round(sweptLevel, 2) : '--'}`) : fail('Level reclaimed', 'Waiting for close back through swept level'),
-    nearLevel ? pass('Entry proximity', 'Price within 3×ATR of level') : fail('Entry proximity', 'Price too far — do not chase'),
+    nearLevel ? pass('Entry proximity', 'Price within 1.5×ATR of level ✓') : fail('Entry proximity', 'Price too far from swept level — do not chase'),
     pass('Volume confirmation', `${round(input.rvol, 2)}x${input.rvol >= 0.8 ? ' — confirmed' : ' — low, sweep structure is primary signal'}`),
     ema1mCheck(input),
   ];
@@ -576,8 +576,8 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
     : recentSix.some((c) => c.close < protectedLow);
   const bar2Ok = mssOk && (
     dir === 'BULL'
-      ? input.price > protectedHigh - input.atr20 * 1.0
-      : input.price < protectedLow + input.atr20 * 1.0
+      ? input.price > protectedHigh - input.atr20 * 0.4 // 0.4×ATR — confirms break is holding, not re-entering range
+      : input.price < protectedLow + input.atr20 * 0.4
   );
   const aheadOb = findOrderBlockZone(five, dir === 'BULL' ? 'BEAR' : 'BULL', 1.1, 60);
   const zoneBlocked = aheadOb
@@ -693,7 +693,7 @@ export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
-  const tradePlan = emaRising && touchedEma && reclaimed
+  const tradePlan = emaRising && touchedEma && reclaimed && input.rvol >= 0.8
     ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger)
     : null;
 
@@ -710,12 +710,12 @@ export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
       : fail('Recovery candle', 'Waiting for bar to close back through EMA20'),
     htfTrendCheck(input),
     pass('VWAP context', `${input.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP misaligned — watch'} — informational`),
-    pass('RVOL', `${round(input.rvol, 2)}× ${input.rvol >= 0.8 ? '✓' : '— low vol bounce'} — informational`),
+    input.rvol >= 0.8 ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — EMA bounce in low volume is chop, not trend`),
     ema1mCheck(input),
   ];
 
   return signal('ema20_bounce', input, checklist, tradePlan,
-    'S8 EMA20 bounce: rising EMA20 touched + recovery close. Hard gates: direction, emaRising, touchedEma, reclaimed.');
+    'S8 EMA20 bounce: rising EMA20 touched + recovery close + RVOL≥0.8. Hard gates: direction, emaRising, touchedEma, reclaimed, rvol.');
 }
 
 // ─── S9: Flag Break ───────────────────────────────────────────────────────────
@@ -739,7 +739,7 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
   const flagLow = Math.min(...flagBars.map((c) => c.low));
   const flagRange = flagHigh - flagLow;
 
-  const flagFormed = flagRange < input.atr20 * 1.0;
+  const flagFormed = flagRange < input.atr20 * 0.5; // 0.5×ATR — true compression; 1×ATR was just sideways
   const breakout = dir === 'BULL' ? trigger.close > flagHigh : trigger.close < flagLow;
   const rvolOk = input.rvol >= 1.0;
   const flagMaxVol = Math.max(...flagBars.map((c) => c.volume));
@@ -761,8 +761,8 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
   const checklist = [
     directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
     flagFormed
-      ? pass('Flag formed', `Range ${round(flagRange, 2)} < 1×ATR (${round(input.atr20, 2)}) ✓`)
-      : fail('Flag formed', `Range ${round(flagRange, 2)} too wide — needs < ${round(input.atr20, 2)} (1×ATR)`),
+      ? pass('Flag formed', `Range ${round(flagRange, 2)} < 0.5×ATR (${round(input.atr20 * 0.5, 2)}) ✓`)
+      : fail('Flag formed', `Range ${round(flagRange, 2)} too wide — needs < ${round(input.atr20 * 0.5, 2)} (0.5×ATR)`),
     breakout
       ? pass('Flag break', `Close ${dir === 'BULL' ? 'above flag high' : 'below flag low'} (${round(dir === 'BULL' ? flagHigh : flagLow, 2)}) ✓`)
       : fail('Flag break', `Waiting for close ${dir === 'BULL' ? 'above' : 'below'} ${round(dir === 'BULL' ? flagHigh : flagLow, 2)}`),
