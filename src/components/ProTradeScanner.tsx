@@ -1574,6 +1574,9 @@ export function ProTradeScannerScreen() {
   const [snapshot, setSnapshot] = React.useState<ProTradeSnapshot | null>(null);
   const snapshotRef = React.useRef<ProTradeSnapshot | null>(null);
   React.useEffect(() => { snapshotRef.current = snapshot; }, [snapshot]);
+  const paperTradesRef = React.useRef<PaperTrade[]>(paperTrades);
+  React.useEffect(() => { paperTradesRef.current = paperTrades; }, [paperTrades]);
+  const eodFiredRef = React.useRef<string>('');
   const [brokerSnapshot, setBrokerSnapshot] = React.useState<Trading212Snapshot | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [manualLoading, setManualLoading] = React.useState(false);
@@ -2079,25 +2082,30 @@ export function ProTradeScannerScreen() {
     })();
   }, [snapshot?.rows, orderedSymbols, paperTrades, settings]);
 
-  // EOD flat: at 3:57 PM ET close all open positions before 4:00 PM market close
+  // EOD flat: at 3:57 PM ET close all open positions before 4:00 PM market close.
+  // Stable deps [] so the interval is never reset by hot-set refreshes or paperTrades changes.
+  // Uses refs to read latest state; eodFiredRef prevents double-fire within the window.
   React.useEffect(() => {
     const interval = setInterval(() => {
       const mins = etMinutesNow();
-      if (mins < 15 * 60 + 57 || mins > 16 * 60) return; // fires once in 3:57–4:00 window
-      const openTrades = paperTrades.filter((t) => t.status === 'Open');
+      if (mins < 15 * 60 + 57 || mins > 16 * 60) return;
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      if (eodFiredRef.current === today) return;
+      const openTrades = paperTradesRef.current.filter((t) => t.status === 'Open');
+      eodFiredRef.current = today;
       if (!openTrades.length) return;
       const closedAt = new Date().toISOString();
       setPaperTrades((current) => current.map((t) => {
         if (t.status !== 'Open') return t;
-        const row = snapshot?.rows.find((r) => baseSymbol(r.symbol) === baseSymbol(t.symbol));
+        const row = snapshotRef.current?.rows.find((r) => baseSymbol(r.symbol) === baseSymbol(t.symbol));
         const exitPrice = row?.price ?? t.entry;
         return closePaperTrade(t, exitPrice, 'EOD', closedAt);
       }));
       closeAllPaperPositions().catch(() => { });
       setApprovalMessage(`EOD 3:57 PM — closed ${openTrades.length} open position(s) flat.`);
-    }, 60_000); // check every minute
+    }, 30_000);
     return () => clearInterval(interval);
-  }, [paperTrades, snapshot?.rows]);
+  }, []);
 
   async function approve(row: ProTradeRow) {
     const plan = effectiveTradePlan(row, settings);
