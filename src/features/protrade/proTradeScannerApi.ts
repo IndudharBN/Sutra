@@ -424,14 +424,19 @@ export { clearUniverseCache };
 export async function fetchHotSetSnapshot(symbols: string[], spyChangePct: number): Promise<ProTradeRow[]> {
   if (!symbols.length) return [];
   const metas = await fetchUniverseMeta(symbols);
-  const [bars1m, bars5m, bars15m, bars1h, bars1d, sectorTrends] = await Promise.all([
+  const [bars1m, bars5m, bars15m, bars1h, bars1d, sectorTrends, newsFlags, spy5mBars, spyRegimeData] = await Promise.all([
     fetchBars(symbols, '1m'),
     fetchBars(symbols, '5m'),
     fetchBars(symbols, '15m'),
     fetchBars(symbols, '1h'),
     fetchBars(symbols, '1d'),
     fetchSectorTrends(),
+    fetchNewsFlags(symbols),
+    fetchBars(['SPY'], '5m'),
+    fetchSpyDailyBars(),
   ]);
+  const spyTrend5m = candleTrend(spy5mBars['SPY'] || []);
+  const vixLevel = spyRegimeData.vixBars.length ? last(spyRegimeData.vixBars).close : null;
   const fetchedAt = new Date().toISOString();
   const providerStatus = dataProviderStatus(fetchedAt);
   const metaMap = new Map(metas.map((m) => [m.symbol, m]));
@@ -440,9 +445,8 @@ export async function fetchHotSetSnapshot(symbols: string[], spyChangePct: numbe
     if (!meta) return [];
     const candleSet = buildCandleSet(sym, { '1m': bars1m, '5m': bars5m, '15m': bars15m, '1h': bars1h, '1d': bars1d });
     const earningsDays = getEarningsDays(sym);
-    return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, catalyst, sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m)];
-    });
-
+    return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m)];
+  });
 }
 
 // ── Main fetch ────────────────────────────────────────────────────────────────
