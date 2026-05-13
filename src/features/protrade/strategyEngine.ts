@@ -338,14 +338,16 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
 
 export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const trigger = last(input.candles.five);
-  const recent = input.candles.five.slice(-12);
+  const recent = input.candles.five.slice(-6); // 30-min window — 60-min was catching stale retests from an hour ago
   const tolerance = Math.max(input.atr20 * 0.2, input.price * 0.002);
   const ema9 = last(ema(closes(recent), 9)) || input.vwap;
-  const touchedValue = recent.some((c) => input.direction === 'BULL' 
-    ? (c.low <= input.vwap + tolerance || c.low <= ema9 + tolerance) 
+  const touchedValue = recent.some((c) => input.direction === 'BULL'
+    ? (c.low <= input.vwap + tolerance || c.low <= ema9 + tolerance)
     : (c.high >= input.vwap - tolerance || c.high >= ema9 - tolerance)
   );
   const reclaimed = trigger ? directionalAbove(input, trigger.close, Math.min(input.vwap, ema9)) : false;
+  const rvolOk = input.rvol >= 0.8; // dead-volume reclaims almost never hold
+  const rsLabel = `RS ${round(input.rsVsBenchmark, 4)} vs SPY${input.rsVsBenchmark >= 1.0 ? ' ✓' : ' — lagging'}`;
   const entry = input.price;
   const swing = input.direction === 'BULL' ? Math.min(...recent.map((c) => c.low)) : Math.max(...recent.map((c) => c.high));
   const rawStop = input.direction === 'BULL' ? swing - input.atr20 * STOP_BUFFER_ATR : swing + input.atr20 * STOP_BUFFER_ATR;
@@ -353,18 +355,19 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
-  const tradePlan = directionOk(input) && recent.length >= 4 ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = directionOk(input) && touchedValue && reclaimed && rvolOk ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
-    touchedValue ? pass('Pullback into value', 'Recent candles tested VWAP/EMA zone') : fail('Pullback into value', 'Waiting for pullback'),
+    touchedValue ? pass('Pullback into value', 'Recent 30m tested VWAP/EMA zone') : fail('Pullback into value', 'No fresh test in last 30m'),
     reclaimed ? pass('Reclaim candle', 'Latest candle reclaimed direction') : fail('Reclaim candle', 'Waiting for reclaim'),
     input.trendAligned ? pass('5m trend aligned', `${input.trend5m} ✓ — Phase 3 reclaim confirmed`) : fail('5m trend aligned', `5m still ${input.trend5m} — pullback not complete`),
+    rvolOk ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — dead-volume reclaims fail`),
     pass('VWAP context', `${input.vwapAligned ? 'Above VWAP ✓' : 'Near VWAP'} — informational`),
-    pass('RVOL', `${round(input.rvol, 2)}×${input.rvol >= 0.8 ? ' ✓' : ' — low vol pullback'} — informational`),
+    pass('RS vs SPY', `${rsLabel} — informational`),
     ema1mCheck(input),
   ];
-  return signal('vwap_pullback', input, checklist, tradePlan, 'VWAP pullback: touched value zone + reclaim + 5m re-aligned. Hard gates: direction, touchedValue, reclaimed, trendAligned.');
+  return signal('vwap_pullback', input, checklist, tradePlan, 'VWAP pullback: fresh 30m test + reclaim + 5m re-aligned + RVOL≥0.8. Hard gates: direction, touchedValue, reclaimed, trendAligned, rvol.');
 }
 
 export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
@@ -611,35 +614,37 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
 function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
   const { candles, direction, atr20, price } = input;
   const bar = last(candles.five);
-  if (!bar || !directionOk(input) || candles.five.length < 10) return null;
+  if (!bar || !directionOk(input) || candles.five.length < 13) return null;
 
   // Compute average 5m bar volume from last 20 bars (excluding current)
   const volSample = candles.five.slice(-21, -1);
   const avgVol = volSample.length ? volSample.reduce((s, c) => s + c.volume, 0) / volSample.length : 0;
   if (avgVol <= 0) return null;
-  const volSpike = bar.volume > avgVol * 2.0; // 2× avg = institutional surge
-  const prev3 = candles.five.slice(-4, -1); // 3 bars BEFORE current — prior range
-  if (prev3.length < 3) return null;
+  const volSpike = bar.volume > avgVol * 2.0; // current bar 2× avg = institutional surge
+  const prev6 = candles.five.slice(-7, -1); // 6 bars = 30-min range — 15m (3 bars) was too narrow to be structural
+  if (prev6.length < 6) return null;
 
-  const high15m = Math.max(...prev3.map(b => b.high));
-  const low15m = Math.min(...prev3.map(b => b.low));
-  const isBreakout = direction === 'BULL' ? price > high15m : price < low15m;
-  
+  const high30m = Math.max(...prev6.map(b => b.high));
+  const low30m = Math.min(...prev6.map(b => b.low));
+  const isBreakout = direction === 'BULL' ? price > high30m : price < low30m;
+
   if (volSpike && isBreakout) {
+    const rvolOk = input.rvol >= 1.5; // trailing RVOL confirms broad flow, not just one spike bar
     const rawStop = direction === 'BULL' ? bar.low : bar.high;
     const stop = noiseFlooredStop(direction as 'BULL' | 'BEAR', price, rawStop, atr20, input.vixLevel);
     const risk = Math.abs(price - stop);
     const t1 = direction === 'BULL' ? price + risk * T1_RR : price - risk * T1_RR;
     const t2 = direction === 'BULL' ? price + risk * PREFERRED_RR : price - risk * PREFERRED_RR;
-    const tradePlan = planFromLevelsT1T2(input, price, stop, t1, t2, bar);
+    const tradePlan = rvolOk ? planFromLevelsT1T2(input, price, stop, t1, t2, bar) : null;
     const checklist = [
       pass('Directional bias', direction),
-      volSpike ? pass('Volume surge ≥2×', `${round(bar.volume / avgVol, 1)}× avg ✓`) : fail('Volume surge ≥2×', `${round(bar.volume / avgVol, 1)}× — need ≥2×`),
-      isBreakout ? pass('15m range break', `${direction === 'BULL' ? 'Above' : 'Below'} 15m range`) : fail('15m range break', 'No breakout'),
+      pass('Volume surge ≥2×', `${round(bar.volume / avgVol, 1)}× avg ✓`),
+      pass('30m range break', `${direction === 'BULL' ? 'Above' : 'Below'} 30m range`),
+      rvolOk ? pass('RVOL ≥1.5×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.5×', `${round(input.rvol, 2)}× — single-bar spike without broad flow`),
       input.vwapAligned ? pass('VWAP aligned', `${direction === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓'}`) : fail('VWAP aligned', `${direction === 'BULL' ? 'Below VWAP' : 'Above VWAP'} — surge against session anchor`),
       pass('ADR room', `${!adrExhausted(input.candles.five, input.atr20) ? '< 80% ATR used ✓' : '>80% ATR used — watch sizing'} — informational`),
     ];
-    const sig = signal('s7_volume_surge', input, checklist, tradePlan, 'S7: Institutional 2× volume surge on 15m range break.');
+    const sig = signal('s7_volume_surge', input, checklist, tradePlan, 'S7: Institutional 2× volume surge + RVOL≥1.5 on 30m range break. Hard gates: volSpike, breakout, rvolOk, vwapAligned.');
     // Pre-blackout gap fire: allow S7 to fire at 9:30–9:45 AM on strong gap days (>3% gap + live data)
     if (
       sig.stage === 'locked' &&

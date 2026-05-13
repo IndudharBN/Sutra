@@ -1850,6 +1850,11 @@ export function ProTradeScannerScreen() {
       if (!old || old.status !== t.status || old.outcome !== t.outcome || old.pnl !== t.pnl || old.exitPrice !== t.exitPrice) {
         persistTrade(t);
       }
+      // S7 fires instantly and locks the symbol in firedInstantRef for the session.
+      // Clear it on trade close so a genuine second setup can execute.
+      if (old?.status === 'Open' && t.status === 'Closed') {
+        firedInstantRef.current.delete(baseSymbol(t.symbol));
+      }
     });
     prevTradesRef.current = paperTrades;
   }, [paperTrades]);
