@@ -444,18 +444,29 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
   const plan = effectiveTradePlan(row, settings);
   if (!plan || plan.rr < 1.5) return null;
 
-  // Market Heat Filter: Compare Intraday Tide vs Daily Regime
-  // Conflicting trends = lower probability = 50% reduction in size
+  // Market Heat Filter: regime conviction × intraday tide alignment
+  // BULL/BEAR conflict → 50% cut. SIDEWAYS conflict → 75% cut (tide is the ONLY signal; trading against it = no edge).
+  // Reversal strategies (S4/S5/S6) are exempt — tide opposition IS their setup.
   let heatMult = 1.0;
   let heatNote = '';
-  const tide = row.spyTrend5m; // UP/DOWN/FLAT
+  const tide = row.spyTrend5m;
+  const strategyId = row.primaryStrategy?.strategyId ?? null;
+  const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
 
   if (regimeName === 'BULL' && tide === 'DOWN') {
     heatMult = 0.5;
-    heatNote = ' [Market Heat: Intraday Tide DOWN in BULL regime]';
+    heatNote = ' [Market Heat: Tide DOWN in BULL regime → 50% size]';
   } else if (regimeName === 'BEAR' && tide === 'UP') {
     heatMult = 0.5;
-    heatNote = ' [Market Heat: Intraday Tide UP in BEAR regime]';
+    heatNote = ' [Market Heat: Tide UP in BEAR regime → 50% size]';
+  } else if (regimeName === 'SIDEWAYS' && !isReversal) {
+    if (row.direction === 'BULL' && tide === 'DOWN') {
+      heatMult = 0.25;
+      heatNote = ' [Market Heat: SIDEWAYS + Tide DOWN — no macro backing → 25% size]';
+    } else if (row.direction === 'BEAR' && tide === 'UP') {
+      heatMult = 0.25;
+      heatNote = ' [Market Heat: SIDEWAYS + Tide UP — no macro backing → 25% size]';
+    }
   }
 
   const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop);
@@ -467,7 +478,6 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
   
   const notional = Math.min(budgetCap, riskNotional);
   if (notional <= 0) return null;
-  const strategyId = row.primaryStrategy?.strategyId || null;
   const quantity = Math.max(1, Math.floor(notional / plan.entry));
   return {
     id: `paper-${row.symbol}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
