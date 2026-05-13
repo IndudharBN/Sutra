@@ -377,26 +377,25 @@ export async function buildDynamicUniverse(
       .map(x => x.sym);
 
     cacheSet(UNIVERSE_CACHE_KEY, ranked, UNIVERSE_TTL_MS);
-    cacheSet(UNIVERSE_CACHE_KEY, ranked, UNIVERSE_TTL_MS);
     setPersistentUniverse(ranked); // Lock for the day
     return [...new Set([...ranked, ...pinnedSymbols])];
-    } catch (err) {
+  } catch (err) {
     console.warn('[Universe] Dynamic build failed, using static fallback:', err);
     // Short-cache fallback so it retries sooner than 6h
     const fallback = staticFallback.slice(0, UNIVERSE_TARGET);
     cacheSet(UNIVERSE_CACHE_KEY, fallback, 30 * 60 * 1000);
     return [...new Set([...fallback, ...pinnedSymbols])];
-    }
-    }
+  }
+}
 
-    // Call this to force a fresh universe rebuild on the next scan cycle
-    export function clearUniverseCache(): void {
-    _cache.delete(UNIVERSE_CACHE_KEY);
-    try {
+// Call this to force a fresh universe rebuild on the next scan cycle
+export function clearUniverseCache(): void {
+  _cache.delete(UNIVERSE_CACHE_KEY);
+  try {
     const key = `sutra.universe.${toETDate()}`;
     localStorage.removeItem(key);
-    } catch { /* ignore */ }
-    }
+  } catch { /* ignore */ }
+}
 
 
 // ── News: catalyst quality tier per symbol ────────────────────────────────────
