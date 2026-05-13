@@ -1,5 +1,5 @@
 import { detectFvg } from '../scanner/fvg';
-import { ema } from '../scanner/indicators';
+import { ema, sessionCandles } from '../scanner/indicators';
 import type { Candle } from '../scanner/ohlcv';
 import { closes, last, round } from '../scanner/ohlcv';
 import { findOrderBlockZone, rejectionCandle } from '../scanner/smc';
@@ -786,6 +786,180 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
     'S9 Flag Break: 7-bar compression < 1×ATR + close through flag + RVOL≥1.0 + vol expansion. Hard gates: direction, flagFormed, breakout, rvolOk, volExpansion.');
 }
 
+// ─── 15m Strategy constants ───────────────────────────────────────────────────
+// Wider stop buffer and higher minimum R:R vs 5m strategies.
+// 15m bars carry more ATR per bar so 0.5× is too tight; 1.0× gives real room.
+// R:R minimum 2.0 compensates for the wider stop with a higher reward requirement.
+const STOP_BUFFER_15M = 1.0;
+const MIN_RR_15M = 2.0;
+
+// ─── S10: 15m ORB Retest ─────────────────────────────────────────────────────
+// ORB defined by first 2 session 15m bars (9:30-10:00 AM ET = 30 min).
+// Price breaks the ORB, pulls back to retest the level, then continues.
+// Hard gates: direction, orbFormed, breakout, retest, adrOk, rvolOk, rrOk.
+export function evaluateOrb15mRetest(input: StrategyInput): StrategySignal {
+  if (!directionOk(input)) {
+    return signal('orb15m_retest', input, [fail('Directional bias', 'No BULL/BEAR bias')], null, 'No directional bias.');
+  }
+  const dir = input.direction as 'BULL' | 'BEAR';
+  const fifteen = input.candles.fifteen;
+  if (fifteen.length < 6) {
+    return signal('orb15m_retest', input, [fail('Data', 'Need 6+ 15m bars')], null, 'Insufficient candle data.');
+  }
+  const sessionBars = sessionCandles(fifteen);
+  if (sessionBars.length < 2) {
+    return signal('orb15m_retest', input, [fail('ORB forming', 'Wait for 10:00 AM ET (2nd session 15m bar)')], null, 'ORB not yet formed.');
+  }
+  const orbBars = sessionBars.slice(0, 2);
+  const orbHigh = Math.max(...orbBars.map(c => c.high));
+  const orbLow = Math.min(...orbBars.map(c => c.low));
+  const postOrb = sessionBars.slice(2);
+  const breakout = dir === 'BULL'
+    ? postOrb.some(c => c.close > orbHigh)
+    : postOrb.some(c => c.close < orbLow);
+  const tolerance = Math.max(input.atr20 * 0.2, input.price * 0.002);
+  const recent3 = fifteen.slice(-3);
+  const retest = dir === 'BULL'
+    ? recent3.some(c => c.low <= orbHigh + tolerance && c.close > orbHigh - tolerance)
+    : recent3.some(c => c.high >= orbLow - tolerance && c.close < orbLow + tolerance);
+  const adrOk = input.atrPct >= 3.0;
+  const rvolOk = input.rvol >= 1.0;
+  const entry = input.price;
+  const swing = dir === 'BULL' ? Math.min(...recent3.map(c => c.low)) : Math.max(...recent3.map(c => c.high));
+  const rawStop = dir === 'BULL' ? swing - input.atr20 * STOP_BUFFER_15M : swing + input.atr20 * STOP_BUFFER_15M;
+  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
+  const risk = Math.abs(entry - stop);
+  const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
+  const t2 = structuralT2(input, entry, risk, t1);
+  const rrOk = rr(entry, stop, t2, dir) >= MIN_RR_15M;
+  const tradePlan = breakout && retest && adrOk && rvolOk && rrOk
+    ? planFromLevelsT1T2(input, entry, stop, t1, t2)
+    : null;
+  const checklist = [
+    directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
+    htfTrendCheck(input),
+    sessionBars.length >= 2 ? pass('ORB formed', `H ${round(orbHigh, 2)} / L ${round(orbLow, 2)} (30m)`) : fail('ORB formed', 'Waiting for 10:00 AM ET'),
+    breakout ? pass('ORB breakout', `${dir === 'BULL' ? 'Above' : 'Below'} ORB confirmed`) : fail('ORB breakout', 'No ORB breakout yet'),
+    retest ? pass('ORB retest', `${dir === 'BULL' ? 'Retested ORB high' : 'Retested ORB low'} ✓`) : fail('ORB retest', 'Waiting for pullback to ORB level'),
+    adrOk ? pass('ADR ≥3%', `${round(input.atrPct, 1)}% ✓`) : fail('ADR ≥3%', `${round(input.atrPct, 1)}% — 15m needs ≥3% range`),
+    rvolOk ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — breakout retest needs participation`),
+    rrOk ? pass('R:R ≥2.0', '✓') : fail('R:R ≥2.0', 'Reward insufficient vs 1×ATR stop'),
+    pass('VWAP', `${input.vwapAligned ? (dir === 'BULL' ? 'Above ✓' : 'Below ✓') : 'misaligned'} — informational`),
+  ];
+  return signal('orb15m_retest', input, checklist, tradePlan, 'S10 15m ORB: breakout + retest + ADR≥3% + RVOL≥1.0 + R:R≥2.0. Hard gates: direction, breakout, retest, adrOk, rvolOk, rrOk.');
+}
+
+// ─── S11: 15m VWAP Pullback ───────────────────────────────────────────────────
+// Higher-timeframe version of S2: VWAP test on 15m chart with RS edge required.
+// RS gate is hard (was soft in S2) — 15m VWAP reclaims on lagging stocks fail.
+// Hard gates: direction, touchedVwap, reclaimed, rsOk, rvolOk, rrOk.
+export function evaluateVwap15mPullback(input: StrategyInput): StrategySignal {
+  if (!directionOk(input)) {
+    return signal('vwap15m_pullback', input, [fail('Directional bias', 'No BULL/BEAR bias')], null, 'No directional bias.');
+  }
+  const dir = input.direction as 'BULL' | 'BEAR';
+  const fifteen = input.candles.fifteen;
+  const trigger = last(fifteen);
+  if (fifteen.length < 5 || !trigger) {
+    return signal('vwap15m_pullback', input, [fail('Data', 'Need 5+ 15m bars')], null, 'Insufficient candle data.');
+  }
+  const recent4 = fifteen.slice(-4); // 60-min window on 15m
+  const tolerance = Math.max(input.atr20 * 0.25, input.price * 0.002);
+  const touchedVwap = recent4.some(c => dir === 'BULL'
+    ? c.low <= input.vwap + tolerance
+    : c.high >= input.vwap - tolerance
+  );
+  const reclaimed = dir === 'BULL' ? trigger.close > input.vwap : trigger.close < input.vwap;
+  const rsOk = dir === 'BULL' ? input.rsVsBenchmark >= 1.005 : input.rsVsBenchmark <= 0.995;
+  const rvolOk = input.rvol >= 1.0;
+  const adrOk = input.atrPct >= 3.0;
+  const entry = input.price;
+  const swing = dir === 'BULL' ? Math.min(...recent4.map(c => c.low)) : Math.max(...recent4.map(c => c.high));
+  const rawStop = dir === 'BULL' ? swing - input.atr20 * STOP_BUFFER_15M : swing + input.atr20 * STOP_BUFFER_15M;
+  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
+  const risk = Math.abs(entry - stop);
+  const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
+  const t2 = structuralT2(input, entry, risk, t1);
+  const rrOk = rr(entry, stop, t2, dir) >= MIN_RR_15M;
+  const tradePlan = touchedVwap && reclaimed && rsOk && rvolOk && rrOk
+    ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger)
+    : null;
+  const checklist = [
+    directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
+    htfTrendCheck(input),
+    touchedVwap ? pass('15m VWAP test', 'Within 60m on 15m chart') : fail('15m VWAP test', 'No 15m VWAP test in last 60m'),
+    reclaimed ? pass('VWAP reclaim', `15m close ${dir === 'BULL' ? 'above' : 'below'} VWAP ✓`) : fail('VWAP reclaim', 'Waiting for 15m close back through VWAP'),
+    rsOk ? pass('RS vs SPY ≥0.5%', `${round(input.rsVsBenchmark, 4)} ✓`) : fail('RS vs SPY ≥0.5%', `${round(input.rsVsBenchmark, 4)} — 15m reclaim requires RS edge`),
+    rvolOk ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — low-volume 15m reclaim unreliable`),
+    adrOk ? pass('ADR ≥3%', `${round(input.atrPct, 1)}% ✓`) : fail('ADR ≥3%', `${round(input.atrPct, 1)}% — 15m needs ≥3% range`),
+    rrOk ? pass('R:R ≥2.0', '✓') : fail('R:R ≥2.0', 'Reward insufficient vs 1×ATR stop'),
+    pass('5m trend', `${input.trend5m}${input.trendAligned ? ' aligned ✓' : ''} — informational`),
+  ];
+  return signal('vwap15m_pullback', input, checklist, tradePlan, 'S11 15m VWAP pullback: 60m VWAP test + reclaim + RS≥0.5% + RVOL≥1.0 + R:R≥2.0. Hard gates: direction, touchedVwap, reclaimed, rsOk, rvolOk, rrOk.');
+}
+
+// ─── S12: 15m EMA20 Bounce ───────────────────────────────────────────────────
+// Higher-timeframe version of S8: rising EMA20 on 15m candles touched and reclaimed.
+// Slope lookback 4 bars = 1h on 15m (was 3 bars = 15m on 5m) — genuine trend.
+// Hard gates: direction, emaRising, touchedEma, reclaimed, rvolOk, rrOk.
+export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
+  if (!directionOk(input)) {
+    return signal('ema20_bounce_15m', input, [fail('Directional bias', 'No BULL/BEAR bias')], null, 'No directional bias.');
+  }
+  const dir = input.direction as 'BULL' | 'BEAR';
+  const fifteen = input.candles.fifteen;
+  const trigger = last(fifteen);
+  if (fifteen.length < 22 || !trigger) {
+    return signal('ema20_bounce_15m', input, [fail('Data', 'Need 22+ 15m bars (~5.5h of data)')], null, 'Insufficient 15m data.');
+  }
+  const ema20Series = ema(closes(fifteen), 20);
+  const ema20Now = last(ema20Series);
+  const ema20Prev = ema20Series[ema20Series.length - 5]; // 4-bar slope = 1h on 15m
+  if (!Number.isFinite(ema20Now) || !Number.isFinite(ema20Prev)) {
+    return signal('ema20_bounce_15m', input, [fail('Data', 'EMA20 unavailable')], null, 'EMA20 computation failed.');
+  }
+  const emaRising = dir === 'BULL' ? ema20Now > ema20Prev * 1.0002 : ema20Now < ema20Prev * 0.9998;
+  const recent3 = fifteen.slice(-3); // last 45 min
+  const emaTolerance = input.atr20 * 0.3; // 0.3×ATR — 15m bars have more range per bar
+  const touchedEma = recent3.some(c => dir === 'BULL'
+    ? c.low <= ema20Now + emaTolerance
+    : c.high >= ema20Now - emaTolerance
+  );
+  const reclaimed = dir === 'BULL' ? trigger.close > ema20Now : trigger.close < ema20Now;
+  const rvolOk = input.rvol >= 1.0;
+  const adrOk = input.atrPct >= 3.0;
+  const entry = input.price;
+  const rawStop = dir === 'BULL'
+    ? ema20Now - input.atr20 * STOP_BUFFER_15M
+    : ema20Now + input.atr20 * STOP_BUFFER_15M;
+  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
+  const risk = Math.abs(entry - stop);
+  const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
+  const t2 = structuralT2(input, entry, risk, t1);
+  const rrOk = rr(entry, stop, t2, dir) >= MIN_RR_15M;
+  const tradePlan = emaRising && touchedEma && reclaimed && rvolOk && rrOk
+    ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger)
+    : null;
+  const checklist = [
+    directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
+    emaRising
+      ? pass('15m EMA20 slope', `${dir === 'BULL' ? 'Rising' : 'Falling'} over 1h ✓`)
+      : fail('15m EMA20 slope', `Flat/${dir === 'BULL' ? 'falling' : 'rising'} — mean-reversion risk`),
+    touchedEma
+      ? pass('15m EMA20 touch', `Tested EMA20 (${round(ema20Now, 2)}) within 45m`)
+      : fail('15m EMA20 touch', `No 15m touch of EMA20 (${round(ema20Now, 2)}) in last 45m`),
+    reclaimed
+      ? pass('Recovery candle', `15m close ${dir === 'BULL' ? 'above' : 'below'} EMA20 ✓`)
+      : fail('Recovery candle', 'Waiting for 15m close back through EMA20'),
+    rvolOk ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — 15m bounce needs volume`),
+    adrOk ? pass('ADR ≥3%', `${round(input.atrPct, 1)}% ✓`) : fail('ADR ≥3%', `${round(input.atrPct, 1)}% — 15m needs ≥3% range`),
+    rrOk ? pass('R:R ≥2.0', '✓') : fail('R:R ≥2.0', 'Reward insufficient vs 1×ATR stop'),
+    htfTrendCheck(input),
+    pass('VWAP', `${input.vwapAligned ? (dir === 'BULL' ? 'Above ✓' : 'Below ✓') : 'misaligned'} — informational`),
+  ];
+  return signal('ema20_bounce_15m', input, checklist, tradePlan, 'S12 15m EMA20 bounce: 1h rising slope + 45m touch + reclaim + RVOL≥1.0 + R:R≥2.0. Hard gates: direction, emaRising, touchedEma, reclaimed, rvolOk, rrOk.');
+}
+
 const SYMBOL_STRATEGY_EXCLUSIONS: Partial<Record<string, StrategyId[]>> = {
   TSLA: ['vwap_pullback', 'rs_continuation'],
 };
@@ -802,6 +976,10 @@ export function evaluateStrategies(input: StrategyInput): StrategySignal[] {
     checkS7VolumeSurge(input),
     evaluateEma20Bounce(input),
     evaluateFlagBreak(input),
+    // 15m timeframe variants — independent gates, wider stops, R:R≥2.0
+    evaluateOrb15mRetest(input),
+    evaluateVwap15mPullback(input),
+    evaluateEma20Bounce15m(input),
   ].filter((s): s is StrategySignal => s !== null);
 
   return signals
