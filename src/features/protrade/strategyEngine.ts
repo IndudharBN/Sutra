@@ -129,7 +129,7 @@ function sessionGate(): 'open' | 'blackout' | 'closed' {
 
 function stageFromChecklist(checklist: StrategyChecklistItem[], tradePlan: TradePlan | null, input: StrategyInput, manualOnly = false): WorkflowStage {
   const passed = checklist.filter((item) => item.passed).length;
-  if (passed < 2) return 'raw_candidates';
+  if (passed < 2) return 'screened_universe';
   if (passed < checklist.length) return 'forming';
   if (!tradePlan) return 'confirmed';
   if (tradePlan.rr < MIN_RR) return 'confirmed';
