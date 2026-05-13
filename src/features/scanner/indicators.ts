@@ -81,6 +81,51 @@ export function vwapSlope(candles: Candle[], lookback = 3, period = 20) {
   return (current - prev) / prev;
 }
 
+// ── Session-anchored VWAP (institutional standard) ───────────────────────────
+// Rolling VWAP(20) drifts throughout the day and loses session context.
+// These functions anchor to 9:30 AM ET open — the level institutions trade against.
+
+// Filter candles to today's regular session (9:30 AM ET onwards only)
+export function sessionCandles(candles: Candle[]): Candle[] {
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  return candles.filter(c => {
+    const d = new Date(c.time);
+    if (d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) !== todayET) return false;
+    const etLocal = new Date(d.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    return etLocal.getHours() * 60 + etLocal.getMinutes() >= 9 * 60 + 30;
+  });
+}
+
+// Cumulative session VWAP from 9:30 AM — single anchor for the whole day
+export function sessionVwap(candles: Candle[]): number {
+  const session = sessionCandles(candles);
+  if (!session.length) return last(candles)?.close ?? 0;
+  let cumPV = 0, cumVol = 0;
+  for (const c of session) {
+    cumPV += ((c.high + c.low + c.close) / 3) * (c.volume || 0);
+    cumVol += c.volume || 0;
+  }
+  return cumVol > 0 ? cumPV / cumVol : last(session)!.close;
+}
+
+// Slope of cumulative session VWAP over last N session bars
+// Measures whether institutional average cost is rising or falling
+export function sessionVwapSlope(candles: Candle[], lookback = 3): number {
+  const session = sessionCandles(candles);
+  if (session.length < lookback + 1) return 0;
+  // Build cumulative VWAP series to measure slope at each bar
+  const points: number[] = [];
+  let cumPV = 0, cumVol = 0;
+  for (const c of session) {
+    cumPV += ((c.high + c.low + c.close) / 3) * (c.volume || 0);
+    cumVol += c.volume || 0;
+    points.push(cumVol > 0 ? cumPV / cumVol : c.close);
+  }
+  const current = points[points.length - 1];
+  const prev = points[points.length - 1 - lookback];
+  return prev > 0 ? (current - prev) / prev : 0;
+}
+
 export function volRatio(candles: Candle[], period = 20) {
   if (candles.length < period + 1) return null;
   const vols = volumes(candles);

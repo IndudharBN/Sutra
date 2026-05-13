@@ -2,7 +2,7 @@ import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNe
 import { classifyMarketRegime } from '../marketRegime/marketRegimeLogic';
 import type { MarketRegime } from '../marketRegime/marketRegimeTypes';
 import type { SymbolMeta } from '../../lib/alpacaClient';
-import { ema, vwapLatest, vwapSeries, vwapSlope } from '../scanner/indicators';
+import { ema, vwapLatest, sessionCandles, sessionVwap, sessionVwapSlope } from '../scanner/indicators';
 import type { Candle, CandleSet } from '../scanner/ohlcv';
 import { closes, last, round } from '../scanner/ohlcv';
 import { evaluateStrategies } from './strategyEngine';
@@ -86,23 +86,70 @@ export interface ProTradeSnapshot {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function candleTrend(candles: Candle[]) {
-  if (candles.length < 25) return 'FLAT' as const;
-  const values = closes(candles);
-  const e9 = last(ema(values, 9));
-  const e21 = last(ema(values, 21));
+  if (candles.length < 2) return 'FLAT' as const;
 
-  // Lead Indicator Logic: Use VWAP Slope + Price Position
-  const vpx = vwapLatest(candles, 20);
-  const price = last(values);
-  const slope = vwapSlope(candles, 3, 20);
+  // Current ET time — determines which phase of the session we're in
+  const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const etMins = etNow.getHours() * 60 + etNow.getMinutes();
 
-  // Bullish Lead: EMA still bearish but price > VWAP and VWAP turning up
-  if (e9 < e21 && price > vpx && slope > 0.0001) return 'UP' as const;
-  // Bearish Lead: EMA still bullish but price < VWAP and VWAP turning down
-  if (e9 > e21 && price < vpx && slope < -0.0001) return 'DOWN' as const;
+  // ── Phase 1: 9:30–10:30 AM ET ───────────────────────────────────────────────
+  // Session VWAP has <12 candles — too sparse to be a reliable anchor.
+  // EMA9/21 on 200 bars carries yesterday's trend into today's open.
+  // Instead: use Gap direction + ORB break — the two signals institutions
+  // actually trade off in the opening hour.
+  if (etMins < 10 * 60 + 30) {
+    const session = sessionCandles(candles);
+    if (session.length < 2) return 'FLAT' as const;
 
-  if (e9 > e21) return 'UP' as const;
-  if (e9 < e21) return 'DOWN' as const;
+    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const todayOpen = session[0].open;
+
+    // Yesterday's last close: walk backwards to find most recent non-today bar
+    let prevClose = todayOpen;
+    for (let i = candles.length - 1; i >= 0; i--) {
+      const d = new Date(candles[i].time);
+      if (d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) !== todayET) {
+        prevClose = candles[i].close;
+        break;
+      }
+    }
+
+    const gapPct = prevClose > 0 ? (todayOpen - prevClose) / prevClose : 0;
+    const currentPrice = session[session.length - 1].close;
+
+    // ORB: high/low of first 6 5m candles (first 30 minutes)
+    // Takes priority over gap bias once the range is established
+    if (session.length >= 6) {
+      const orb = session.slice(0, 6);
+      const orbHigh = Math.max(...orb.map(c => c.high));
+      const orbLow = Math.min(...orb.map(c => c.low));
+      if (currentPrice > orbHigh) return 'UP' as const;
+      if (currentPrice < orbLow) return 'DOWN' as const;
+    }
+
+    // Inside ORB (or pre-ORB < 30 min): gap direction as directional bias
+    if (gapPct > 0.003) return 'UP' as const;   // gap up > 0.3%
+    if (gapPct < -0.003) return 'DOWN' as const; // gap down > 0.3%
+    return 'FLAT' as const;
+  }
+
+  // ── Phase 2: 10:30 AM+ ET ────────────────────────────────────────────────────
+  // ≥12 session candles — session VWAP is now the correct institutional anchor.
+  // EMA20 on today's bars only: replaces EMA9/21 on 200 bars (no yesterday bleed-in).
+  const svwap = sessionVwap(candles);
+  const sSlope = sessionVwapSlope(candles, 3);
+  const todayCloses = sessionCandles(candles).map(c => c.close);
+  const e20 = todayCloses.length >= 2 ? last(ema(todayCloses, 20)) : null;
+  const currentPrice = last(closes(candles));
+
+  // Lead signal: session VWAP slope turning — call direction before full EMA20 confirmation
+  if (currentPrice > svwap && sSlope > 0.0001) return 'UP' as const;
+  if (currentPrice < svwap && sSlope < -0.0001) return 'DOWN' as const;
+
+  // Standard: session VWAP and EMA20 both agree
+  if (currentPrice > svwap && (e20 === null || currentPrice > e20)) return 'UP' as const;
+  if (currentPrice < svwap && (e20 === null || currentPrice < e20)) return 'DOWN' as const;
+
   return 'FLAT' as const;
 }
 
