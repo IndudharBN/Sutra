@@ -319,7 +319,7 @@ function buildRowFromAlpaca(
   const strategySignals = allSignals.filter((s) => !disabledStrategies.includes(s.strategyId));
 
   const primaryStrategy = strategySignals[0] || null;
-  const workflowStage: WorkflowStage = primaryStrategy?.stage ?? 'raw_candidates';
+  const workflowStage: WorkflowStage = primaryStrategy?.stage ?? 'screened_universe';
 
   return {
     symbol,

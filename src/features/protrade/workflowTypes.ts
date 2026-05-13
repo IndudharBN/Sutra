@@ -1,7 +1,7 @@
 import type { Candle } from '../scanner/ohlcv';
 
 export type WorkflowStage =
-  | 'raw_candidates'
+  | 'screened_universe'
   | 'pro_watchlist'
   | 'forming'
   | 'confirmed'
@@ -112,7 +112,7 @@ export interface StrategyInput {
 }
 
 export const WORKFLOW_STAGE_LABELS: Record<WorkflowStage, string> = {
-  raw_candidates: 'Raw Candidates',
+  screened_universe: 'Screened Universe',
   pro_watchlist: 'Pro Watchlist',
   forming: 'Trading Setup Forming',
   confirmed: 'Confirmed',
@@ -146,7 +146,7 @@ export const STRATEGY_CODES: Record<StrategyId, string> = {
 };
 
 export const WORKFLOW_STAGE_ORDER: WorkflowStage[] = [
-  'raw_candidates',
+  'screened_universe',
   'forming',
   'confirmed',
   'locked',

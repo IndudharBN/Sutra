@@ -123,7 +123,7 @@ interface PaperTrade {
 }
 
 const STAGE_TONES: Record<WorkflowStage, string> = {
-  raw_candidates: 'border-slate-600/40 bg-slate-800/30 text-slate-300',
+  screened_universe: 'border-slate-600/40 bg-slate-800/30 text-slate-300',
   pro_watchlist: 'border-emerald-500/25 bg-emerald-500/5 text-emerald-300',
   forming: 'border-amber-500/25 bg-amber-500/5 text-amber-300',
   confirmed: 'border-cyan-500/25 bg-cyan-500/5 text-cyan-300',
@@ -267,7 +267,7 @@ function withOrderedStage(rows: ProTradeRow[], orderedSymbols: Set<string>, pape
 }
 
 function countRows(rows: ProTradeRow[], stage: WorkflowStage, rawRows: ProTradeRow[]) {
-  if (stage === 'raw_candidates') return rawRows.length;
+  if (stage === 'screened_universe') return rawRows.length;
   if (stage === 'pro_watchlist') return rows.filter((row) => row.basePass).length;
   return rows.filter((row) => row.workflowStage === stage).length;
 }
@@ -1719,14 +1719,14 @@ export function ProTradeScannerScreen() {
   const rows = React.useMemo(() => withOrderedStage(snapshot?.rows || [], orderedSymbols, paperTrades), [snapshot?.rows, orderedSymbols, paperTrades]);
   const rawRows = snapshot?.rawRows || [];
   const proWatchlistRows = rows.filter((row) => row.basePass);
-  const stageRows = activeStage === 'raw_candidates'
+  const stageRows = activeStage === 'screened_universe'
     ? rawRows
     : activeStage === 'pro_watchlist'
       ? proWatchlistRows
       : rows.filter((row) => row.workflowStage === activeStage);
   const strategyFilteredRows = activeStrategy === 'all'
     ? stageRows
-    : rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === activeStrategy && signal.stage !== 'raw_candidates'));
+    : rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === activeStrategy && signal.stage !== 'screened_universe'));
   const watchlistSet = React.useMemo(() => new Set(watchlist.symbols), [watchlist.symbols]);
   // When watchlist filter is active, show ALL stages for watchlist stocks (ignore stage filter)
   const filteredRows = watchlistOnly && watchlist.symbols.length > 0
@@ -1984,11 +1984,11 @@ export function ProTradeScannerScreen() {
 
     // Phase 1b — prune: window expired, symbol gone, or setup fundamentally failed.
     // Keep 'locked' (transient: stale data / blackout) and 'confirmed' (minor R:R dip) — they recover.
-    // Only drop 'raw_candidates' or 'forming' — those mean the setup checklist regressed.
+    // Only drop 'screened_universe' or 'forming' — those mean the setup checklist regressed.
     for (const [sym, entry] of pending) {
       const currentRow = snapshot.rows.find((r) => baseSymbol(r.symbol) === sym);
       const stage = currentRow?.workflowStage;
-      const setupRegressed = !currentRow || stage === 'raw_candidates' || stage === 'forming';
+      const setupRegressed = !currentRow || stage === 'screened_universe' || stage === 'forming';
       if (now - entry.addedAt > CONFIRM_WINDOW_MS || setupRegressed) {
         pending.delete(sym);
       }
@@ -2469,7 +2469,7 @@ export function ProTradeScannerScreen() {
               <StrategyCard
                 key={strategy}
                 strategy={strategy}
-                count={rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === strategy && signal.stage !== 'raw_candidates')).length}
+                count={rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === strategy && signal.stage !== 'screened_universe')).length}
                 active={activeStrategy === strategy}
                 onClick={() => setActiveStrategy((current) => current === strategy ? 'all' : strategy)}
               />
