@@ -123,7 +123,7 @@ interface PaperTrade {
 }
 
 const STAGE_TONES: Record<WorkflowStage, string> = {
-  raw_candidates: 'border-slate-600/40 bg-slate-800/30 text-slate-300',
+  screened_universe: 'border-slate-600/40 bg-slate-800/30 text-slate-300',
   pro_watchlist: 'border-emerald-500/25 bg-emerald-500/5 text-emerald-300',
   forming: 'border-amber-500/25 bg-amber-500/5 text-amber-300',
   confirmed: 'border-cyan-500/25 bg-cyan-500/5 text-cyan-300',
@@ -267,7 +267,7 @@ function withOrderedStage(rows: ProTradeRow[], orderedSymbols: Set<string>, pape
 }
 
 function countRows(rows: ProTradeRow[], stage: WorkflowStage, rawRows: ProTradeRow[]) {
-  if (stage === 'raw_candidates') return rawRows.length;
+  if (stage === 'screened_universe') return rawRows.length;
   if (stage === 'pro_watchlist') return rows.filter((row) => row.basePass).length;
   return rows.filter((row) => row.workflowStage === stage).length;
 }
@@ -1563,10 +1563,14 @@ export function ProTradeScannerScreen() {
   const [viewMode, setViewMode] = React.useState<'premarket' | 'workflow'>(() => isPremarketWindow() ? 'premarket' : 'workflow');
   const [cbTick, setCbTick] = React.useState(0);
 
-  async function load(manual = false) {
+  async function load(forceRefresh = false) {
     try {
-      if (manual) setManualLoading(true);
-      else setLoading(true);
+      if (forceRefresh) {
+        setManualLoading(true);
+        clearUniverseCache();
+      } else {
+        setLoading(true);
+      }
       setError('');
       const [nextSnapshot, nextBroker, acct] = await Promise.all([
         fetchProTradeScannerSnapshot(watchlist.symbols),
@@ -1687,14 +1691,14 @@ export function ProTradeScannerScreen() {
   const rows = React.useMemo(() => withOrderedStage(snapshot?.rows || [], orderedSymbols, paperTrades), [snapshot?.rows, orderedSymbols, paperTrades]);
   const rawRows = snapshot?.rawRows || [];
   const proWatchlistRows = rows.filter((row) => row.basePass);
-  const stageRows = activeStage === 'raw_candidates'
+  const stageRows = activeStage === 'screened_universe'
     ? rawRows
     : activeStage === 'pro_watchlist'
       ? proWatchlistRows
       : rows.filter((row) => row.workflowStage === activeStage);
   const strategyFilteredRows = activeStrategy === 'all'
     ? stageRows
-    : rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === activeStrategy && signal.stage !== 'raw_candidates'));
+    : rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === activeStrategy && signal.stage !== 'screened_universe'));
   const watchlistSet = React.useMemo(() => new Set(watchlist.symbols), [watchlist.symbols]);
   // When watchlist filter is active, show ALL stages for watchlist stocks (ignore stage filter)
   const filteredRows = watchlistOnly && watchlist.symbols.length > 0
@@ -1726,13 +1730,15 @@ export function ProTradeScannerScreen() {
   // 8:30 AM ET universe refresh — clears the 6h screener cache once per day at pre-market open
   // so the universe reflects current RVOL/gap data before the watchlist locks at 8:30 AM.
   React.useEffect(() => {
-    let firedDate = '';
     const id = setInterval(() => {
       const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-      if (firedDate === today) return;
+      const lastFired = sessionStorage.getItem('sutra.universe_cleared_date');
+      if (lastFired === today) return;
+
       const mins = etMinutesNow();
       if (mins < 8 * 60 + 30) return;
-      firedDate = today;
+
+      sessionStorage.setItem('sutra.universe_cleared_date', today);
       clearUniverseCache();
       const t = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: true });
       setLastUniverseScanTime(t);
@@ -1952,11 +1958,11 @@ export function ProTradeScannerScreen() {
 
     // Phase 1b — prune: window expired, symbol gone, or setup fundamentally failed.
     // Keep 'locked' (transient: stale data / blackout) and 'confirmed' (minor R:R dip) — they recover.
-    // Only drop 'raw_candidates' or 'forming' — those mean the setup checklist regressed.
+    // Only drop 'screened_universe' or 'forming' — those mean the setup checklist regressed.
     for (const [sym, entry] of pending) {
       const currentRow = snapshot.rows.find((r) => baseSymbol(r.symbol) === sym);
       const stage = currentRow?.workflowStage;
-      const setupRegressed = !currentRow || stage === 'raw_candidates' || stage === 'forming';
+      const setupRegressed = !currentRow || stage === 'screened_universe' || stage === 'forming';
       if (now - entry.addedAt > CONFIRM_WINDOW_MS || setupRegressed) {
         pending.delete(sym);
       }
@@ -2309,7 +2315,7 @@ export function ProTradeScannerScreen() {
         <div>
           <h2 className="text-xl font-bold text-white tracking-tight">ProTrade Workflow</h2>
           <p className="mt-2 text-xs text-slate-300 max-w-4xl leading-relaxed">
-            Tickers move from raw candidates → forming → confirmed → trade ready → ordered. Data from Alpaca IEX (live). Paper trades auto-open when a setup reaches Trade Ready and are mirrored to your Alpaca paper account.
+            Tickers move from screened universe → forming → confirmed → trade ready → ordered. Data from Alpaca IEX (live). Paper trades auto-open when a setup reaches Trade Ready and are mirrored to your Alpaca paper account.
           </p>
           <div className="mt-3 flex flex-wrap gap-2 text-[10px] uppercase tracking-widest font-black">
             <span className={`px-3 py-1 rounded-full border ${stale ? 'border-amber-500/30 text-amber-300 bg-amber-500/10' : 'border-emerald-500/20 text-emerald-300 bg-emerald-500/10'}`}>
@@ -2319,7 +2325,7 @@ export function ProTradeScannerScreen() {
               Provider: Alpaca IEX
             </span>
             <span className="px-3 py-1 rounded-full border border-violet-500/20 text-violet-300 bg-violet-500/10">
-              Raw candidates: {lastUniverseScanTime ? `scanned ${lastUniverseScanTime} ET` : 'pending 8:30 AM ET'}
+              Screened Universe: {lastUniverseScanTime ? `scanned ${lastUniverseScanTime} ET` : 'pending 8:30 AM ET'}
             </span>
             {watchlist.symbols.length > 0 && (
               <span className="px-3 py-1 rounded-full border border-amber-500/30 text-amber-300 bg-amber-500/10">
@@ -2437,7 +2443,7 @@ export function ProTradeScannerScreen() {
               <StrategyCard
                 key={strategy}
                 strategy={strategy}
-                count={rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === strategy && signal.stage !== 'raw_candidates')).length}
+                count={rows.filter((row) => row.strategySignals.some((signal) => signal.strategyId === strategy && signal.stage !== 'screened_universe')).length}
                 active={activeStrategy === strategy}
                 onClick={() => setActiveStrategy((current) => current === strategy ? 'all' : strategy)}
               />
@@ -2507,7 +2513,15 @@ export function ProTradeScannerScreen() {
 }
 function isTideBlocked(row: ProTradeRow, sig?: StrategySignal): boolean {
   if (!sig || !row.spyTrend5m) return false;
+
+  const strategyId = sig.strategyId;
+  // Reversal/Structure strategies are allowed to trade against the 5m tide
+  const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
+  if (isReversal) return false;
+
+  // Trend-following strategies must align with the SPY Tide
   if (row.spyTrend5m === 'BEAR' && sig.direction === 'BULL') return true;
   if (row.spyTrend5m === 'BULL' && sig.direction === 'BEAR') return true;
+
   return false;
 }
