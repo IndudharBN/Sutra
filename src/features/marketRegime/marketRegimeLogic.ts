@@ -3,7 +3,7 @@ import type { MarketRegime, MarketRegimeName } from './marketRegimeTypes';
 export const REGIME_MULT: Record<MarketRegimeName, number> = {
   BULL: 1,
   SIDEWAYS: 0.75,
-  BEAR: 0.5,
+  BEAR: 1.0,
 };
 
 export const REGIME_COLOR: Record<MarketRegimeName, string> = {

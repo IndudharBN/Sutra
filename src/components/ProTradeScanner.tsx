@@ -461,11 +461,11 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
     heatNote = ' [Market Heat: Tide UP in BEAR regime → 50% size]';
   } else if (regimeName === 'SIDEWAYS' && !isReversal) {
     if (row.direction === 'BULL' && tide === 'DOWN') {
-      heatMult = 0.25;
-      heatNote = ' [Market Heat: SIDEWAYS + Tide DOWN — no macro backing → 25% size]';
+      heatMult = 0.5;
+      heatNote = ' [Market Heat: SIDEWAYS + Tide DOWN — no macro backing → 50% size]';
     } else if (row.direction === 'BEAR' && tide === 'UP') {
-      heatMult = 0.25;
-      heatNote = ' [Market Heat: SIDEWAYS + Tide UP — no macro backing → 25% size]';
+      heatMult = 0.5;
+      heatNote = ' [Market Heat: SIDEWAYS + Tide UP — no macro backing → 50% size]';
     }
   }
 
