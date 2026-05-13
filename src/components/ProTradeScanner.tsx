@@ -1574,9 +1574,6 @@ export function ProTradeScannerScreen() {
   const [snapshot, setSnapshot] = React.useState<ProTradeSnapshot | null>(null);
   const snapshotRef = React.useRef<ProTradeSnapshot | null>(null);
   React.useEffect(() => { snapshotRef.current = snapshot; }, [snapshot]);
-  const paperTradesRef = React.useRef<PaperTrade[]>(paperTrades);
-  React.useEffect(() => { paperTradesRef.current = paperTrades; }, [paperTrades]);
-  const eodFiredRef = React.useRef<string>('');
   const [brokerSnapshot, setBrokerSnapshot] = React.useState<Trading212Snapshot | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [manualLoading, setManualLoading] = React.useState(false);
@@ -1589,6 +1586,9 @@ export function ProTradeScannerScreen() {
   const [chartRow, setChartRow] = React.useState<ProTradeRow | null>(null);
   const [chartInterval, setChartInterval] = React.useState<TradingViewInterval>('5');
   const [paperTrades, setPaperTrades] = React.useState<PaperTrade[]>(() => loadPaperTrades());
+  const paperTradesRef = React.useRef<PaperTrade[]>(paperTrades);
+  React.useEffect(() => { paperTradesRef.current = paperTrades; }, [paperTrades]);
+  const eodFiredRef = React.useRef<string>('');
   const [monitorDate, setMonitorDate] = React.useState<string>(() => todayET());
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [settings, setSettings] = React.useState<ProTradeSettings>(() => loadProTradeSettings());
