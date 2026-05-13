@@ -2213,7 +2213,10 @@ export function ProTradeScannerScreen() {
     if (closed.pnl !== undefined) {
       recordTradeResult(trade.strategyName, closed.pnl, accountBalance);
     }
-    closePaperPosition(trade.symbol).catch(() => { });
+    closePaperPosition(trade.symbol).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      setApprovalMessage(`Alpaca close failed for ${trade.symbol}: ${msg}`);
+    });
   }
 
   return (

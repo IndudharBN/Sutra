@@ -106,8 +106,22 @@ export async function closeAllPaperPositions(): Promise<void> {
   await paperFetch('/v2/positions', { method: 'DELETE' }).catch(() => {});
 }
 
-// Close a single position by symbol (manual close)
+// Close a single position by symbol (manual close).
+// Must cancel open bracket order legs first — Alpaca rejects position close
+// while stop-loss and take-profit legs are still pending.
 export async function closePaperPosition(symbol: string): Promise<void> {
+  // Step 1: fetch open orders for this symbol and cancel each bracket leg
+  try {
+    const orders = await paperFetch<{ id: string; status: string }[]>(
+      `/v2/orders?symbols=${encodeURIComponent(symbol)}&status=open&limit=20`,
+    );
+    await Promise.allSettled(
+      orders.map((o) => paperFetch(`/v2/orders/${o.id}`, { method: 'DELETE' })),
+    );
+  } catch {
+    // best-effort — proceed to position close even if order cancel fails
+  }
+  // Step 2: close the position at market
   await paperFetch(`/v2/positions/${symbol}`, { method: 'DELETE' }).catch(() => {});
 }
 
