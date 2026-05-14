@@ -243,7 +243,7 @@ function todayOpeningRange(candles: Candle[]): ReturnType<typeof openingRange> {
 function recentRetest(input: StrategyInput, level: number) {
   const recent = input.candles.five.slice(-6); // 30-min window — institutional retests can take 25-30m
   if (!recent.length) return false;
-  const tolerance = Math.max(input.atr20 * 0.15, input.price * 0.0015); // 15% ATR — real retests rarely touch to the penny
+  const tolerance = Math.max(input.atr20 * 0.08, input.price * 0.0015); // 8% ATR — genuine touch required, not just proximity
   return input.direction === 'BULL'
     ? recent.some((c) => c.low <= level + tolerance && c.close >= level)
     : recent.some((c) => c.high >= level - tolerance && c.close <= level);
@@ -315,7 +315,7 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const preferredTarget = input.direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
   const t2 = input.direction === 'BULL' ? Math.max(measuredMove, preferredTarget) : Math.min(measuredMove, preferredTarget);
-  const tradePlan = directionOk(input) && range && confirmedBreak ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = directionOk(input) && range && confirmedBreak && retest ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
