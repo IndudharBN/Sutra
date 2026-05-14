@@ -1724,6 +1724,16 @@ export function ProTradeScannerScreen() {
 
   const orderedSymbols = React.useMemo(() => buildOrderedSymbols(brokerSnapshot), [brokerSnapshot]);
   const rows = React.useMemo(() => withOrderedStage(snapshot?.rows || [], orderedSymbols, paperTrades), [snapshot?.rows, orderedSymbols, paperTrades]);
+  // Symbols blocked from re-entry today because they stopped out. Key = "SYMBOL|DIRECTION".
+  // T1 Profit, Target, EOD, Manual exits do NOT block — only a stop invalidates the direction thesis.
+  const stoppedTodaySet = React.useMemo(() => {
+    const today = todayET();
+    return new Set(
+      paperTrades
+        .filter((t) => tradeDateET(t) === today && t.status === 'Closed' && t.outcome === 'Stop')
+        .map((t) => `${baseSymbol(t.symbol)}|${t.direction}`)
+    );
+  }, [paperTrades]);
   const rawRows = snapshot?.rawRows || [];
   const proWatchlistRows = rows.filter((row) => row.basePass);
   const stageRows = activeStage === 'screened_universe'
@@ -1965,6 +1975,7 @@ export function ProTradeScannerScreen() {
       if (row.earningsDays !== null && Math.abs(row.earningsDays) <= 1) return;
       if (!checkStrategyCircuitBreaker(row.primaryStrategy?.strategyId || row.symbol).ok) return;
       if (isTideBlocked(row, snapshot.spyTrend5m, row.primaryStrategy ?? undefined)) return;
+      if (stoppedTodaySet.has(`${sym}|${row.direction}`)) return;
 
       const level = row.tradePlan?.entry;
       if (!level) return;
@@ -2085,7 +2096,7 @@ export function ProTradeScannerScreen() {
         }).catch((err: unknown) => console.warn(`Alpaca order skipped for ${trade.symbol}:`, err instanceof Error ? err.message : err));
       });
     })();
-  }, [snapshot?.rows, orderedSymbols, paperTrades, settings]);
+  }, [snapshot?.rows, orderedSymbols, paperTrades, settings, stoppedTodaySet]);
 
   // EOD flat: at 3:57 PM ET close all open positions before 4:00 PM market close.
   // Stable deps [] so the interval is never reset by hot-set refreshes or paperTrades changes.

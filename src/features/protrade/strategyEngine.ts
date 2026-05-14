@@ -347,7 +347,8 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   );
   const reclaimed = trigger ? directionalAbove(input, trigger.close, Math.min(input.vwap, ema9)) : false;
   const rvolOk = input.rvol >= 0.8; // dead-volume reclaims almost never hold
-  const rsLabel = `RS ${round(input.rsVsBenchmark, 4)} vs SPY${input.rsVsBenchmark >= 1.0 ? ' ✓' : ' — lagging'}`;
+  const rsOk = input.rsVsBenchmark >= 1.0; // stock must lead or match SPY — laggards VWAP reclaim on a strong SPY day, then fail
+  const rsLabel = `RS ${round(input.rsVsBenchmark, 4)} vs SPY${rsOk ? ' ✓' : ' — lagging'}`;
   const entry = input.price;
   const swing = input.direction === 'BULL' ? Math.min(...recent.map((c) => c.low)) : Math.max(...recent.map((c) => c.high));
   const rawStop = input.direction === 'BULL' ? swing - input.atr20 * STOP_BUFFER_ATR : swing + input.atr20 * STOP_BUFFER_ATR;
@@ -355,7 +356,7 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
-  const tradePlan = directionOk(input) && touchedValue && reclaimed && rvolOk ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = directionOk(input) && touchedValue && reclaimed && rvolOk && rsOk ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
@@ -364,10 +365,10 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
     input.trendAligned ? pass('5m trend aligned', `${input.trend5m} ✓ — Phase 3 reclaim confirmed`) : fail('5m trend aligned', `5m still ${input.trend5m} — pullback not complete`),
     rvolOk ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — dead-volume reclaims fail`),
     pass('VWAP context', `${input.vwapAligned ? 'Above VWAP ✓' : 'Near VWAP'} — informational`),
-    pass('RS vs SPY', `${rsLabel} — informational`),
+    rsOk ? pass('RS vs SPY ≥1.0×', rsLabel) : fail('RS vs SPY ≥1.0×', `${rsLabel} — laggard VWAP reclaims fail on strong SPY days`),
     ema1mCheck(input),
   ];
-  return signal('vwap_pullback', input, checklist, tradePlan, 'VWAP pullback: fresh 30m test + reclaim + 5m re-aligned + RVOL≥0.8. Hard gates: direction, touchedValue, reclaimed, trendAligned, rvol.');
+  return signal('vwap_pullback', input, checklist, tradePlan, 'VWAP pullback: fresh 30m test + reclaim + 5m re-aligned + RVOL≥0.8 + RS≥1.0. Hard gates: direction, touchedValue, reclaimed, trendAligned, rvolOk, rsOk.');
 }
 
 export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
