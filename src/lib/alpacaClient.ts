@@ -227,6 +227,10 @@ export function selectTopSymbols(metas: SymbolMeta[], n = 60): string[] {
 const UNIVERSE_CACHE_KEY = 'dynamic_universe_v2';
 const UNIVERSE_TTL_MS = 6 * 60 * 60 * 1000;   // 6 hours
 const UNIVERSE_TARGET = 90;
+
+// Tracks when buildDynamicUniverse last locked the symbol pool
+let _universeBuiltAt: string | null = null;
+export function getUniverseBuiltAt(): string | null { return _universeBuiltAt; }
 const BETA_MIN = 1.2;
 const BETA_MAX = 2.8;
 const ADR_PCT_MIN = 2.5;   // matches Stock-analyzer threshold
@@ -300,9 +304,12 @@ function toETDate(): string {
 
 function getPersistentUniverse(pinnedSymbols: string[]): string[] | null {
   try {
-    const key = `sutra.universe.${toETDate()}`;
-    const raw = localStorage.getItem(key);
+    const date = toETDate();
+    const raw = localStorage.getItem(`sutra.universe.${date}`);
     if (!raw) return null;
+    // Restore build timestamp so the UI shows when it was actually locked
+    const builtAt = localStorage.getItem(`sutra.universe.${date}.builtAt`);
+    if (builtAt) _universeBuiltAt = builtAt;
     const symbols = JSON.parse(raw) as string[];
     return [...new Set([...symbols, ...pinnedSymbols])];
   } catch {
@@ -312,8 +319,10 @@ function getPersistentUniverse(pinnedSymbols: string[]): string[] | null {
 
 function setPersistentUniverse(symbols: string[]) {
   try {
-    const key = `sutra.universe.${toETDate()}`;
-    localStorage.setItem(key, JSON.stringify(symbols));
+    const date = toETDate();
+    const now = new Date().toISOString();
+    localStorage.setItem(`sutra.universe.${date}`, JSON.stringify(symbols));
+    localStorage.setItem(`sutra.universe.${date}.builtAt`, now);
   } catch (err) {
     console.warn('[Universe] Failed to persist:', err);
   }
@@ -378,12 +387,14 @@ export async function buildDynamicUniverse(
 
     cacheSet(UNIVERSE_CACHE_KEY, ranked, UNIVERSE_TTL_MS);
     setPersistentUniverse(ranked); // Lock for the day
+    _universeBuiltAt = new Date().toISOString();
     return [...new Set([...ranked, ...pinnedSymbols])];
   } catch (err) {
     console.warn('[Universe] Dynamic build failed, using static fallback:', err);
     // Short-cache fallback so it retries sooner than 6h
     const fallback = staticFallback.slice(0, UNIVERSE_TARGET);
     cacheSet(UNIVERSE_CACHE_KEY, fallback, 30 * 60 * 1000);
+    _universeBuiltAt = new Date().toISOString();
     return [...new Set([...fallback, ...pinnedSymbols])];
   }
 }

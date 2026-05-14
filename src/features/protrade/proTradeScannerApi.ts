@@ -1,4 +1,4 @@
-import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNewsFlags, fetchSectorTrends, fetchSpyDailyBars, buildDynamicUniverse, clearUniverseCache, SYMBOL_SECTOR, type CatalystTier } from '../../lib/alpacaClient';
+import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNewsFlags, fetchSectorTrends, fetchSpyDailyBars, buildDynamicUniverse, clearUniverseCache, getUniverseBuiltAt, SYMBOL_SECTOR, type CatalystTier } from '../../lib/alpacaClient';
 import { classifyMarketRegime } from '../marketRegime/marketRegimeLogic';
 import type { MarketRegime } from '../marketRegime/marketRegimeTypes';
 import type { SymbolMeta } from '../../lib/alpacaClient';
@@ -78,6 +78,7 @@ export interface ProTradeSnapshot {
   rawCount: number;
   filteredOut: number;
   fetchedAt: string;
+  universeBuiltAt: string | null;
   providerStatus: string;
   spyTrend5m: 'UP' | 'DOWN' | 'FLAT';
   regime: MarketRegime;
@@ -535,6 +536,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
     rawCount: universe.length,
     filteredOut: universe.length - top.length,
     fetchedAt,
+    universeBuiltAt: getUniverseBuiltAt(),
     providerStatus: `Alpaca IEX • ${top.length} symbols`,
     spyTrend5m,
     regime,

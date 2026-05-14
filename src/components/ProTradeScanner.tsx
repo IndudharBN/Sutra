@@ -2372,7 +2372,7 @@ export function ProTradeScannerScreen() {
               Provider: Alpaca IEX
             </span>
             <span className="px-3 py-1 rounded-full border border-violet-500/20 text-violet-300 bg-violet-500/10">
-              Screened Universe: {snapshot?.fetchedAt ? `scanned ${toETTime(snapshot.fetchedAt)} ET` : 'pending 8:30 AM ET'}
+              Screened Universe: {snapshot?.universeBuiltAt ? `locked ${toETTime(snapshot.universeBuiltAt)} ET` : 'pending 8:30 AM ET'}
             </span>
             {watchlist.symbols.length > 0 && (
               <span className="px-3 py-1 rounded-full border border-amber-500/30 text-amber-300 bg-amber-500/10">
