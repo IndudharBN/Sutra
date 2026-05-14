@@ -469,7 +469,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
       ? (sweepCandle.close - sweepCandle.low) / cRange >= 0.35 // 35% wick — genuine stop-run rejection
       : (sweepCandle.high - sweepCandle.close) / cRange >= 0.35;
   })() : false;
-  const tradePlan = directionOk(input) && swept && reclaimed && nearLevel
+  const tradePlan = directionOk(input) && swept && reclaimed && nearLevel && sweepWickOk
     ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger)
     : null;
   const sweepDetail = sweptLevel !== null
@@ -526,7 +526,8 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
-  const tradePlan = hasStructure && input.trendAligned ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const rvolOk = input.rvol >= 1.0;
+  const tradePlan = hasStructure && input.trendAligned && rvolOk ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const fvgSizeOk = fvgAligned && gap ? (gap.gapHigh - gap.gapLow) >= input.atr20 * 0.25 : false;
   const structureLabel = atOb && atFvg
     ? `OB+FVG confluence`
@@ -551,7 +552,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
       ? pass('Entry confirmation', 'Structure zone retest')
       : fail('Entry confirmation', 'No confirmation'),
     pass('VWAP context', `${input.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP (below — watch for reclaim)'} — informational`),
-    pass('RVOL context', `${round(input.rvol, 2)}×${input.rvol >= 1.0 ? ' — confirmed' : ' — low'} — informational`),
+    rvolOk ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — no institutional flow at zone`),
     pass('RSI context', `RSI ${round(rsiVal, 1)}${rsiOk ? ' — not extended ✓' : ' — extended, watch'} — informational`),
     pass('RTH bars', `${rthBars} bars${rthBars >= 5 ? ' ✓' : ' — early session'} — informational`),
     pass('ADR room', `${adrExhausted(input.candles.five, input.atr20) ? '>80% ATR used — watch' : '< 80% ATR used ✓'} — informational`),
