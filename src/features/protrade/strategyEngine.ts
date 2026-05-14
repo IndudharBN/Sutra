@@ -322,7 +322,7 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
     range ? pass('Opening range formed', `${round(range.low, 2)}–${round(range.high, 2)}`) : fail('Opening range formed', 'Need first 15 min of 5m candles'),
     confirmedBreak ? pass('ORB Breakout', `Clear of noise (+${round(breakoutDistance, 2)})`) : fail('ORB Breakout', `Inside noise floor (${round(minBreakout, 2)})`),
     retest ? pass('Retest hold', 'Breakout level retested and held') : fail('Retest hold', 'Waiting for controlled retest'),
-    input.rvol >= 0.8 ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — ORB breakout requires volume confirmation`),
+    input.rvol >= 1.0 ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — ORB breakout requires RTH volume confirmation`),
     pass('ADR room', `${adrExhausted(input.candles.five, input.atr20) ? '>80% ATR used — watch' : '< 80% ATR used ✓'} — informational`),
     pass('VWAP context', `${input.vwapAligned ? 'VWAP ✓' : 'early session'} — informational`),
     ema1mCheck(input),
@@ -340,7 +340,7 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const trigger = last(input.candles.five);
   const recent = input.candles.five.slice(-6); // 30-min window — 60-min was catching stale retests from an hour ago
   const tolerance = Math.max(input.atr20 * 0.2, input.price * 0.002);
-  const ema9 = last(ema(closes(recent), 9)) || input.vwap;
+  const ema9 = last(ema(closes(input.candles.five), 9)) || input.vwap; // full history for valid 9-period EMA
   const touchedValue = recent.some((c) => input.direction === 'BULL'
     ? (c.low <= input.vwap + tolerance || c.low <= ema9 + tolerance)
     : (c.high >= input.vwap - tolerance || c.high >= ema9 - tolerance)
@@ -386,7 +386,7 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
-  const tradePlan = directionOk(input) && recent.length >= 6 && rsEdge ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = directionOk(input) && recent.length >= 6 && rsEdge && breakout ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const fifteen = input.candles.fifteen;
   const trend1h: 'UP' | 'DOWN' | 'FLAT' = fifteen.length >= 5
     ? (fifteen[fifteen.length - 1].close > fifteen[fifteen.length - 5].close * 1.001 ? 'UP'
