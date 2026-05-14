@@ -21,7 +21,8 @@ export type StrategyId =
   | 'flag_break'
   | 'orb15m_retest'
   | 'vwap15m_pullback'
-  | 'ema20_bounce_15m';
+  | 'ema20_bounce_15m'
+  | 'range_reversion';
 
 export type MarketDataProviderId = 'yahoo' | 'alpaca' | 'polygon' | 'ibkr';
 
@@ -137,6 +138,7 @@ export const STRATEGY_LABELS: Record<StrategyId, string> = {
   orb15m_retest: '15m ORB Retest',
   vwap15m_pullback: '15m VWAP Pullback',
   ema20_bounce_15m: '15m EMA20 Bounce',
+  range_reversion: 'Range Reversion',
 };
 
 export const STRATEGY_CODES: Record<StrategyId, string> = {
@@ -152,6 +154,7 @@ export const STRATEGY_CODES: Record<StrategyId, string> = {
   orb15m_retest: 'S10',
   vwap15m_pullback: 'S11',
   ema20_bounce_15m: 'S12',
+  range_reversion: 'S13',
 };
 
 export const WORKFLOW_STAGE_ORDER: WorkflowStage[] = [
