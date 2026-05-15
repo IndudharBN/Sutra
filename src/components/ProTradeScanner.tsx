@@ -440,41 +440,27 @@ function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT
   return Boolean(plan && plan.rr >= 1.5 && availablePaperNotional(settings, trades) > 0);
 }
 
-function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, sizeMult = 1.0, regimeName: string = 'SIDEWAYS', spyTrend5m?: 'UP' | 'DOWN' | 'FLAT'): PaperTrade | null {
+function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, spyTrend5m?: 'UP' | 'DOWN' | 'FLAT'): PaperTrade | null {
   const plan = effectiveTradePlan(row, settings);
   if (!plan || plan.rr < 1.5) return null;
 
-  // Market Heat Filter: regime conviction × intraday tide alignment
-  // BULL/BEAR conflict → 50% cut. SIDEWAYS conflict → flat 0.5 effective (sizeMult bypassed —
-  // tide is the only signal; stacking 0.75×0.5 would over-penalise to 0.375).
-  // Reversal strategies (S4/S5/S6) are exempt — tide opposition IS their setup.
-  let heatMult = 1.0;
-  let heatNote = '';
-  let sidewaysConflict = false;
-  const tide = spyTrend5m;
+  // Tide-based sizing: aligned=1.0×, counter=0.75×, FLAT=1.0× (S1/S2 already blocked upstream)
+  // Reversal strategies (S4/S5/S6) are exempt — counter-tide IS their setup.
   const strategyId = row.primaryStrategy?.strategyId ?? null;
   const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
+  const tide = spyTrend5m;
+  let tideMult = 1.0;
+  let heatNote = '';
 
-  if (regimeName === 'BULL' && tide === 'DOWN') {
-    heatMult = 0.5;
-    heatNote = ' [Market Heat: Tide DOWN in BULL regime → 50% size]';
-  } else if (regimeName === 'BEAR' && tide === 'UP') {
-    heatMult = 0.5;
-    heatNote = ' [Market Heat: Tide UP in BEAR regime → 50% size]';
-  } else if (regimeName === 'SIDEWAYS' && !isReversal) {
-    if (row.direction === 'BULL' && tide === 'DOWN') {
-      heatMult = 0.5;
-      sidewaysConflict = true;
-      heatNote = ' [Market Heat: SIDEWAYS + Tide DOWN → 50% size]';
-    } else if (row.direction === 'BEAR' && tide === 'UP') {
-      heatMult = 0.5;
-      sidewaysConflict = true;
-      heatNote = ' [Market Heat: SIDEWAYS + Tide UP → 50% size]';
+  if (!isReversal && tide && tide !== 'FLAT') {
+    const aligned = (row.direction === 'BULL' && tide === 'UP') || (row.direction === 'BEAR' && tide === 'DOWN');
+    if (!aligned) {
+      tideMult = 0.75;
+      heatNote = ` [Counter-tide (${tide}) → 75% size]`;
     }
   }
 
-  // SIDEWAYS conflict: use heatMult directly (1.0 base) — stacking onto 0.75 sizeMult would give 0.375
-  const effectiveMult = sidewaysConflict ? heatMult : sizeMult * heatMult;
+  const effectiveMult = tideMult;
   const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop);
   const riskNotional = riskQty * plan.entry * effectiveMult;
   
@@ -1985,7 +1971,7 @@ export function ProTradeScannerScreen() {
       const stratId = row.primaryStrategy?.strategyId;
       if (stratId === 's7_volume_surge') {
         firedInstantRef.current.add(sym);
-    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0, snapshot?.regime?.regime, snapshot?.spyTrend5m);
+    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.spyTrend5m);
         if (trade) {
           setPaperTrades((current) => [trade, ...current]);
           setMonitorDate(todayET()); // snap Monitor to today — page may have been open since a previous session
@@ -2074,7 +2060,7 @@ export function ProTradeScannerScreen() {
         const row = snap.rows.find((r) => baseSymbol(r.symbol) === sym);
         if (!row || row.workflowStage !== 'trade_ready') { pending.delete(sym); continue; }
 
-        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance, snap.regime?.sizeMult ?? 1.0, snap.regime?.regime, snap.spyTrend5m);
+        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance, snap.spyTrend5m);
         if (!trade) { pending.delete(sym); continue; }
 
         confirmedTrades.push(trade);
@@ -2166,7 +2152,7 @@ export function ProTradeScannerScreen() {
     if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
     const posCheck = checkMaxPositions(paperTrades);
     if (!posCheck.ok) { setApprovalMessage(posCheck.reason!); return; }
-    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.regime?.sizeMult ?? 1.0, snapshot?.regime?.regime, snapshot?.spyTrend5m);
+    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.spyTrend5m);
     if (!trade) {
       const plan = effectiveTradePlan(row, settings);
       if (!plan) {
@@ -2398,7 +2384,7 @@ export function ProTradeScannerScreen() {
             </span>
             {snapshot?.regime && (
               <span className={`px-3 py-1 rounded-full border text-xs font-semibold ${snapshot.regime.regime === 'BULL' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : snapshot.regime.regime === 'BEAR' ? 'border-rose-500/40 bg-rose-500/10 text-rose-300' : 'border-amber-500/40 bg-amber-500/10 text-amber-300'}`}>
-                Regime: {snapshot.regime.regime} · {Math.round(snapshot.regime.sizeMult * 100)}% size
+                Regime: {snapshot.regime.regime}
                 {snapshot.regime.spyEma200 ? ` · SPY ${snapshot.regime.spyPrice?.toFixed(0)} / EMA200 ${snapshot.regime.spyEma200.toFixed(0)}` : ''}
                 {snapshot.regime.vixLevel ? ` · VIX ${snapshot.regime.vixLevel.toFixed(1)}` : ''}
               </span>
@@ -2570,13 +2556,17 @@ export function ProTradeScannerScreen() {
   );
 }
 function isTideBlocked(row: ProTradeRow, spyTrend: 'UP' | 'DOWN' | 'FLAT' | undefined, sig?: ProTradeRow['primaryStrategy']): boolean {
-  if (!sig || !spyTrend || spyTrend === 'FLAT') return false;
+  if (!sig || !spyTrend) return false;
 
   const strategyId = sig.strategyId;
   const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
   if (isReversal) return false;
 
-  // spyTrend is 'UP'|'DOWN' — block trend-following strategies trading against confirmed tide
+  // FLAT tide: S1/S2 need directional SPY to work — ORB gets contested, VWAP becomes noise
+  if (spyTrend === 'FLAT' && (strategyId === 'orb_retest' || strategyId === 'vwap_pullback')) return true;
+  if (spyTrend === 'FLAT') return false;
+
+  // Confirmed directional tide: block trend strategies trading against it
   if (spyTrend === 'DOWN' && sig.direction === 'BULL') return true;
   if (spyTrend === 'UP' && sig.direction === 'BEAR') return true;
 
