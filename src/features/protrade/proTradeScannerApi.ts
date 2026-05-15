@@ -302,13 +302,21 @@ function buildRowFromAlpaca(
   const vwap = five.length ? sessionVwap(five) : price;
   const trend5m = candleTrend(five);
   const trend15m = candleTrend(fifteen);
-  // Direction: 15m EMA is the primary intraday bias (institutional TF, no dead zone).
-  // Gap fallback handles early session before 15m EMA resolves.
-  const direction: 'BULL' | 'BEAR' | 'NEUTRAL' =
-    trend15m === 'UP'   ? 'BULL' :
-    trend15m === 'DOWN' ? 'BEAR' :
-    meta.gapPct >  0.5  ? 'BULL' :
-    meta.gapPct < -0.5  ? 'BEAR' : 'NEUTRAL';
+  // Option C: post-10:15 AM ET, VWAP + 5m trend replaces 15m trend as primary direction.
+  // Pre-10:15 AM: VWAP has <8 session bars and drifts — keep 15m trend + gap fallback.
+  const [etH, etM] = new Date()
+    .toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false })
+    .split(':').map(Number);
+  const postVwapGate = etH * 60 + etM >= 10 * 60 + 15;
+  const direction: 'BULL' | 'BEAR' | 'NEUTRAL' = postVwapGate
+    ? (price > vwap && trend5m === 'UP'   ? 'BULL' :
+       price < vwap && trend5m === 'DOWN' ? 'BEAR' :
+       meta.gapPct >  0.5                 ? 'BULL' :
+       meta.gapPct < -0.5                 ? 'BEAR' : 'NEUTRAL')
+    : (trend15m === 'UP'   ? 'BULL' :
+       trend15m === 'DOWN' ? 'BEAR' :
+       meta.gapPct >  0.5  ? 'BULL' :
+       meta.gapPct < -0.5  ? 'BEAR' : 'NEUTRAL');
   const vwapAligned = direction === 'BULL' ? price > vwap : direction === 'BEAR' ? price < vwap : false;
   const trendAligned = direction === 'BULL' ? trend5m === 'UP' : direction === 'BEAR' ? trend5m === 'DOWN' : false;
   const trend15mAligned = direction === 'BULL' ? trend15m === 'UP' : direction === 'BEAR' ? trend15m === 'DOWN' : false;
