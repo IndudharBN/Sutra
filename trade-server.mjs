@@ -13,6 +13,28 @@ await mkdir(DATA_DIR, { recursive: true });
 // Serialise writes — prevents concurrent write corruption
 let writeQueue = Promise.resolve();
 
+// ── VIX — server-side fetch avoids browser CORS ──────────────────────────────
+let vixCache = { value: null, expiresAt: 0 };
+
+async function fetchVixFromYahoo() {
+  if (Date.now() < vixCache.expiresAt) return vixCache.value;
+  try {
+    const res = await fetch(
+      'https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?interval=1d&range=5d',
+      { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } },
+    );
+    if (!res.ok) throw new Error(`Yahoo VIX ${res.status}`);
+    const json = await res.json();
+    const value = json?.chart?.result?.[0]?.meta?.regularMarketPrice ?? null;
+    vixCache = { value, expiresAt: Date.now() + 30 * 60 * 1000 };
+    return value;
+  } catch (err) {
+    console.error('VIX fetch failed:', err.message);
+    vixCache = { value: null, expiresAt: Date.now() + 60_000 };
+    return null;
+  }
+}
+
 async function readTrades() {
   try {
     return JSON.parse(await readFile(TRADES_FILE, 'utf8'));
@@ -45,6 +67,16 @@ const server = createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   const url = new URL(req.url, `http://localhost:${PORT}`);
+
+  // GET /api/vix — proxy to Yahoo Finance server-side (avoids CORS)
+  if (url.pathname === '/api/vix') {
+    if (req.method !== 'GET') { res.writeHead(405); res.end('Method Not Allowed'); return; }
+    const vix = await fetchVixFromYahoo();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ vix }));
+    return;
+  }
+
   if (url.pathname !== '/api/trades') { res.writeHead(404); res.end('Not Found'); return; }
 
   // GET /api/trades[?date=YYYY-MM-DD]

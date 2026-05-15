@@ -32,6 +32,10 @@ export default defineConfig({
         target: 'http://localhost:3009',
         changeOrigin: true,
       },
+      '/api/vix': {
+        target: 'http://localhost:3009',
+        changeOrigin: true,
+      },
     },
   },
 });

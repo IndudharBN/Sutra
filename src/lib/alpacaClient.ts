@@ -96,23 +96,33 @@ export async function fetchHistoricalBars(
   return all;
 }
 
-// ── SPY daily bars (250 bars) + VIX attempt — for macro regime classification ──
-export async function fetchSpyDailyBars(): Promise<{ spyBars: Candle[]; vixBars: Candle[] }> {
+// ── VIX — fetched via trade-server proxy to Yahoo Finance (IEX doesn't carry VIX) ──
+async function fetchVixLevel(): Promise<number | null> {
+  try {
+    const res = await fetch('/api/vix');
+    if (!res.ok) return null;
+    const json = await res.json() as { vix: number | null };
+    return json.vix ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ── SPY daily bars (250 bars) + VIX — for macro regime classification ──────────
+export async function fetchSpyDailyBars(): Promise<{ spyBars: Candle[]; vixLevel: number | null }> {
   const cacheKey = 'spy_regime_daily';
-  const hit = cacheGet<{ spyBars: Candle[]; vixBars: Candle[] }>(cacheKey);
+  const hit = cacheGet<{ spyBars: Candle[]; vixLevel: number | null }>(cacheKey);
   if (hit) return hit;
   const [spyRes, vixRes] = await Promise.allSettled([
     alpacaGet<{ bars: Record<string, AlpacaBar[]> }>('/v2/stocks/bars', {
       symbols: 'SPY', timeframe: '1Day', limit: '250', sort: 'asc', feed: 'iex',
     }),
-    alpacaGet<{ bars: Record<string, AlpacaBar[]> }>('/v2/stocks/bars', {
-      symbols: 'VIX', timeframe: '1Day', limit: '5', sort: 'asc', feed: 'iex',
-    }),
+    fetchVixLevel(),
   ]);
   const spyBars = spyRes.status === 'fulfilled' ? (spyRes.value.bars?.['SPY'] ?? []).map(toCandle) : [];
-  const vixBars = vixRes.status === 'fulfilled' ? (vixRes.value.bars?.['VIX'] ?? []).map(toCandle) : [];
-  const result = { spyBars, vixBars };
-  cacheSet(cacheKey, result, 3_600_000); // re-classify at most once per hour
+  const vixLevel = vixRes.status === 'fulfilled' ? vixRes.value : null;
+  const result = { spyBars, vixLevel };
+  cacheSet(cacheKey, result, 3_600_000);
   return result;
 }
 

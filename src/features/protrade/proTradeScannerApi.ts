@@ -441,7 +441,7 @@ export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRo
     fetchSpyDailyBars(),
   ]);
   const spyTrend5m = candleTrend(spy5mBars['SPY'] || []);
-  const vixLevel = spyRegimeData.vixBars.length ? last(spyRegimeData.vixBars).close : null;
+  const vixLevel = spyRegimeData.vixLevel;
   // 3-bar rolling SPY change — matches computeRsVsBenchmark window; was hardcoded 0 in caller
   const spyH1 = (spyH1Bars['SPY'] || []).slice(-5);
   const spyLast = spyH1.length >= 2 ? spyH1[spyH1.length - 1].close : 0;
@@ -510,7 +510,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
   const spyEma200Series = ema(spyDailyCloses, 200);
   const spyEma200 = spyEma200Series.length >= 200 ? last(spyEma200Series) : null;
   const spyDailyPrice = spyRegimeData.spyBars.length ? last(spyRegimeData.spyBars).close : null;
-  const vixLevel = spyRegimeData.vixBars.length ? last(spyRegimeData.vixBars).close : null;
+  const vixLevel = spyRegimeData.vixLevel;
   const regime = classifyMarketRegime({ spyPrice: spyDailyPrice, spyEma200, vixLevel });
 
   const fetchedAt = new Date().toISOString();
