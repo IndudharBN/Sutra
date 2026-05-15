@@ -2564,11 +2564,8 @@ function isTideBlocked(row: ProTradeRow, spyTrend: 'UP' | 'DOWN' | 'FLAT' | unde
 
   // FLAT tide: S1/S2 need directional SPY to work — ORB gets contested, VWAP becomes noise
   if (spyTrend === 'FLAT' && (strategyId === 'orb_retest' || strategyId === 'vwap_pullback')) return true;
-  if (spyTrend === 'FLAT') return false;
 
-  // Confirmed directional tide: block trend strategies trading against it
-  if (spyTrend === 'DOWN' && sig.direction === 'BULL') return true;
-  if (spyTrend === 'UP' && sig.direction === 'BEAR') return true;
-
+  // Counter-tide signals are NOT blocked — 0.75× tideMult in buildPaperTrade is the penalty.
+  // Blocking AND sizing-penalising was double punishment; sizing alone is sufficient.
   return false;
 }
