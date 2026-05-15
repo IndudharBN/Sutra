@@ -453,7 +453,10 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
   let heatNote = '';
 
   if (!isReversal && tide && tide !== 'FLAT') {
-    const aligned = (row.direction === 'BULL' && tide === 'UP') || (row.direction === 'BEAR' && tide === 'DOWN');
+    // Use Direction D (strategy self-determined) as primary — it is the actual trade direction.
+    // Fall back to row.direction (Option C) only when no strategy signal exists.
+    const tradeDir = row.primaryStrategy?.direction ?? row.direction;
+    const aligned = (tradeDir === 'BULL' && tide === 'UP') || (tradeDir === 'BEAR' && tide === 'DOWN');
     if (!aligned) {
       tideMult = 0.75;
       heatNote = ` [Counter-tide (${tide}) → 75% size]`;
