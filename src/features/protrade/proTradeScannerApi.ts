@@ -2,7 +2,7 @@ import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNe
 import { classifyMarketRegime } from '../marketRegime/marketRegimeLogic';
 import type { MarketRegime } from '../marketRegime/marketRegimeTypes';
 import type { SymbolMeta } from '../../lib/alpacaClient';
-import { ema, vwapLatest, sessionCandles, sessionVwap, sessionVwapSlope } from '../scanner/indicators';
+import { ema, sessionCandles, sessionVwap, sessionVwapSlope } from '../scanner/indicators';
 import type { Candle, CandleSet } from '../scanner/ohlcv';
 import { closes, last, round } from '../scanner/ohlcv';
 import { evaluateStrategies } from './strategyEngine';
@@ -299,7 +299,7 @@ function buildRowFromAlpaca(
   const atrPct = price > 0 ? (atr20 / price) * 100 : 0;
   const dollarVolM = (price * meta.todayVolume) / 1_000_000;
 
-  const vwap = five.length ? vwapLatest(five) : price;
+  const vwap = five.length ? sessionVwap(five) : price;
   const trend5m = candleTrend(five);
   const trend15m = candleTrend(fifteen);
   // Direction: 15m EMA is the primary intraday bias (institutional TF, no dead zone).
