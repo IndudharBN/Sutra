@@ -409,41 +409,57 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
 
 export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   const five = input.candles.five;
-  const dir = input.direction as 'BULL' | 'BEAR';
   const range = todayOpeningRange(five);
   const recent = five.slice(-20);
   const trigger = last(recent);
 
-  // ── Sweep source: ORB (primary) or intraday pivot swing (fallback) ────────
+  // S4 self-determines direction from the sweep pattern (no external direction needed)
+  // Swept ORB lows + reclaim → BULL reversal; swept ORB highs + reclaim → BEAR reversal
+  let selfDir: 'BULL' | 'BEAR' | null = null;
   let sweptLevel: number | null = null;
   let sweepCandle: Candle | null = null;
   let sweepSource: 'ORB' | 'Swing' | null = null;
 
   if (range) {
-    const orbLevel = dir === 'BULL' ? range.low : range.high;
-    const orbSweep = recent.find((c) => dir === 'BULL' ? c.low < orbLevel : c.high > orbLevel) ?? null;
-    if (orbSweep) { sweptLevel = orbLevel; sweepCandle = orbSweep; sweepSource = 'ORB'; }
+    const bullSweep = recent.find((c) => c.low < range.low) ?? null;
+    const bearSweep = recent.find((c) => c.high > range.high) ?? null;
+    if (bullSweep && !bearSweep) {
+      selfDir = 'BULL'; sweptLevel = range.low; sweepCandle = bullSweep; sweepSource = 'ORB';
+    } else if (bearSweep && !bullSweep) {
+      selfDir = 'BEAR'; sweptLevel = range.high; sweepCandle = bearSweep; sweepSource = 'ORB';
+    } else if (bullSweep && bearSweep) {
+      // Both ORB levels swept: pick the one price is closest to (active retest side)
+      const closerLow = Math.abs(input.price - range.low) <= Math.abs(input.price - range.high);
+      selfDir = closerLow ? 'BULL' : 'BEAR';
+      sweptLevel = closerLow ? range.low : range.high;
+      sweepCandle = closerLow ? bullSweep : bearSweep;
+      sweepSource = 'ORB';
+    }
   }
 
   if (!sweepCandle) {
-    // Most recent 3-bar pivot in anchor window (bars -25 to -4, ~20–125 min ago)
+    // Intraday pivot fallback: try BULL pivot low sweep first, then BEAR pivot high
     const anchorBars = five.slice(-25, -4);
-    let pivotLevel: number | null = null;
+    const swingLast8 = five.slice(-8);
     for (let i = anchorBars.length - 2; i >= 1; i--) {
-      if (dir === 'BULL'
-        ? anchorBars[i].low < anchorBars[i - 1].low && anchorBars[i].low < anchorBars[i + 1].low
-        : anchorBars[i].high > anchorBars[i - 1].high && anchorBars[i].high > anchorBars[i + 1].high) {
-        pivotLevel = dir === 'BULL' ? anchorBars[i].low : anchorBars[i].high;
-        break;
+      if (anchorBars[i].low < anchorBars[i - 1].low && anchorBars[i].low < anchorBars[i + 1].low) {
+        const pivotLevel = anchorBars[i].low;
+        const swingSweep = swingLast8.find((c) => c.low < pivotLevel) ?? null;
+        if (swingSweep) { selfDir = 'BULL'; sweptLevel = pivotLevel; sweepCandle = swingSweep; sweepSource = 'Swing'; break; }
       }
     }
-    if (pivotLevel !== null) {
-      const swingLast8 = five.slice(-8);
-      const swingSweep = swingLast8.find((c) => dir === 'BULL' ? c.low < pivotLevel! : c.high > pivotLevel!) ?? null;
-      if (swingSweep) { sweptLevel = pivotLevel; sweepCandle = swingSweep; sweepSource = 'Swing'; }
+    if (!sweepCandle) {
+      for (let i = anchorBars.length - 2; i >= 1; i--) {
+        if (anchorBars[i].high > anchorBars[i - 1].high && anchorBars[i].high > anchorBars[i + 1].high) {
+          const pivotLevel = anchorBars[i].high;
+          const swingSweep = swingLast8.find((c) => c.high > pivotLevel) ?? null;
+          if (swingSweep) { selfDir = 'BEAR'; sweptLevel = pivotLevel; sweepCandle = swingSweep; sweepSource = 'Swing'; break; }
+        }
+      }
     }
   }
 
+  const dir: 'BULL' | 'BEAR' = selfDir ?? 'BULL'; // geometry fallback; tradePlan is null when selfDir=null
   const swept = Boolean(sweepCandle);
   const reclaimed = Boolean(sweptLevel !== null && trigger && (
     dir === 'BULL' ? trigger.close > sweptLevel : trigger.close < sweptLevel
@@ -470,8 +486,16 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
       ? (sweepCandle.close - sweepCandle.low) / cRange >= 0.35 // 35% wick — genuine stop-run rejection
       : (sweepCandle.high - sweepCandle.close) / cRange >= 0.35;
   })() : false;
-  const tradePlan = directionOk(input) && swept && reclaimed && nearLevel && sweepWickOk
-    ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger)
+  const selfInput = selfDir
+    ? {
+        ...input,
+        direction: selfDir,
+        vwapAligned: selfDir === 'BULL' ? input.price > input.vwap : input.price < input.vwap,
+        trendAligned: selfDir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN',
+      }
+    : input;
+  const tradePlan = swept && reclaimed && nearLevel && sweepWickOk
+    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
     : null;
   const sweepDetail = sweptLevel !== null
     ? (sweepSource === 'ORB'
@@ -479,7 +503,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
         : `Intraday pivot ${dir === 'BULL' ? 'low' : 'high'} ${round(sweptLevel, 2)}`)
     : 'No sweep level found';
   const checklist = [
-    directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
+    selfDir ? pass('Directional bias', `${selfDir} — self-determined from sweep pattern`) : fail('Directional bias', 'No sweep detected — direction unknown'),
     range
       ? pass('Opening range', `${round(range.low, 2)}–${round(range.high, 2)}${sweepSource === 'Swing' ? ' (not swept — using intraday pivot)' : ''}`)
       : pass('Opening range', 'Not formed — using intraday pivot fallback'),
@@ -490,32 +514,57 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     pass('Volume confirmation', `${round(input.rvol, 2)}x${input.rvol >= 0.8 ? ' — confirmed' : ' — low, sweep structure is primary signal'}`),
     ema1mCheck(input),
   ];
-  return signal('liquidity_sweep', input, checklist, tradePlan, `S4 Sweep (${sweepSource ?? 'no level'}): T1=${orOpposite ? 'OR opposite' : '2R'} T2=${orOpposite ? round(orOpposite, 2) : '2.5R'}`);
+  return signal('liquidity_sweep', selfInput, checklist, tradePlan, `S4 Sweep (${sweepSource ?? 'no level'}): T1=${orOpposite ? 'OR opposite' : '2R'} T2=${orOpposite ? round(orOpposite, 2) : '2.5R'}`);
 }
 
 export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const five = input.candles.five;
   const trigger = last(five);
-  if (!directionOk(input)) {
-    return signal('ob_fvg_retest', input, [fail('Directional bias', 'No BULL/BEAR bias')], null, 'No directional bias.');
-  }
-  const dir = input.direction as 'BULL' | 'BEAR';
-  const ob = findOrderBlockZone(five, dir, 1.1, 20);
-  const atOb = ob
-    ? (dir === 'BULL'
-      ? input.price <= ob.high + input.atr20 * 0.2 && input.price >= ob.low - input.atr20 * 0.2
-      : input.price >= ob.low - input.atr20 * 0.2 && input.price <= ob.high + input.atr20 * 0.2)
-    : false;
-  const obReject = ob ? rejectionCandle(five, dir, ob) : false;
+
+  // S5 self-determines direction from which OB/FVG zone price is currently retesting
+  const bullOb = findOrderBlockZone(five, 'BULL', 1.1, 20);
+  const bearOb = findOrderBlockZone(five, 'BEAR', 1.1, 20);
   const fvgResult = detectFvg(five, 8);
   const gap = fvgResult.latestGap;
-  const fvgAligned = gap && !gap.filled &&
-    ((dir === 'BULL' && gap.direction === 'BULLISH') || (dir === 'BEAR' && gap.direction === 'BEARISH'));
-  const atFvg = fvgAligned && gap
-    ? (dir === 'BULL'
-      ? input.price >= gap.gapLow - input.atr20 * 0.2 && input.price <= gap.gapHigh + input.atr20 * 0.2
-      : input.price <= gap.gapHigh + input.atr20 * 0.2 && input.price >= gap.gapLow - input.atr20 * 0.2)
+
+  const atBullOb = bullOb
+    ? (input.price <= bullOb.high + input.atr20 * 0.2 && input.price >= bullOb.low - input.atr20 * 0.2)
     : false;
+  const atBearOb = bearOb
+    ? (input.price >= bearOb.low - input.atr20 * 0.2 && input.price <= bearOb.high + input.atr20 * 0.2)
+    : false;
+  const atBullFvg = gap && !gap.filled && gap.direction === 'BULLISH'
+    ? (input.price >= gap.gapLow - input.atr20 * 0.2 && input.price <= gap.gapHigh + input.atr20 * 0.2)
+    : false;
+  const atBearFvg = gap && !gap.filled && gap.direction === 'BEARISH'
+    ? (input.price <= gap.gapHigh + input.atr20 * 0.2 && input.price >= gap.gapLow - input.atr20 * 0.2)
+    : false;
+
+  const hasBullStructure = atBullOb || atBullFvg;
+  const hasBearStructure = atBearOb || atBearFvg;
+  // VWAP is the tiebreaker when price is simultaneously at both a bull and bear zone
+  let selfDir: 'BULL' | 'BEAR' | null = null;
+  if (hasBullStructure && !hasBearStructure) selfDir = 'BULL';
+  else if (hasBearStructure && !hasBullStructure) selfDir = 'BEAR';
+  else if (hasBullStructure && hasBearStructure) selfDir = input.price >= input.vwap ? 'BULL' : 'BEAR';
+
+  const selfInput = selfDir
+    ? {
+        ...input,
+        direction: selfDir,
+        vwapAligned: selfDir === 'BULL' ? input.price > input.vwap : input.price < input.vwap,
+        trendAligned: selfDir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN',
+      }
+    : input;
+
+  const dir: 'BULL' | 'BEAR' = selfDir ?? 'BULL'; // geometry fallback; tradePlan is null when no structure
+  const ob = dir === 'BULL' ? bullOb : bearOb;
+  const atOb = dir === 'BULL' ? atBullOb : atBearOb;
+  const obReject = ob ? rejectionCandle(five, dir, ob) : false;
+  const fvgAligned = gap && !gap.filled
+    ? ((dir === 'BULL' && gap.direction === 'BULLISH') || (dir === 'BEAR' && gap.direction === 'BEARISH'))
+    : false;
+  const atFvg = dir === 'BULL' ? atBullFvg : atBearFvg;
   const hasStructure = atOb || atFvg;
   const structureLow = ob && atOb ? ob.low : gap && atFvg ? gap.gapLow : null;
   const structureHigh = ob && atOb ? ob.high : gap && atFvg ? gap.gapHigh : null;
@@ -526,9 +575,9 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
-  const t2 = structuralT2(input, entry, risk, t1);
+  const t2 = structuralT2(selfInput, entry, risk, t1);
   const rvolOk = input.rvol >= 1.0;
-  const tradePlan = hasStructure && input.trendAligned && rvolOk ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = hasStructure && selfInput.trendAligned && rvolOk ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const fvgSizeOk = fvgAligned && gap ? (gap.gapHigh - gap.gapLow) >= input.atr20 * 0.25 : false;
   const structureLabel = atOb && atFvg
     ? `OB+FVG confluence`
@@ -538,28 +587,28 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const rsiVal = rsi14(closes(input.candles.five));
   const rsiOk = dir === 'BULL' ? rsiVal < 65 : rsiVal > 35;
   const checklist = [
-    pass('Directional bias', dir),
-    htfTrendCheck(input),
+    selfDir ? pass('Directional bias', `${selfDir} — self-determined from ${atOb ? 'OB' : 'FVG'} at price`) : fail('Directional bias', 'No OB or FVG at current price — direction unknown'),
+    htfTrendCheck(selfInput),
     hasStructure
       ? pass('Structure zone', structureLabel)
       : fail('Structure zone', 'No active OB or unfilled FVG at current price'),
     atFvg && !fvgSizeOk
       ? fail('FVG quality', `Gap too small (< 0.25×ATR)`)
       : atFvg ? pass('FVG quality', `Gap size ok`) : pass('FVG quality', 'OB entry — no FVG required'),
-    input.trendAligned
-      ? pass('5m trend aligned', `${input.trend5m} ✓ — structural context supports bounce`)
-      : fail('5m trend aligned', `${input.trend5m} — trend against zone, zone likely breaks not bounces`),
+    selfInput.trendAligned
+      ? pass('5m trend aligned', `${selfInput.trend5m} ✓ — structural context supports bounce`)
+      : fail('5m trend aligned', `${selfInput.trend5m} — trend against zone, zone likely breaks not bounces`),
     obReject || atFvg
       ? pass('Entry confirmation', 'Structure zone retest')
       : fail('Entry confirmation', 'No confirmation'),
-    pass('VWAP context', `${input.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP (below — watch for reclaim)'} — informational`),
+    pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP (below — watch for reclaim)'} — informational`),
     rvolOk ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — no institutional flow at zone`),
     pass('RSI context', `RSI ${round(rsiVal, 1)}${rsiOk ? ' — not extended ✓' : ' — extended, watch'} — informational`),
     pass('RTH bars', `${rthBars} bars${rthBars >= 5 ? ' ✓' : ' — early session'} — informational`),
     pass('ADR room', `${adrExhausted(input.candles.five, input.atr20) ? '>80% ATR used — watch' : '< 80% ATR used ✓'} — informational`),
     ema1mCheck(input),
   ];
-  return signal('ob_fvg_retest', input, checklist, tradePlan, 'S5: OB or FVG retest — either zone qualifies. FVG must be ≥0.25×ATR. OB needs rejection candle. Hard gates: direction, hasStructure, trendAligned, entryConfirmation.');
+  return signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5: OB or FVG retest — either zone qualifies. FVG must be ≥0.25×ATR. OB needs rejection candle. Hard gates: hasStructure, trendAligned, rvolOk.');
 }
 
 export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
@@ -614,9 +663,9 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
 }
 
 function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
-  const { candles, direction, atr20, price } = input;
+  const { candles, atr20, price } = input;
   const bar = last(candles.five);
-  if (!bar || !directionOk(input) || candles.five.length < 13) return null;
+  if (!bar || candles.five.length < 13) return null;
 
   // Compute average 5m bar volume from last 20 bars (excluding current)
   const volSample = candles.five.slice(-21, -1);
@@ -628,37 +677,42 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
 
   const high30m = Math.max(...prev6.map(b => b.high));
   const low30m = Math.min(...prev6.map(b => b.low));
-  const isBreakout = direction === 'BULL' ? price > high30m : price < low30m;
+  // S7 self-determines direction: the 30m range breakout side defines the trade direction
+  const selfDir: 'BULL' | 'BEAR' | null = price > high30m ? 'BULL' : price < low30m ? 'BEAR' : null;
+  if (!volSpike || !selfDir) return null;
 
-  if (volSpike && isBreakout) {
-    const rvolOk = input.rvol >= 1.5; // trailing RVOL confirms broad flow, not just one spike bar
-    const rawStop = direction === 'BULL' ? bar.low : bar.high;
-    const stop = noiseFlooredStop(direction as 'BULL' | 'BEAR', price, rawStop, atr20, input.vixLevel);
-    const risk = Math.abs(price - stop);
-    const t1 = direction === 'BULL' ? price + risk * T1_RR : price - risk * T1_RR;
-    const t2 = direction === 'BULL' ? price + risk * PREFERRED_RR : price - risk * PREFERRED_RR;
-    const tradePlan = rvolOk ? planFromLevelsT1T2(input, price, stop, t1, t2, bar) : null;
-    const checklist = [
-      pass('Directional bias', direction),
-      pass('Volume surge ≥2×', `${round(bar.volume / avgVol, 1)}× avg ✓`),
-      pass('30m range break', `${direction === 'BULL' ? 'Above' : 'Below'} 30m range`),
-      rvolOk ? pass('RVOL ≥1.5×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.5×', `${round(input.rvol, 2)}× — single-bar spike without broad flow`),
-      input.vwapAligned ? pass('VWAP aligned', `${direction === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓'}`) : fail('VWAP aligned', `${direction === 'BULL' ? 'Below VWAP' : 'Above VWAP'} — surge against session anchor`),
-      pass('ADR room', `${!adrExhausted(input.candles.five, input.atr20) ? '< 80% ATR used ✓' : '>80% ATR used — watch sizing'} — informational`),
-    ];
-    const sig = signal('s7_volume_surge', input, checklist, tradePlan, 'S7: Institutional 2× volume surge + RVOL≥1.5 on 30m range break. Hard gates: volSpike, breakout, rvolOk, vwapAligned.');
-    // Pre-blackout gap fire: allow S7 to fire at 9:30–9:45 AM on strong gap days (>3% gap + live data)
-    if (
-      sig.stage === 'locked' &&
-      sessionGate() === 'blackout' &&
-      input.dataStatus.mode === 'live' && !input.dataStatus.stale &&
-      ((direction === 'BULL' && input.gapPct >= 3) || (direction === 'BEAR' && input.gapPct <= -3))
-    ) {
-      return { ...sig, stage: 'trade_ready' as const };
-    }
-    return sig;
+  const selfInput = {
+    ...input,
+    direction: selfDir,
+    vwapAligned: selfDir === 'BULL' ? price > input.vwap : price < input.vwap,
+    trendAligned: selfDir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN',
+  };
+  const rvolOk = input.rvol >= 1.5; // trailing RVOL confirms broad flow, not just one spike bar
+  const rawStop = selfDir === 'BULL' ? bar.low : bar.high;
+  const stop = noiseFlooredStop(selfDir, price, rawStop, atr20, input.vixLevel);
+  const risk = Math.abs(price - stop);
+  const t1 = selfDir === 'BULL' ? price + risk * T1_RR : price - risk * T1_RR;
+  const t2 = selfDir === 'BULL' ? price + risk * PREFERRED_RR : price - risk * PREFERRED_RR;
+  const tradePlan = rvolOk ? planFromLevelsT1T2(selfInput, price, stop, t1, t2, bar) : null;
+  const checklist = [
+    pass('Directional bias', `${selfDir} — self-determined from 30m range break`),
+    pass('Volume surge ≥2×', `${round(bar.volume / avgVol, 1)}× avg ✓`),
+    pass('30m range break', `${selfDir === 'BULL' ? 'Above' : 'Below'} 30m range`),
+    rvolOk ? pass('RVOL ≥1.5×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.5×', `${round(input.rvol, 2)}× — single-bar spike without broad flow`),
+    selfInput.vwapAligned ? pass('VWAP aligned', `${selfDir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓'}`) : fail('VWAP aligned', `${selfDir === 'BULL' ? 'Below VWAP' : 'Above VWAP'} — surge against session anchor`),
+    pass('ADR room', `${!adrExhausted(input.candles.five, input.atr20) ? '< 80% ATR used ✓' : '>80% ATR used — watch sizing'} — informational`),
+  ];
+  const sig = signal('s7_volume_surge', selfInput, checklist, tradePlan, 'S7: Institutional 2× volume surge + RVOL≥1.5 on 30m range break. Hard gates: volSpike, breakout, rvolOk, vwapAligned.');
+  // Pre-blackout gap fire: allow S7 to fire at 9:30–9:45 AM on strong gap days (>3% gap + live data)
+  if (
+    sig.stage === 'locked' &&
+    sessionGate() === 'blackout' &&
+    input.dataStatus.mode === 'live' && !input.dataStatus.stale &&
+    ((selfDir === 'BULL' && input.gapPct >= 3) || (selfDir === 'BEAR' && input.gapPct <= -3))
+  ) {
+    return { ...sig, stage: 'trade_ready' as const };
   }
-  return null;
+  return sig;
 }
 
 // ─── S8: EMA20 Bounce ────────────────────────────────────────────────────────
