@@ -590,9 +590,10 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
   const rvolOk = input.rvol >= 1.0;
-  // trendAligned intentionally NOT a hard gate — OB/FVG retest is a reversal/pause play where
-  // price is AT the zone precisely because trend is temporarily flat or pulling back.
-  const tradePlan = hasStructure && rvolOk ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
+  // OB entries require a rejection candle — price slicing through an OB without a wick/reversal
+  // bar means the zone is breaking, not holding. FVG entries don't need it (the gap is the magnet).
+  const entryConfirmed = atOb ? obReject : atFvg;
+  const tradePlan = entryConfirmed && rvolOk ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const fvgSizeOk = fvgAligned && gap ? (gap.gapHigh - gap.gapLow) >= input.atr20 * 0.25 : false;
   const structureLabel = atOb && atFvg
     ? `OB+FVG confluence`
@@ -611,9 +612,9 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
       ? fail('FVG quality', `Gap too small (< 0.25×ATR)`)
       : atFvg ? pass('FVG quality', `Gap size ok`) : pass('FVG quality', 'OB entry — no FVG required'),
     pass('5m trend aligned', `${selfInput.trend5m}${selfInput.trendAligned ? ' ✓' : ' — pullback entry phase'} — informational`),
-    obReject || atFvg
-      ? pass('Entry confirmation', 'Structure zone retest')
-      : fail('Entry confirmation', 'No confirmation'),
+    atOb
+      ? (obReject ? pass('OB rejection candle', 'Wick/reversal bar at OB ✓') : fail('OB rejection candle', 'Price through OB without rejection — zone likely breaking, not bouncing'))
+      : pass('OB rejection candle', 'FVG entry — no rejection candle required'),
     pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP (below — watch for reclaim)'} — informational`),
     rvolOk ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — no institutional flow at zone`),
     pass('RSI context', `RSI ${round(rsiVal, 1)}${rsiOk ? ' — not extended ✓' : ' — extended, watch'} — informational`),
@@ -621,7 +622,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
     pass('ADR room', `${adrExhausted(input.candles.five, input.atr20) ? '>80% ATR used — watch' : '< 80% ATR used ✓'} — informational`),
     ema1mCheck(input),
   ];
-  return signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5: OB or FVG retest — either zone qualifies. FVG must be ≥0.25×ATR. Hard gates: hasStructure, rvolOk. 5m trend is informational — zone entry valid at any pullback phase.');
+  return signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5: OB or FVG retest. Hard gates: OB needs rejection candle (zone holding, not breaking); FVG just needs price in gap; both need RVOL≥1.0×.');
 }
 
 export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
