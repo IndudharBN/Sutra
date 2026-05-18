@@ -2,7 +2,7 @@ import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
 import { fetchTrading212Snapshot } from '../features/brokers/trading212LiveApi';
 import { placePaperBracketOrder, closeAllPaperPositions, closePaperPosition, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
-import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkMaxPositions, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
+import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
 import { alpacaBarStream } from '../lib/alpacaBarStream';
 import { clearBarCache } from '../lib/alpacaClient';
 import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot, clearUniverseCache, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
@@ -376,19 +376,16 @@ function effectiveTradePlan(row: ProTradeRow, _settings: ProTradeSettings) {
   return row.tradePlan;
 }
 
-function availablePaperNotional(settings: ProTradeSettings, trades: PaperTrade[]) {
+function availablePaperNotional(settings: ProTradeSettings, trades: PaperTrade[], accountBalance: number) {
   const maxPerOrder = settings.maxPerOrder > 0 ? settings.maxPerOrder : PAPER_NOTIONAL;
-  if (settings.tradingAmount <= 0) return Infinity; // no cap — computePositionSize (5% risk) governs
-  const usablePct = settings.tradingAmountPct > 0 ? Math.min(settings.tradingAmountPct, 100) : 100;
-  const usableAmount = settings.tradingAmount * usablePct / 100;
+  const cap = accountBalance * 0.65;
   const openNotional = trades
     .filter((trade) => trade.status === 'Open')
     .reduce((total, trade) => {
-      // After T1 hit: trailing stop is at breakeven, actual risk = $0, 50% conceptually closed.
-      // Count at half notional so new entries aren't blocked by a risk-free trailing position.
+      // After T1 hit: trailing stop at BE, risk = $0. Count 50% so new entries aren't blocked.
       return total + (trade.t1HitAt ? trade.notional * 0.5 : trade.notional);
     }, 0);
-  return Math.min(maxPerOrder, Math.max(0, usableAmount - openNotional));
+  return Math.min(maxPerOrder, Math.max(0, cap - openNotional));
 }
 
 function etMinutesNow(): number {
@@ -420,9 +417,9 @@ function playTradeReadyAlert() {
   } catch { /* browser may block audio before interaction */ }
 }
 
-function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT_PROTRADE_SETTINGS, trades: PaperTrade[] = []) {
+function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT_PROTRADE_SETTINGS, trades: PaperTrade[] = [], accountBalance = 100_000) {
   const plan = effectiveTradePlan(row, settings);
-  return Boolean(plan && plan.rr >= 1.5 && availablePaperNotional(settings, trades) > 0);
+  return Boolean(plan && plan.rr >= 1.5 && availablePaperNotional(settings, trades, accountBalance) > 0);
 }
 
 function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, spyTrend5m?: 'UP' | 'DOWN' | 'FLAT'): PaperTrade | null {
@@ -452,9 +449,7 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
   const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop);
   const riskNotional = riskQty * plan.entry * effectiveMult;
   
-  const budgetCap = settings.tradingAmount > 0
-    ? availablePaperNotional(settings, currentTrades)
-    : accountBalance * 0.05;
+  const budgetCap = availablePaperNotional(settings, currentTrades, accountBalance);
   
   const notional = Math.min(budgetCap, riskNotional);
   if (notional <= 0) return null;
@@ -1927,7 +1922,7 @@ export function ProTradeScannerScreen() {
     snapshot.rows.forEach((row) => {
       const sym = baseSymbol(row.symbol);
       if (row.workflowStage !== 'trade_ready') return;
-      if (!canPaperTradeRow(row, settings, paperTrades)) return;
+      if (!canPaperTradeRow(row, settings, paperTrades, accountBalance)) return;
       if (orderedSymbols.has(sym) || tradedSymbols.has(sym) || pending.has(sym) || firedInstantRef.current.has(sym)) return;
       if (row.earningsDays !== null && Math.abs(row.earningsDays) <= 1) return;
       if (!checkStrategyCircuitBreaker(row.primaryStrategy?.strategyId || row.symbol).ok) return;
@@ -1992,7 +1987,9 @@ export function ProTradeScannerScreen() {
       const openedAt = new Date().toISOString();
 
       for (const [sym, entry] of pending) {
-        if (!checkMaxPositions([...paperTrades, ...confirmedTrades]).ok) break;
+        const allOpen = [...paperTrades, ...confirmedTrades];
+        const usedNotional = allOpen.filter(t => t.status === 'Open').reduce((s, t) => s + (t.t1HitAt ? t.notional * 0.5 : t.notional), 0);
+        if (usedNotional >= accountBalance * 0.65) break;
 
         const candles = barMap[sym];
         if (!candles || candles.length < 5) continue;
@@ -2088,8 +2085,8 @@ export function ProTradeScannerScreen() {
     if (!lossCheck.ok) { setApprovalMessage(lossCheck.reason!); return; }
     const cbCheck = checkStrategyCircuitBreaker(strategyName);
     if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
-    const posCheck = checkMaxPositions(paperTrades);
-    if (!posCheck.ok) { setApprovalMessage(posCheck.reason!); return; }
+    const usedNotional = paperTrades.filter(t => t.status === 'Open').reduce((s, t) => s + (t.t1HitAt ? t.notional * 0.5 : t.notional), 0);
+    if (usedNotional >= accountBalance * 0.65) { setApprovalMessage(`Balance utilization at ${((usedNotional / accountBalance) * 100).toFixed(0)}% — 65% cap reached. Wait for a position to close.`); return; }
     // P3: Earnings warning (manual override allowed, but alert the trader)
     if (row.earningsDays !== null && Math.abs(row.earningsDays) <= 1) {
       setApprovalMessage(`⚠ Earnings ${row.earningsStatus} — elevated gap risk. Submitting with caution.`);
@@ -2121,8 +2118,6 @@ export function ProTradeScannerScreen() {
     if (!lossCheck.ok) { setApprovalMessage(lossCheck.reason!); return; }
     const cbCheck = checkStrategyCircuitBreaker(strategyName);
     if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
-    const posCheck = checkMaxPositions(paperTrades);
-    if (!posCheck.ok) { setApprovalMessage(posCheck.reason!); return; }
     const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.spyTrend5m);
     if (!trade) {
       const plan = effectiveTradePlan(row, settings);

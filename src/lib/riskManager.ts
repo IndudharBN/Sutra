@@ -13,7 +13,7 @@ export interface RiskSettings {
 }
 
 export const DEFAULT_RISK_SETTINGS: RiskSettings = {
-  riskPerTradePct: 0.02,
+  riskPerTradePct: 0.03,
   dailyLossLimitPct: 0.08,
   maxPositions: 5,
   cbLossThreshold: 3,

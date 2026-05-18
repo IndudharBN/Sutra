@@ -7,8 +7,9 @@ const ALPACA_TF: Record<Interval, string> = {
 };
 
 // Bar history to fetch per interval (same TTLs as Stock-analyzer data_cache.py)
+// 1m: 390 covers 6.5 hours — enough to include full premarket window (4 AM–9:30 AM ET)
 const BAR_LIMIT: Record<Interval, number> = {
-  '1m': 120, '5m': 200, '15m': 80, '1h': 30, '1d': 60,
+  '1m': 390, '5m': 200, '15m': 80, '1h': 30, '1d': 60,
 };
 
 const TTL_MS: Record<Interval, number> = {
@@ -186,6 +187,8 @@ export interface SymbolMeta {
   todayVolume: number;
   rvolEst: number;   // rough estimate: today_vol / prev_day_vol * session_factor
   intradayChangePct: number;
+  prevDayHigh: number;
+  prevDayLow: number;
 }
 
 function sessionProgressFactor(): number {
@@ -211,7 +214,9 @@ export async function fetchUniverseMeta(symbols: string[]): Promise<SymbolMeta[]
     const todayVol = snap.dailyBar?.v || 0;
     const prevVol = snap.prevDailyBar?.v || 0;
     const rvolEst = prevVol > 0 && factor > 0 ? todayVol / (prevVol * factor) : 0;
-    return [{ symbol: sym, price, prevClose, gapPct, todayVolume: todayVol, rvolEst, intradayChangePct }];
+    const prevDayHigh = snap.prevDailyBar?.h ?? 0;
+    const prevDayLow = snap.prevDailyBar?.l ?? 0;
+    return [{ symbol: sym, price, prevClose, gapPct, todayVolume: todayVol, rvolEst, intradayChangePct, prevDayHigh, prevDayLow }];
   });
 }
 

@@ -290,7 +290,8 @@ function buildRowFromAlpaca(
   spyTrend5m?: 'UP' | 'DOWN' | 'FLAT',
   spyTrend15m?: 'UP' | 'DOWN' | 'FLAT',
 ): ProTradeRow {
-  const one = (candleSet['1m'] || []).slice(-120);
+  const allOne = (candleSet['1m'] || []);
+  const one = allOne.slice(-120);
   const five = (candleSet['5m'] || []).slice(-120);
   const fifteen = (candleSet['15m'] || []).slice(-80);
   const h1 = (candleSet['1h'] || []).slice(-60);
@@ -331,7 +332,7 @@ function buildRowFromAlpaca(
   const rsVsBenchmark = computeRsVsBenchmark(h1, spyChangePct);
 
   const prevDay = computePrevDay(daily);
-  const premarket = computePremarket(one);
+  const premarket = computePremarket(allOne);
 
   // Earnings status string
   let earningsStatus = 'Not checked';
@@ -415,8 +416,8 @@ function buildRowFromAlpaca(
     trend15m,
     trendAligned,
     trend15mAligned,
-    prevDayHigh: round(prevDay.high, 2),
-    prevDayLow: round(prevDay.low, 2),
+    prevDayHigh: meta.prevDayHigh > 0 ? round(meta.prevDayHigh, 2) : round(prevDay.high, 2),
+    prevDayLow: meta.prevDayLow > 0 ? round(meta.prevDayLow, 2) : round(prevDay.low, 2),
     prevDayClose: round(prevDay.close, 2),
     premarketHigh: round(premarket.high, 2),
     premarketLow: round(premarket.low, 2),
