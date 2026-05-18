@@ -352,7 +352,6 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const etMins = etNow.getHours() * 60 + etNow.getMinutes();
   const earlySession = etMins >= 9 * 60 + 45 && etMins < 10 * 60;
   const rvolMin = earlySession ? 1.5 : 1.0;
-  const orbWindowOpen = etMins < 10 * 60 + 30; // ORB retest thesis expires at 10:30 AM ET — market has decided by then
   const risk = Math.abs(entry - stop);
   const orRange = range ? range.high - range.low : 0;
   const orbWidthPct = range ? orRange / entry : 0;
@@ -365,12 +364,11 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const preferredTarget = input.direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
   const t2 = input.direction === 'BULL' ? Math.max(measuredMove, preferredTarget) : Math.min(measuredMove, preferredTarget);
-  const tradePlan = directionOk(input) && range && confirmedBreak && retest && orbWidthOk && orbWindowOpen ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = directionOk(input) && range && confirmedBreak && retest && orbWidthOk ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
     range ? pass('Opening range formed', `${round(range.low, 2)}–${round(range.high, 2)}`) : fail('Opening range formed', 'Need first 15 min of 5m candles'),
-    orbWindowOpen ? pass('ORB window', '< 10:30 AM ET ✓') : fail('ORB window', 'Past 10:30 AM ET — ORB retest thesis expired'),
     orbWidthOk ? pass('ORB width ≥0.5%', `${round(orbWidthPct * 100, 2)}% ✓`) : fail('ORB width ≥0.5%', `${round(orbWidthPct * 100, 2)}% — degenerate range: no institutional positioning`),
     confirmedBreak ? pass('ORB Breakout', `Clear of noise (+${round(breakoutDistance, 2)})`) : fail('ORB Breakout', `Inside noise floor (${round(minBreakout, 2)})`),
     retest ? pass('Retest hold', 'Breakout level retested and held') : fail('Retest hold', 'Waiting for controlled retest'),
