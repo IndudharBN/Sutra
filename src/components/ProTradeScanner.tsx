@@ -461,7 +461,7 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
     strategyId,
     strategyCode: strategyId ? STRATEGY_CODES[strategyId] : 'NA',
     strategyName: row.primaryStrategy?.strategyName || 'Manual Paper',
-    direction: row.direction,
+    direction: (row.primaryStrategy?.direction ?? row.direction) as 'BULL' | 'BEAR' | 'NEUTRAL',
     status: 'Open',
     outcome: 'Open',
     entry: plan.entry,
@@ -772,7 +772,7 @@ function WorkflowTable({
                     <td className="py-3 px-3 border-r border-white/5 text-right text-rose-300">{fmtMoney(row.tradePlan?.stop)}</td>
                     <td className="py-3 px-3 border-r border-white/5 text-right text-cyan-300">{fmtMoney(row.tradePlan?.target1 || row.tradePlan?.target)}</td>
                     <td className="py-3 px-3 border-r border-white/5 text-right text-emerald-300">{fmtMoney(row.tradePlan?.target2 || row.tradePlan?.target)}</td>
-                    <td className="py-3 px-3 border-r border-white/5 text-right text-indigo-300 font-black bg-indigo-500/5">{fmtMoney(row.tradePlan?.trailingStop)}</td>
+                    <td className="py-3 px-3 border-r border-white/5 text-right text-indigo-300 font-black bg-indigo-500/5">{fmtMoney(row.tradePlan?.stop)}</td>
                     <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">--</td>
                     <td className="py-3 px-3 border-r border-white/5 text-right text-indigo-300 font-black">{row.confidence || '--'}</td>
                     {orderedMode && (
