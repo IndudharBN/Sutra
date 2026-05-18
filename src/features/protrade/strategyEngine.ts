@@ -762,49 +762,72 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
   const bar = last(candles.five);
   if (!bar || candles.five.length < 13) return null;
 
-  // Compute average 5m bar volume from last 20 bars (excluding current)
-  const volSample = candles.five.slice(-21, -1);
+  // Mid-session volume baseline: exclude the first 6 RTH bars (9:30–10:00 AM open period).
+  // Opening bars carry 3–5× normal volume and inflate the average, making 2× impossible to hit mid-session.
+  // Fallback to rolling 20 bars when not enough mid-session history exists.
+  const todayET = new Date(bar.time).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const todayRTH = candles.five.filter((c) => {
+    const d = new Date(c.time);
+    return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === todayET
+      && d.getUTCHours() * 60 + d.getUTCMinutes() >= 13 * 60 + 30;
+  });
+  const midSessionBars = todayRTH.length > 7 ? todayRTH.slice(6, -1) : [];
+  const volSample = midSessionBars.length >= 4 ? midSessionBars : candles.five.slice(-21, -1);
   const avgVol = volSample.length ? volSample.reduce((s, c) => s + c.volume, 0) / volSample.length : 0;
   if (avgVol <= 0) return null;
-  const volSpike = bar.volume > avgVol * 2.0; // current bar 2× avg = institutional surge
-  const prev6 = candles.five.slice(-7, -1); // 6 bars = 30-min range — 15m (3 bars) was too narrow to be structural
+
+  // Project bar to full 5m volume to compensate for mid-bar polling (scanner runs every ~60s).
+  // A bar 90s in shows ~30% of its final volume — comparing raw to completed-bar average
+  // requires 6–7× mid-session rate to pass, which never happens without a catalyst.
+  const barAgeMs = Date.now() - new Date(bar.time).getTime();
+  const barProgress = Math.min(Math.max(barAgeMs / (5 * 60 * 1000), 0.1), 1.0);
+  const projectedVol = bar.volume / barProgress;
+  const volSpike = projectedVol > avgVol * 2.0;
+
+  const prev6 = candles.five.slice(-7, -1);
   if (prev6.length < 6) return null;
-
-  const high30m = Math.max(...prev6.map(b => b.high));
-  const low30m = Math.min(...prev6.map(b => b.low));
-  // S7 self-determines direction: the 30m range breakout side defines the trade direction
+  const high30m = Math.max(...prev6.map((b) => b.high));
+  const low30m = Math.min(...prev6.map((b) => b.low));
   const selfDir: 'BULL' | 'BEAR' | null = price > high30m ? 'BULL' : price < low30m ? 'BEAR' : null;
-  if (!volSpike || !selfDir) return null;
 
+  // Always return a signal (forming/screened) — not null — so S7 is visible in the UI
+  // and the user can see exactly which gate is missing. Only null for no data (above).
+  const dir: 'BULL' | 'BEAR' = selfDir ?? (price >= input.vwap ? 'BULL' : 'BEAR');
   const selfInput = {
     ...input,
-    direction: selfDir,
-    vwapAligned: selfDir === 'BULL' ? price > input.vwap : price < input.vwap,
-    trendAligned: selfDir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN',
+    direction: dir,
+    vwapAligned: dir === 'BULL' ? price > input.vwap : price < input.vwap,
+    trendAligned: dir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN',
   };
-  const rvolOk = input.rvol >= 0.8; // trailing RVOL ≥0.8× confirms session is active; single-bar 2× spike (volSpike) is the real institutional filter
-  const rawStop = selfDir === 'BULL' ? bar.low : bar.high;
-  const stop = enforceMinStop(selfDir, price, noiseFlooredStop(selfDir, price, rawStop, atr20, input.vixLevel), atr20);
+  const rvolOk = input.rvol >= 0.8;
+  const rawStop = dir === 'BULL' ? bar.low : bar.high;
+  const stop = enforceMinStop(dir, price, noiseFlooredStop(dir, price, rawStop, atr20, input.vixLevel), atr20);
   const risk = Math.abs(price - stop);
-  const t1 = selfDir === 'BULL' ? price + risk * T1_RR : price - risk * T1_RR;
-  const t2 = selfDir === 'BULL' ? price + risk * PREFERRED_RR : price - risk * PREFERRED_RR;
-  const tradePlan = rvolOk ? planFromLevelsT1T2(selfInput, price, stop, t1, t2, bar) : null;
+  const t1 = dir === 'BULL' ? price + risk * T1_RR : price - risk * T1_RR;
+  const t2 = dir === 'BULL' ? price + risk * PREFERRED_RR : price - risk * PREFERRED_RR;
+  const tradePlan = volSpike && selfDir && rvolOk ? planFromLevelsT1T2(selfInput, price, stop, t1, t2, bar) : null;
   const checklist = [
-    pass('Directional bias', `${selfDir} — self-determined from 30m range break`),
-    pass('Volume surge ≥2×', `${round(bar.volume / avgVol, 1)}× avg ✓`),
-    pass('30m range break', `${selfDir === 'BULL' ? 'Above' : 'Below'} 30m range`),
+    selfDir
+      ? pass('Directional bias', `${selfDir} — self-determined from 30m range break`)
+      : fail('Directional bias', `Price inside 30m range (${round(low30m, 2)}–${round(high30m, 2)}) — awaiting breakout`),
+    volSpike
+      ? pass('Volume surge ≥2×', `${round(projectedVol / avgVol, 1)}× projected (${round(barProgress * 100, 0)}% bar complete)`)
+      : fail('Volume surge ≥2×', `${round(projectedVol / avgVol, 1)}× projected — need institutional 2× surge`),
+    selfDir
+      ? pass('30m range break', `${selfDir === 'BULL' ? 'Above' : 'Below'} 30m range ✓`)
+      : fail('30m range break', `Inside range — no break yet`),
     rvolOk ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓ session active`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — below session minimum; vol spike may be isolated`),
-    selfInput.vwapAligned ? pass('VWAP aligned', `${selfDir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓'}`) : fail('VWAP aligned', `${selfDir === 'BULL' ? 'Below VWAP' : 'Above VWAP'} — surge against session anchor`),
+    selfInput.vwapAligned ? pass('VWAP aligned', `${dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓'}`) : fail('VWAP aligned', `${dir === 'BULL' ? 'Below VWAP' : 'Above VWAP'} — surge against session anchor`),
     pass('ADR room', `${!adrExhausted(input.candles.five, input.atr20) ? '< 80% ATR used ✓' : '>80% ATR used — watch sizing'} — informational`),
     spyTapeCheck(selfInput),
   ];
-  const sig = signal('s7_volume_surge', selfInput, checklist, tradePlan, 'S7: Institutional 2× volume surge on 30m range break + RVOL≥0.8×. Hard gates: volSpike (2× single-bar), breakout, rvolOk (0.8× trailing), vwapAligned, spyTape.');
+  const sig = signal('s7_volume_surge', selfInput, checklist, tradePlan, 'S7: Institutional 2× volume surge on 30m range break + RVOL≥0.8×. Hard gates: volSpike (2× projected), selfDir (range break), rvolOk (0.8×), vwapAligned, spyTape.');
   // Pre-blackout gap fire: allow S7 to fire at 9:30–9:45 AM on strong gap days (>3% gap + live data)
   if (
     sig.stage === 'locked' &&
     sessionGate() === 'blackout' &&
     input.dataStatus.mode === 'live' && !input.dataStatus.stale &&
-    ((selfDir === 'BULL' && input.gapPct >= 3) || (selfDir === 'BEAR' && input.gapPct <= -3))
+    ((dir === 'BULL' && input.gapPct >= 3) || (dir === 'BEAR' && input.gapPct <= -3))
   ) {
     return { ...sig, stage: 'trade_ready' as const };
   }
