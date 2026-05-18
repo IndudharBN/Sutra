@@ -81,16 +81,12 @@ interface ProTradeSettings {
   maxPerOrder: number;
   tradingAmount: number;
   tradingAmountPct: number;
-  targetPct: number;
-  stopLossPct: number;
 }
 
 const DEFAULT_PROTRADE_SETTINGS: ProTradeSettings = {
   maxPerOrder: PAPER_NOTIONAL,
   tradingAmount: 0,
   tradingAmountPct: 100,
-  targetPct: 0,
-  stopLossPct: 0,
 };
 
 interface PaperTrade {
@@ -154,8 +150,6 @@ function loadProTradeSettings() {
       maxPerOrder: Number(parsed.maxPerOrder || DEFAULT_PROTRADE_SETTINGS.maxPerOrder),
       tradingAmount: Number(parsed.tradingAmount || 0),
       tradingAmountPct: Number(parsed.tradingAmountPct || DEFAULT_PROTRADE_SETTINGS.tradingAmountPct),
-      targetPct: Number(parsed.targetPct || 0),
-      stopLossPct: Number(parsed.stopLossPct || 0),
     };
   } catch {
     return DEFAULT_PROTRADE_SETTINGS;
@@ -375,35 +369,11 @@ function monitorPaperTrades(trades: PaperTrade[], rows: ProTradeRow[]) {
   return { trades: next, changed };
 }
 
-function effectiveTradePlan(row: ProTradeRow, settings: ProTradeSettings) {
+function effectiveTradePlan(row: ProTradeRow, _settings: ProTradeSettings) {
   if (!row.tradePlan || row.tradePlan.entry <= 0 || row.direction === 'NEUTRAL') return null;
-  const entry = row.tradePlan.entry;
-  const stop = settings.stopLossPct > 0
-    ? row.direction === 'BEAR'
-      ? entry * (1 + settings.stopLossPct / 100)
-      : entry * (1 - settings.stopLossPct / 100)
-    : row.tradePlan.stop;
-  const target = settings.targetPct > 0
-    ? row.direction === 'BEAR'
-      ? entry * (1 - settings.targetPct / 100)
-      : entry * (1 + settings.targetPct / 100)
-    : row.tradePlan.target;
-  const risk = Math.abs(entry - stop);
+  const risk = Math.abs(row.tradePlan.entry - row.tradePlan.stop);
   if (risk <= 0) return null;
-  const target1 = row.direction === 'BEAR' ? entry - risk * 1.5 : entry + risk * 1.5;
-  const target2 = row.direction === 'BEAR' ? Math.min(target, target1) : Math.max(target, target1);
-  const reward = Math.abs(target2 - entry);
-  if (reward <= 0) return null;
-  return {
-    ...row.tradePlan,
-    stop: Number(stop.toFixed(2)),
-    target: Number(target2.toFixed(2)),
-    target1: Number(target1.toFixed(2)),
-    target2: Number(target2.toFixed(2)),
-    rr: Number((reward / risk).toFixed(2)),
-    rr1: 1.5,
-    riskPerShare: Number(risk.toFixed(2)),
-  };
+  return row.tradePlan;
 }
 
 function availablePaperNotional(settings: ProTradeSettings, trades: PaperTrade[]) {
@@ -1282,23 +1252,6 @@ function ProTradeSettingsPanel({
             />
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <SettingsField
-              label="Target Override"
-              value={settings.targetPct}
-              suffix="%"
-              placeholder="System"
-              onChange={(value) => onChange({ ...settings, targetPct: value })}
-            />
-            <SettingsField
-              label="Stop Loss Override"
-              value={settings.stopLossPct}
-              suffix="%"
-              placeholder="System"
-              onChange={(value) => onChange({ ...settings, stopLossPct: value })}
-            />
-          </div>
-
           <div className="rounded-xl border border-white/10 bg-white/5 p-3">
             <p className="text-[10px] uppercase tracking-widest text-slate-500 font-black">Effective Rules</p>
             <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
@@ -1311,12 +1264,12 @@ function ProTradeSettingsPanel({
                 <p className="font-mono text-white">{usableBudget > 0 ? fmtMoney(usableBudget) : 'No cap'}</p>
               </div>
               <div>
-                <p className="text-slate-500">Target</p>
-                <p className="font-mono text-white">{settings.targetPct > 0 ? `${settings.targetPct}%` : 'System'}</p>
+                <p className="text-slate-500">Stop loss</p>
+                <p className="font-mono text-white">Strategy engine (structural ATR)</p>
               </div>
               <div>
-                <p className="text-slate-500">Stop loss</p>
-                <p className="font-mono text-white">{settings.stopLossPct > 0 ? `${settings.stopLossPct}%` : 'System'}</p>
+                <p className="text-slate-500">Target</p>
+                <p className="font-mono text-white">Strategy engine (PDH/PDL)</p>
               </div>
             </div>
           </div>
