@@ -390,7 +390,7 @@ function effectiveTradePlan(row: ProTradeRow, settings: ProTradeSettings) {
     : row.tradePlan.target;
   const risk = Math.abs(entry - stop);
   if (risk <= 0) return null;
-  const target1 = row.direction === 'BEAR' ? entry - risk * 2 : entry + risk * 2;
+  const target1 = row.direction === 'BEAR' ? entry - risk * 1.5 : entry + risk * 1.5;
   const target2 = row.direction === 'BEAR' ? Math.min(target, target1) : Math.max(target, target1);
   const reward = Math.abs(target2 - entry);
   if (reward <= 0) return null;
@@ -401,7 +401,7 @@ function effectiveTradePlan(row: ProTradeRow, settings: ProTradeSettings) {
     target1: Number(target1.toFixed(2)),
     target2: Number(target2.toFixed(2)),
     rr: Number((reward / risk).toFixed(2)),
-    rr1: 2,
+    rr1: 1.5,
     riskPerShare: Number(risk.toFixed(2)),
   };
 }
