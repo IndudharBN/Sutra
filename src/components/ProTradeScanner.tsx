@@ -309,6 +309,7 @@ function paperTrailingStop(trade: PaperTrade) {
 
 function monitorPaperTrades(trades: PaperTrade[], rows: ProTradeRow[]) {
   const priceBySymbol = new Map(rows.map((row) => [baseSymbol(row.symbol), row.price]));
+  const vwapBySymbol = new Map(rows.map((row) => [baseSymbol(row.symbol), row.vwap]));
   let changed = false;
   const now = Date.now();
   const next = trades.map((trade) => {
@@ -358,6 +359,15 @@ function monitorPaperTrades(trades: PaperTrade[], rows: ProTradeRow[]) {
         ? (trade.direction === 'BEAR' ? Math.min(trailingStop, current) : Math.max(trailingStop, current))
         : current;
       return closePaperTrade(trade, exitPrice, trade.t1HitAt ? 'T1 Profit' : 'Stop');
+    }
+    // S2 structural exit: VWAP reclaim failed — close when price crosses back through VWAP pre-T1.
+    // After T1, trailing stop already protects; this only applies while the thesis is unconfirmed.
+    if (trade.strategyId === 'vwap_pullback' && !trade.t1HitAt) {
+      const vwap = vwapBySymbol.get(baseSymbol(trade.symbol));
+      if (vwap && (trade.direction === 'BULL' ? current < vwap : current > vwap)) {
+        changed = true;
+        return closePaperTrade(trade, current, 'Stop');
+      }
     }
     return trade;
   });
