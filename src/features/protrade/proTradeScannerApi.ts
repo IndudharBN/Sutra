@@ -81,6 +81,7 @@ export interface ProTradeSnapshot {
   universeBuiltAt: string | null;
   providerStatus: string;
   spyTrend5m: 'UP' | 'DOWN' | 'FLAT';
+  spyTrend15m: 'UP' | 'DOWN' | 'FLAT';
   regime: MarketRegime;
 }
 
@@ -287,6 +288,7 @@ function buildRowFromAlpaca(
   spyChangePct: number,
   vixLevel?: number | null,
   spyTrend5m?: 'UP' | 'DOWN' | 'FLAT',
+  spyTrend15m?: 'UP' | 'DOWN' | 'FLAT',
 ): ProTradeRow {
   const one = (candleSet['1m'] || []).slice(-120);
   const five = (candleSet['5m'] || []).slice(-120);
@@ -372,6 +374,7 @@ function buildRowFromAlpaca(
     earningsDays,
     vixLevel,
     spyTrend5m,
+    spyTrend15m,
     dataStatus: providerStatus,
     candles,
   });
@@ -436,7 +439,7 @@ export { clearUniverseCache };
 export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRow[]> {
   if (!symbols.length) return [];
   const metas = await fetchUniverseMeta(symbols);
-  const [bars1m, bars5m, bars15m, bars1h, bars1d, sectorTrends, newsFlags, spy5mBars, spyH1Bars, spyRegimeData] = await Promise.all([
+  const [bars1m, bars5m, bars15m, bars1h, bars1d, sectorTrends, newsFlags, spy5mBars, spy15mBars, spyH1Bars, spyRegimeData] = await Promise.all([
     fetchBars(symbols, '1m'),
     fetchBars(symbols, '5m'),
     fetchBars(symbols, '15m'),
@@ -445,10 +448,12 @@ export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRo
     fetchSectorTrends(),
     fetchNewsFlags(symbols),
     fetchBars(['SPY'], '5m'),
+    fetchBars(['SPY'], '15m'),
     fetchBars(['SPY'], '1h'),
     fetchSpyDailyBars(),
   ]);
   const spyTrend5m = candleTrend(spy5mBars['SPY'] || []);
+  const spyTrend15m = candleTrend(spy15mBars['SPY'] || []);
   const vixLevel = spyRegimeData.vixLevel;
   // 3-bar rolling SPY change — matches computeRsVsBenchmark window; was hardcoded 0 in caller
   const spyH1 = (spyH1Bars['SPY'] || []).slice(-5);
@@ -463,7 +468,7 @@ export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRo
     if (!meta) return [];
     const candleSet = buildCandleSet(sym, { '1m': bars1m, '5m': bars5m, '15m': bars15m, '1h': bars1h, '1d': bars1d });
     const earningsDays = getEarningsDays(sym);
-    return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m)];
+    return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m)];
   });
 }
 
@@ -488,7 +493,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
   // Guarantee pinned watchlist symbols are always scanned regardless of score rank
   const top = [...new Set([...scored, ...pinnedSymbols])];
 
-  const [bars1m, bars5m, bars15m, bars1h, bars1d, newsFlags, sectorTrends, spyBars, spyRegimeData, spy5mBars] = await Promise.all([
+  const [bars1m, bars5m, bars15m, bars1h, bars1d, newsFlags, sectorTrends, spyBars, spyRegimeData, spy5mBars, spy15mBars] = await Promise.all([
     fetchBars(top, '1m'),
     fetchBars(top, '5m'),
     fetchBars(top, '15m'),
@@ -499,6 +504,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
     fetchBars(['SPY'], '1h'),
     fetchSpyDailyBars(),
     fetchBars(['SPY'], '5m'),
+    fetchBars(['SPY'], '15m'),
   ]);
 
   // Warm float cache in background — earnings already pre-warmed above
@@ -512,6 +518,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
 
   const spy5m = (spy5mBars['SPY'] || []);
   const spyTrend5m = candleTrend(spy5m);
+  const spyTrend15m = candleTrend(spy15mBars['SPY'] || []);
 
   // Macro regime: SPY EMA200 (daily) + VIX
   const spyDailyCloses = spyRegimeData.spyBars.map((c) => c.close);
@@ -531,7 +538,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
       if (!meta) return [];
       const candleSet = buildCandleSet(sym, { '1m': bars1m, '5m': bars5m, '15m': bars15m, '1h': bars1h, '1d': bars1d });
       const earningsDays = getEarningsDays(sym);
-      return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m)];
+      return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m)];
     })
     .sort((a, b) => b.confidence - a.confidence || b.score - a.score);
 
@@ -547,6 +554,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
     universeBuiltAt: getUniverseBuiltAt(),
     providerStatus: `Alpaca IEX • ${top.length} symbols`,
     spyTrend5m,
+    spyTrend15m,
     regime,
   };
 }

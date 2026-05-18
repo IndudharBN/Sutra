@@ -10,6 +10,8 @@ const MIN_RR = 1.5;
 const PREFERRED_RR = 2.5;
 const T1_RR = 1.5;           // scale out 50% at T1, SL → entry (BE), then → T1 on pullback confirm
 const STOP_BUFFER_ATR = 0.5; // breathing room beyond anchor extreme
+const MIN_STOP_ATR = 0.5;    // stop must be ≥ 50% of daily ATR from entry
+const MIN_STOP_PCT = 0.005;  // stop must be ≥ 0.5% of price — catches atr20=0 (no daily data)
 
 function noiseFloor(vixLevel?: number | null) {
   if (!vixLevel) return 0.75;
@@ -92,6 +94,44 @@ function noiseFlooredStop(direction: 'BULL' | 'BEAR', entry: number, rawStop: nu
   const nf = noiseFloor(vixLevel);
   const floor = direction === 'BULL' ? entry - atr20 * nf : entry + atr20 * nf;
   return direction === 'BULL' ? Math.min(rawStop, floor) : Math.max(rawStop, floor);
+}
+
+// Hard minimum stop distance — prevents $0.01-$0.07 stops when atr20 is near-zero
+// or structural zone (OB/FVG/sweep) sits too close to entry.
+// Takes the looser of: structural stop vs. min-distance floor (more room wins).
+function enforceMinStop(direction: 'BULL' | 'BEAR', entry: number, stop: number, atr20: number): number {
+  const minDist = Math.max(atr20 * MIN_STOP_ATR, entry * MIN_STOP_PCT);
+  if (direction === 'BULL') {
+    const enforced = Math.min(stop, entry - minDist);
+    // Reject zero/negative/NaN stops (bad OB zone data where ob.low = 0 or NaN)
+    return Number.isFinite(enforced) && enforced > 0 ? enforced : entry - minDist;
+  }
+  const enforced = Math.max(stop, entry + minDist);
+  return Number.isFinite(enforced) ? enforced : entry + minDist;
+}
+
+// SPY 5m tape check — for BREAKOUT strategies (S1, S3, S6, S7, S9).
+// Counter-tape breakout: fails checklist → stays 'forming', not auto-traded.
+function spyTapeCheck(input: StrategyInput): StrategyChecklistItem {
+  const spy5m = input.spyTrend5m;
+  if (!spy5m || spy5m === 'FLAT') return pass('SPY tape', 'Tape flat — no directional filter');
+  if (input.direction === 'NEUTRAL') return pass('SPY tape', 'Direction undetermined — no filter');
+  const aligned = input.direction === 'BULL' ? spy5m === 'UP' : spy5m === 'DOWN';
+  return aligned
+    ? pass('SPY tape', `SPY 5m ${spy5m} ✓ tape aligned with ${input.direction}`)
+    : fail('SPY tape', `SPY 5m ${spy5m} — counter-tape: environment opposes ${input.direction} breakout`);
+}
+
+// SPY 15m session check — for PULLBACK strategies (S2, S8) and zone strategies (S4, S5).
+// Pullback setups need the session to be going their way even though the 5m may dip (that's the pullback).
+function spySessionCheck(input: StrategyInput): StrategyChecklistItem {
+  const spy15m = input.spyTrend15m;
+  if (!spy15m || spy15m === 'FLAT') return pass('SPY session', 'Session neutral — no directional filter');
+  if (input.direction === 'NEUTRAL') return pass('SPY session', 'Direction undetermined — no filter');
+  const aligned = input.direction === 'BULL' ? spy15m === 'UP' : spy15m === 'DOWN';
+  return aligned
+    ? pass('SPY session', `SPY 15m ${spy15m} ✓ session supports ${input.direction}`)
+    : fail('SPY session', `SPY 15m ${spy15m} — counter-session: hostile environment for ${input.direction} pullback`);
 }
 
 // Previous day's high/low for structural T2 targeting (PDH/PDL).
@@ -301,12 +341,21 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const rangeBreak = range ? directionalBreak(input, input.price, range.high, range.low) : false;
   const retest = range ? recentRetest(input, input.direction === 'BULL' ? range.high : range.low) : false;
   const entry = input.price;
+  // Anchor stop to the structural ORB level, not the trigger bar's low/high.
+  // 1×ATR behind ORB high/low survives the liquidity sweep before the real move.
   const rawStop = input.direction === 'BULL'
-    ? Math.min(range?.high ?? entry, trigger?.low ?? entry) - input.atr20 * STOP_BUFFER_ATR
-    : Math.max(range?.low ?? entry, trigger?.high ?? entry) + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20, input.vixLevel);
+    ? (range?.high ?? entry) - input.atr20 * 1.0
+    : (range?.low ?? entry) + input.atr20 * 1.0;
+  const stop = enforceMinStop(input.direction as 'BULL' | 'BEAR', entry, noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20, input.vixLevel), input.atr20);
+  // 9:45–10:00 AM ET: first 15 min after blackout — ORB barely formed, higher noise; require stronger RVOL
+  const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const etMins = etNow.getHours() * 60 + etNow.getMinutes();
+  const earlySession = etMins >= 9 * 60 + 45 && etMins < 10 * 60;
+  const rvolMin = earlySession ? 1.5 : 1.0;
   const risk = Math.abs(entry - stop);
   const orRange = range ? range.high - range.low : 0;
+  const orbWidthPct = range ? orRange / entry : 0;
+  const orbWidthOk = orbWidthPct >= 0.005; // ≥0.5% of price — tighter ranges have no institutional positioning
   const breakoutLevel = range ? (input.direction === 'BULL' ? range.high : range.low) : entry;
   const breakoutDistance = input.direction === 'BULL' ? (input.price - breakoutLevel) : (breakoutLevel - input.price);
   const minBreakout = input.atr20 * 0.25;
@@ -315,19 +364,21 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const preferredTarget = input.direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
   const t2 = input.direction === 'BULL' ? Math.max(measuredMove, preferredTarget) : Math.min(measuredMove, preferredTarget);
-  const tradePlan = directionOk(input) && range && confirmedBreak && retest ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = directionOk(input) && range && confirmedBreak && retest && orbWidthOk ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
     range ? pass('Opening range formed', `${round(range.low, 2)}–${round(range.high, 2)}`) : fail('Opening range formed', 'Need first 15 min of 5m candles'),
+    orbWidthOk ? pass('ORB width ≥0.5%', `${round(orbWidthPct * 100, 2)}% ✓`) : fail('ORB width ≥0.5%', `${round(orbWidthPct * 100, 2)}% — degenerate range: no institutional positioning`),
     confirmedBreak ? pass('ORB Breakout', `Clear of noise (+${round(breakoutDistance, 2)})`) : fail('ORB Breakout', `Inside noise floor (${round(minBreakout, 2)})`),
     retest ? pass('Retest hold', 'Breakout level retested and held') : fail('Retest hold', 'Waiting for controlled retest'),
-    input.rvol >= 1.0 ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — ORB breakout requires RTH volume confirmation`),
+    input.rvol >= rvolMin ? pass(`RVOL ≥${rvolMin}×`, `${round(input.rvol, 2)}× ✓`) : fail(`RVOL ≥${rvolMin}×`, `${round(input.rvol, 2)}× — ${earlySession ? 'early session (9:45–10:00) requires ≥1.5×' : 'ORB breakout requires RTH volume confirmation'}`),
     pass('ADR room', `${adrExhausted(input.candles.five, input.atr20) ? '>80% ATR used — watch' : '< 80% ATR used ✓'} — informational`),
     pass('VWAP context', `${input.vwapAligned ? 'VWAP ✓' : 'early session'} — informational`),
     ema1mCheck(input),
+    spyTapeCheck(input),
   ];
-  return signal('orb_retest', input, checklist, tradePlan, 'Opening range breakout with controlled retest, VWAP, RVOL, and 1m timing.', false, range ? [{
+  return signal('orb_retest', input, checklist, tradePlan, 'S1 ORB retest: breakout + retest + ORB width ≥0.5% + stop 1×ATR behind structural level. Hard gates: direction, confirmedBreak, retest, orbWidthOk, rvol.', false, range ? [{
     label: 'Opening Range',
     startTime: range.startTime,
     endTime: range.endTime,
@@ -340,7 +391,16 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const trigger = last(input.candles.five);
   const recent = input.candles.five.slice(-6); // 30-min window — 60-min was catching stale retests from an hour ago
   const tolerance = Math.max(input.atr20 * 0.2, input.price * 0.002);
-  const ema9 = last(ema(closes(input.candles.five), 9)) || input.vwap; // full history for valid 9-period EMA
+  const ema9Series = ema(closes(input.candles.five), 9);
+  const ema9 = last(ema9Series) || input.vwap; // full history for valid 9-period EMA
+  const ema9Prev = ema9Series.length >= 11 ? ema9Series[ema9Series.length - 11] : null;
+  const vwapSlope = ema9Prev && Number.isFinite(ema9Prev) && Number.isFinite(ema9)
+    ? (ema9 - ema9Prev) / ema9Prev
+    : null;
+  // Flat VWAP = range session: pullback reclaims are 50/50, not trending. Require 0.05% directional slope over 50m.
+  const vwapSlopeOk = vwapSlope !== null
+    ? (input.direction === 'BULL' ? vwapSlope >= 0.0005 : vwapSlope <= -0.0005)
+    : true;
   const touchedValue = recent.some((c) => input.direction === 'BULL'
     ? (c.low <= input.vwap + tolerance || c.low <= ema9 + tolerance)
     : (c.high >= input.vwap - tolerance || c.high >= ema9 - tolerance)
@@ -352,11 +412,11 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const entry = input.price;
   const swing = input.direction === 'BULL' ? Math.min(...recent.map((c) => c.low)) : Math.max(...recent.map((c) => c.high));
   const rawStop = input.direction === 'BULL' ? swing - input.atr20 * STOP_BUFFER_ATR : swing + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20, input.vixLevel);
+  const stop = enforceMinStop(input.direction as 'BULL' | 'BEAR', entry, noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20, input.vixLevel), input.atr20);
   const risk = Math.abs(entry - stop);
   const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(input, entry, risk, t1);
-  const tradePlan = directionOk(input) && touchedValue && reclaimed && rvolOk && rsOk ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = directionOk(input) && touchedValue && reclaimed && rvolOk && rsOk && vwapSlopeOk ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
     htfTrendCheck(input),
@@ -366,9 +426,13 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
     rvolOk ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — dead-volume reclaims fail`),
     pass('VWAP context', `${input.vwapAligned ? 'Above VWAP ✓' : 'Near VWAP'} — informational`),
     rsOk ? pass('RS vs SPY ≥1.0×', rsLabel) : fail('RS vs SPY ≥1.0×', `${rsLabel} — laggard VWAP reclaims fail on strong SPY days`),
+    vwapSlopeOk
+      ? pass('VWAP slope', `${round((vwapSlope ?? 0) * 100, 3)}% over 50m — directional session ✓`)
+      : fail('VWAP slope', `VWAP flat (${round((vwapSlope ?? 0) * 100, 3)}%) — range session: pullback 50/50`),
     ema1mCheck(input),
+    spySessionCheck(input),
   ];
-  return signal('vwap_pullback', input, checklist, tradePlan, 'VWAP pullback: fresh 30m test + reclaim + 5m re-aligned + RVOL≥0.8 + RS≥1.0. Hard gates: direction, touchedValue, reclaimed, trendAligned, rvolOk, rsOk.');
+  return signal('vwap_pullback', input, checklist, tradePlan, 'S2 VWAP pullback: fresh 30m test + reclaim + 5m aligned + RVOL≥0.8 + RS≥1.0 + VWAP slope. Hard gates: direction, touchedValue, reclaimed, trendAligned, rvolOk, rsOk, vwapSlopeOk.');
 }
 
 export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
@@ -396,11 +460,13 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
     : input;
   const entry = input.price;
   const rawStop = dir === 'BULL' ? microLow - input.atr20 * STOP_BUFFER_ATR : microHigh + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
+  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel), input.atr20);
+  // Guard: stop must be on the correct side of entry. Bad price data (wrong API tick) can invert this.
+  const stopSide = dir === 'BULL' ? stop < entry : stop > entry;
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
-  const tradePlan = recent.length >= 6 && rsEdge && breakout ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = recent.length >= 6 && rsEdge && breakout && stopSide ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const fifteen = input.candles.fifteen;
   const trend1h: 'UP' | 'DOWN' | 'FLAT' = fifteen.length >= 5
     ? (fifteen[fifteen.length - 1].close > fifteen[fifteen.length - 5].close * 1.001 ? 'UP'
@@ -414,10 +480,12 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
     pass('5m trend', `${selfInput.trend5m}${selfInput.trendAligned ? ' aligned ✓' : ' — pullback entry phase'} — informational`),
     breakout ? pass('Micro range break', 'Latest candle broke the local range') : fail('Micro range break', 'Waiting for micro breakout'),
     input.rvol >= 1.0 ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — breakout needs ≥1.0×`),
+    stopSide ? pass('Stop geometry', `Stop ${round(stop, 2)} ${dir === 'BULL' ? 'below' : 'above'} entry ✓`) : fail('Stop geometry', `Stop ${round(stop, 2)} on wrong side of entry ${round(entry, 2)} — bad price data, skip`),
     pass('VWAP context', `${selfInput.vwapAligned ? 'VWAP ✓' : 'VWAP (below — watch for reclaim)'} — informational`),
     ema1mCheck(input),
+    spyTapeCheck(selfInput),
   ];
-  return signal('rs_continuation', selfInput, checklist, tradePlan, 'S3 RS continuation: micro range break + RS≥0.5% + RVOL≥1.0. Hard gates: breakout (self-determines direction), rsEdge, rvol.');
+  return signal('rs_continuation', selfInput, checklist, tradePlan, 'S3 RS continuation: micro range break + RS≥0.5% + RVOL≥1.0. Hard gates: breakout (self-determines direction), rsEdge, rvol, stopSide.');
 }
 
 export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
@@ -485,7 +553,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     : false;
   const sweepRef = dir === 'BULL' ? (sweepCandle ? sweepCandle.low : entry) : (sweepCandle ? sweepCandle.high : entry);
   const rawStop = dir === 'BULL' ? sweepRef - input.atr20 * STOP_BUFFER_ATR : sweepRef + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
+  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel), input.atr20);
   const risk = Math.abs(entry - stop);
   const orOpposite = range ? (dir === 'BULL' ? range.high : range.low) : null;
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
@@ -526,6 +594,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     nearLevel ? pass('Entry proximity', 'Price within 1.5×ATR of level ✓') : fail('Entry proximity', 'Price too far from swept level — do not chase'),
     pass('Volume confirmation', `${round(input.rvol, 2)}x${input.rvol >= 0.8 ? ' — confirmed' : ' — low, sweep structure is primary signal'}`),
     ema1mCheck(input),
+    spySessionCheck(selfInput),
   ];
   return signal('liquidity_sweep', selfInput, checklist, tradePlan, `S4 Sweep (${sweepSource ?? 'no level'}): T1=${orOpposite ? 'OR opposite' : '2R'} T2=${orOpposite ? round(orOpposite, 2) : '2.5R'}`);
 }
@@ -585,7 +654,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const rawStop = structureLow !== null && structureHigh !== null
     ? (dir === 'BULL' ? structureLow - input.atr20 * STOP_BUFFER_ATR : structureHigh + input.atr20 * STOP_BUFFER_ATR)
     : entry;
-  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
+  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel), input.atr20);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
@@ -621,6 +690,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
     pass('RTH bars', `${rthBars} bars${rthBars >= 5 ? ' ✓' : ' — early session'} — informational`),
     pass('ADR room', `${adrExhausted(input.candles.five, input.atr20) ? '>80% ATR used — watch' : '< 80% ATR used ✓'} — informational`),
     ema1mCheck(input),
+    spyTapeCheck(selfInput),
   ];
   return signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5: OB or FVG retest. Hard gates: OB needs rejection candle (zone holding, not breaking); FVG just needs price in gap; both need RVOL≥1.0×.');
 }
@@ -654,21 +724,21 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
   const mssOk = Boolean(selfDir);
   const bar2Ok = mssOk && (
     dir === 'BULL'
-      ? input.price > protectedHigh - input.atr20 * 0.4 // 0.4×ATR — confirms break is holding, not re-entering range
-      : input.price < protectedLow + input.atr20 * 0.4
+      ? input.price > protectedHigh - input.atr20 * 0.8 // 0.8×ATR — was 0.4, too tight; genuine MSS runs fast
+      : input.price < protectedLow + input.atr20 * 0.8
   );
   const aheadOb = findOrderBlockZone(five, dir === 'BULL' ? 'BEAR' : 'BULL', 1.1, 60);
   const zoneBlocked = aheadOb
     ? (dir === 'BULL'
-        ? input.price < aheadOb.low && aheadOb.low <= input.price + input.atr20 * 0.5
-        : input.price > aheadOb.high && aheadOb.high >= input.price - input.atr20 * 0.5)
+        ? input.price < aheadOb.low && aheadOb.low <= input.price + input.atr20 * 1.0
+        : input.price > aheadOb.high && aheadOb.high >= input.price - input.atr20 * 1.0)
     : false;
   const volOk = input.rvol >= 0.8;
   const entry = input.price;
   const swingStop = dir === 'BULL'
     ? Math.min(...five.slice(-5).map((c) => c.low)) - input.atr20 * STOP_BUFFER_ATR
     : Math.max(...five.slice(-5).map((c) => c.high)) + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(dir, entry, swingStop, input.atr20, input.vixLevel);
+  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, swingStop, input.atr20, input.vixLevel), input.atr20);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
@@ -678,12 +748,13 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
     htfTrendCheck(selfInput),
     mssOk ? pass('MSS detected', 'Structural high/low broken') : fail('MSS detected', 'Waiting for break'),
     bar2Ok ? pass('Bar-2 hold', 'MSS level maintained ✓') : fail('Bar-2 hold', 'Price extended too far from break — do not chase'),
-    !zoneBlocked ? pass('Zone clearance', 'Clear path ahead') : fail('Zone clearance', 'Opposing OB within 0.5×ATR — too close'),
+    !zoneBlocked ? pass('Zone clearance', 'Clear path ahead ✓') : fail('Zone clearance', 'Opposing OB within 1×ATR — insufficient clearance'),
     pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP side mismatch — watch'} — informational`),
     volOk ? pass('RVOL', `${round(input.rvol, 2)}× ✓`) : fail('RVOL', `${round(input.rvol, 2)}× — below 0.8 minimum for structural break`),
     ema1mCheck(input),
+    spyTapeCheck(selfInput),
   ];
-  return signal('mss_breakout', selfInput, checklist, tradePlan, 'S6 MSS: structural break + clear path. Hard gates: mssOk (self-determines direction), bar2Ok, zoneBlocked (0.5×ATR), RVOL≥0.8.');
+  return signal('mss_breakout', selfInput, checklist, tradePlan, 'S6 MSS: structural break + clear path. Hard gates: mssOk (self-determines direction), bar2Ok (0.8×ATR), zoneBlocked (1×ATR), RVOL≥0.8.');
 }
 
 function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
@@ -711,9 +782,9 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
     vwapAligned: selfDir === 'BULL' ? price > input.vwap : price < input.vwap,
     trendAligned: selfDir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN',
   };
-  const rvolOk = input.rvol >= 1.5; // trailing RVOL confirms broad flow, not just one spike bar
+  const rvolOk = input.rvol >= 0.8; // trailing RVOL ≥0.8× confirms session is active; single-bar 2× spike (volSpike) is the real institutional filter
   const rawStop = selfDir === 'BULL' ? bar.low : bar.high;
-  const stop = noiseFlooredStop(selfDir, price, rawStop, atr20, input.vixLevel);
+  const stop = enforceMinStop(selfDir, price, noiseFlooredStop(selfDir, price, rawStop, atr20, input.vixLevel), atr20);
   const risk = Math.abs(price - stop);
   const t1 = selfDir === 'BULL' ? price + risk * T1_RR : price - risk * T1_RR;
   const t2 = selfDir === 'BULL' ? price + risk * PREFERRED_RR : price - risk * PREFERRED_RR;
@@ -722,11 +793,12 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
     pass('Directional bias', `${selfDir} — self-determined from 30m range break`),
     pass('Volume surge ≥2×', `${round(bar.volume / avgVol, 1)}× avg ✓`),
     pass('30m range break', `${selfDir === 'BULL' ? 'Above' : 'Below'} 30m range`),
-    rvolOk ? pass('RVOL ≥1.5×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.5×', `${round(input.rvol, 2)}× — single-bar spike without broad flow`),
+    rvolOk ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓ session active`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — below session minimum; vol spike may be isolated`),
     selfInput.vwapAligned ? pass('VWAP aligned', `${selfDir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓'}`) : fail('VWAP aligned', `${selfDir === 'BULL' ? 'Below VWAP' : 'Above VWAP'} — surge against session anchor`),
     pass('ADR room', `${!adrExhausted(input.candles.five, input.atr20) ? '< 80% ATR used ✓' : '>80% ATR used — watch sizing'} — informational`),
+    spyTapeCheck(selfInput),
   ];
-  const sig = signal('s7_volume_surge', selfInput, checklist, tradePlan, 'S7: Institutional 2× volume surge + RVOL≥1.5 on 30m range break. Hard gates: volSpike, breakout, rvolOk, vwapAligned.');
+  const sig = signal('s7_volume_surge', selfInput, checklist, tradePlan, 'S7: Institutional 2× volume surge on 30m range break + RVOL≥0.8×. Hard gates: volSpike (2× single-bar), breakout, rvolOk (0.8× trailing), vwapAligned, spyTape.');
   // Pre-blackout gap fire: allow S7 to fire at 9:30–9:45 AM on strong gap days (>3% gap + live data)
   if (
     sig.stage === 'locked' &&
@@ -782,7 +854,7 @@ export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
   const swingStop = dir === 'BULL'
     ? Math.min(...five.slice(-4).map((c) => c.low)) - input.atr20 * STOP_BUFFER_ATR
     : Math.max(...five.slice(-4).map((c) => c.high)) + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(dir, entry, swingStop, input.atr20, input.vixLevel);
+  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, swingStop, input.atr20, input.vixLevel), input.atr20);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
@@ -805,6 +877,7 @@ export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
     pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP misaligned — watch'} — informational`),
     input.rvol >= 0.8 ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — EMA bounce in low volume is chop, not trend`),
     ema1mCheck(input),
+    spySessionCheck(selfInput),
   ];
 
   return signal('ema20_bounce', selfInput, checklist, tradePlan,
@@ -851,7 +924,7 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
   const rawStop = dir === 'BULL'
     ? flagLow - input.atr20 * STOP_BUFFER_ATR
     : flagHigh + input.atr20 * STOP_BUFFER_ATR;
-  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
+  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel), input.atr20);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
@@ -876,6 +949,7 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
     htfTrendCheck(selfInput),
     pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP misaligned — watch'} — informational`),
     ema1mCheck(input),
+    spyTapeCheck(selfInput),
   ];
 
   return signal('flag_break', selfInput, checklist, tradePlan,
