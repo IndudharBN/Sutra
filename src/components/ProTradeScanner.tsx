@@ -360,9 +360,10 @@ function monitorPaperTrades(trades: PaperTrade[], rows: ProTradeRow[]) {
         : current;
       return closePaperTrade(trade, exitPrice, trade.t1HitAt ? 'T1 Profit' : 'Stop');
     }
-    // S2 structural exit: VWAP reclaim failed — close when price crosses back through VWAP pre-T1.
-    // After T1, trailing stop already protects; this only applies while the thesis is unconfirmed.
-    if (trade.strategyId === 'vwap_pullback' && !trade.t1HitAt) {
+    // S2/S3 structural exit: thesis died when price crosses back through VWAP pre-T1.
+    // S2 (VWAP reclaim): VWAP re-cross = reclaim failed. S3 (RS continuation): VWAP re-cross = RS edge gone.
+    // After T1, trailing stop is at breakeven — position is protected, this exit no longer needed.
+    if ((trade.strategyId === 'vwap_pullback' || trade.strategyId === 'rs_continuation') && !trade.t1HitAt) {
       const vwap = vwapBySymbol.get(baseSymbol(trade.symbol));
       if (vwap && (trade.direction === 'BULL' ? current < vwap : current > vwap)) {
         changed = true;
@@ -412,7 +413,11 @@ function availablePaperNotional(settings: ProTradeSettings, trades: PaperTrade[]
   const usableAmount = settings.tradingAmount * usablePct / 100;
   const openNotional = trades
     .filter((trade) => trade.status === 'Open')
-    .reduce((total, trade) => total + trade.notional, 0);
+    .reduce((total, trade) => {
+      // After T1 hit: trailing stop is at breakeven, actual risk = $0, 50% conceptually closed.
+      // Count at half notional so new entries aren't blocked by a risk-free trailing position.
+      return total + (trade.t1HitAt ? trade.notional * 0.5 : trade.notional);
+    }, 0);
   return Math.min(maxPerOrder, Math.max(0, usableAmount - openNotional));
 }
 
