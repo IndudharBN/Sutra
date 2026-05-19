@@ -3,7 +3,7 @@ import { GROUP_NOTIONAL_CAP } from '../features/protrade/confluenceClassifier';
 
 const RISK_KEY = 'sutra.riskManager.v2';
 const SETTINGS_KEY = 'sutra.riskSettings.v1';
-const CB_PAUSE_MS = 60 * 60 * 1000;        // Layer 1: 2-hour pause window
+const CB_PAUSE_MS = 60 * 60 * 1000;        // Layer 1: 60-min pause window
 const LAYER2_WINDOW = 30;                   // Layer 2: WR over last 30 trades
 const LAYER2_WR_THRESHOLD = 0.58;           // Layer 2: WR < 58% → session pause
 const LAYER3_WINDOW = 40;                   // Layer 3: rolling 40 trades
@@ -156,9 +156,9 @@ export function recordGroupTradeResult(group: SignalGroup, pnl: number): void {
     gcb.count = 0;
   } else {
     gcb.count++;
-    // Layer 1: N consecutive losses → 2hr pause
+    // Layer 1: N consecutive losses → 60-min pause
     if (gcb.count >= cbLossThreshold) {
-      gcb.pauseUntil = Date.now() + CB_PAUSE_MS * 2; // 2hr
+      gcb.pauseUntil = Date.now() + CB_PAUSE_MS;
       gcb.count = 0;
     }
   }
