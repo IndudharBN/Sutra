@@ -134,8 +134,7 @@ function spySessionCheck(input: StrategyInput): StrategyChecklistItem {
     : fail('SPY session', `SPY 15m ${spy15m} — counter-session: hostile environment for ${input.direction} pullback`);
 }
 
-// Previous day's high/low for structural T2 targeting (PDH/PDL).
-// Returns the most recently completed daily bar's levels, falling back to null if insufficient data.
+// Previous day's high/low — kept as last-resort T2 fallback when no intraday pivot exists.
 function prevDayLevels(input: StrategyInput): { pdh: number; pdl: number } | null {
   const daily = input.candles.daily;
   if (daily.length < 2) return null;
@@ -143,25 +142,77 @@ function prevDayLevels(input: StrategyInput): { pdh: number; pdl: number } | nul
   return { pdh: prev.high, pdl: prev.low };
 }
 
-// Compute structural T2: PDH (bull) or PDL (bear), capped at max 3R to stay realistic.
-// Falls back to PREFERRED_RR if no daily data.
+// Finds the nearest unbroken swing pivot beyond `beyondPrice` and within `capPrice`.
+// BULL: looks for swing highs (resistance). BEAR: looks for swing lows (support).
+// A pivot at index i requires `n` bars on each side with lower highs / higher lows.
+// "Unbroken" means no subsequent candle closed through the level — still valid structure.
+function findNearestSwingTarget(
+  candles: Candle[],
+  direction: 'BULL' | 'BEAR',
+  beyondPrice: number,  // must be beyond T1
+  capPrice: number,     // 3R ceiling
+  n = 2,               // bars on each side required
+): number | null {
+  if (candles.length < n * 2 + 3) return null;
+  const pivots: number[] = [];
+  for (let i = n; i < candles.length - n; i++) {
+    if (direction === 'BULL') {
+      const level = candles[i].high;
+      if (level <= beyondPrice || level > capPrice) continue;
+      const isHigh = candles.slice(i - n, i).every((c) => c.high < level)
+        && candles.slice(i + 1, i + n + 1).every((c) => c.high < level);
+      if (!isHigh) continue;
+      // Unbroken: no close above this level after it formed
+      if (candles.slice(i + 1).some((c) => c.close > level)) continue;
+      pivots.push(level);
+    } else {
+      const level = candles[i].low;
+      if (level >= beyondPrice || level < capPrice) continue;
+      const isLow = candles.slice(i - n, i).every((c) => c.low > level)
+        && candles.slice(i + 1, i + n + 1).every((c) => c.low > level);
+      if (!isLow) continue;
+      if (candles.slice(i + 1).some((c) => c.close < level)) continue;
+      pivots.push(level);
+    }
+  }
+  if (!pivots.length) return null;
+  // Nearest pivot to T1 = first resistance / support the trade will encounter
+  return direction === 'BULL' ? Math.min(...pivots) : Math.max(...pivots);
+}
+
+// Structural T2 — fallback chain: 5m pivot → 15m pivot → PDH/PDL → 2.5R
+// Pivot-based levels use the actual intraday structure (unbroken swing highs/lows).
+// PDH/PDL is kept as a last resort when the session is too young for pivots.
+// All levels are capped at 3R; structural pivots override the 2.5R floor because
+// a real level at 1.8R is more honest than an invented 2.5R with no structure behind it.
 function structuralT2(
   input: StrategyInput,
   entry: number,
   risk: number,
   t1: number,
 ): number {
+  if (risk <= 0) return t1;
+  const dir = input.direction as 'BULL' | 'BEAR';
+  const fallback = dir === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
+  const cap3R   = dir === 'BULL' ? entry + risk * 3 : entry - risk * 3;
+
+  // 1. 5m intraday swing pivots — last 80 bars (~6.5hr), neighbour window n=2
+  const pivot5m = findNearestSwingTarget(input.candles.five.slice(-80), dir, t1, cap3R, 2);
+  if (pivot5m !== null) return pivot5m;
+
+  // 2. 15m swing pivots — last 26 bars (~6.5hr), n=2
+  const pivot15m = findNearestSwingTarget(input.candles.fifteen.slice(-26), dir, t1, cap3R, 2);
+  if (pivot15m !== null) return pivot15m;
+
+  // 3. PDH/PDL — previous session structural anchor, capped at 3R, floor at 2.5R
   const prev = prevDayLevels(input);
-  const fallback = input.direction === 'BULL'
-    ? entry + risk * PREFERRED_RR
-    : entry - risk * PREFERRED_RR;
-  if (!prev) return fallback;
-  const raw = input.direction === 'BULL' ? prev.pdh : prev.pdl;
-  // Must be beyond T1 and no more than 3R away (avoids chasing distant levels)
-  const cap3R = input.direction === 'BULL' ? entry + risk * 3 : entry - risk * 3;
-  const capped = input.direction === 'BULL' ? Math.min(raw, cap3R) : Math.max(raw, cap3R);
-  // T2 must be at least PREFERRED_RR (2.5R) — never collapse to T1 (2.0R)
-  return input.direction === 'BULL' ? Math.max(capped, fallback) : Math.min(capped, fallback);
+  if (prev) {
+    const raw     = dir === 'BULL' ? prev.pdh : prev.pdl;
+    const capped  = dir === 'BULL' ? Math.min(raw, cap3R) : Math.max(raw, cap3R);
+    return dir === 'BULL' ? Math.max(capped, fallback) : Math.min(capped, fallback);
+  }
+
+  return fallback;
 }
 
 // Returns 'closed' outside 9:30–16:00 ET, 'blackout' during 9:30–10:00 (first 30m), 'open' otherwise.
