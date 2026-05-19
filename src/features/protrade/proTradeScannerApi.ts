@@ -9,6 +9,7 @@ import { evaluateStrategies } from './strategyEngine';
 import { stampGroupClassification } from './confluenceClassifier';
 import type { MarketDataProviderStatus, StrategySignal, WorkflowStage } from './workflowTypes';
 import { getRiskSettings } from '../../lib/riskManager';
+import { computeBeta } from '../../lib/portfolioRisk';
 import { fetchSharesOutstanding, getFloatFromCache } from '../../lib/alpacaBroker';
 import { fetchEarningsCalendar, getEarningsDays } from '../../lib/finnhubClient';
 
@@ -290,6 +291,7 @@ function buildRowFromAlpaca(
   vixLevel?: number | null,
   spyTrend5m?: 'UP' | 'DOWN' | 'FLAT',
   spyTrend15m?: 'UP' | 'DOWN' | 'FLAT',
+  spyDailyBars?: Candle[],
 ): ProTradeRow {
   const allOne = (candleSet['1m'] || []);
   const one = allOne.slice(-120);
@@ -402,7 +404,7 @@ function buildRowFromAlpaca(
     mktCapB: null,
     sharesOutstanding: getFloatFromCache(symbol),
     catalyst,
-    beta: 0,
+    beta: spyDailyBars?.length ? computeBeta(daily, spyDailyBars) : 1.0,
     betaMax: 2.8,
     rsVsBenchmark: round(rsVsBenchmark, 3),
     basePass,
@@ -472,7 +474,7 @@ export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRo
     if (!meta) return [];
     const candleSet = buildCandleSet(sym, { '1m': bars1m, '5m': bars5m, '15m': bars15m, '1h': bars1h, '1d': bars1d });
     const earningsDays = getEarningsDays(sym);
-    return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m)];
+    return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m, spyRegimeData.spyBars)];
   });
 }
 
@@ -542,7 +544,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
       if (!meta) return [];
       const candleSet = buildCandleSet(sym, { '1m': bars1m, '5m': bars5m, '15m': bars15m, '1h': bars1h, '1d': bars1d });
       const earningsDays = getEarningsDays(sym);
-      return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m)];
+      return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m, spyRegimeData.spyBars)];
     })
     .sort((a, b) => b.confidence - a.confidence || b.score - a.score);
 

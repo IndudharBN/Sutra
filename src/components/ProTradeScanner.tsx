@@ -2,6 +2,7 @@ import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
 import { placePaperBracketOrder, closeAllPaperPositions, closePaperPosition, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
 import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkGroupCircuitBreaker, recordTradeResult, recordGroupTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
+import { betaAdjustedSizingMult, checkSectorConcentration, checkPortfolioBeta } from '../lib/portfolioRisk';
 import { alpacaBarStream } from '../lib/alpacaBarStream';
 import { clearBarCache } from '../lib/alpacaClient';
 import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot, clearUniverseCache, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
@@ -109,6 +110,7 @@ interface PaperTrade {
   pnlPercent?: number;
   reason: string;
   signalGroup?: SignalGroup;
+  beta?: number;
 }
 
 const STAGE_TONES: Record<WorkflowStage, string> = {
@@ -416,7 +418,9 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
     }
   }
 
-  const effectiveMult = tideMult;
+  const betaMult = betaAdjustedSizingMult(row.beta);
+  if (betaMult < 0.99) heatNote += ` [β${row.beta.toFixed(1)} → ${(betaMult * 100).toFixed(0)}% size]`;
+  const effectiveMult = tideMult * betaMult;
   const signalGroup = row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED';
   const sigGroupSizeMult = row.primaryStrategy?.groupSizeMult ?? 1.0;
   const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop, signalGroup, sigGroupSizeMult);
@@ -450,6 +454,7 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
     openedAt,
     reason: (row.primaryStrategy?.reason || row.reason) + heatNote,
     signalGroup: row.primaryStrategy?.signalGroup,
+    beta: row.beta,
   };
 }
 
@@ -2004,6 +2009,11 @@ export function ProTradeScannerScreen() {
     if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
     const groupCbCheck = checkGroupCircuitBreaker(row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED');
     if (!groupCbCheck.ok) { setApprovalMessage(groupCbCheck.reason!); return; }
+    const sectorCheck = checkSectorConcentration(paperTrades, row.symbol);
+    if (!sectorCheck.ok) { setApprovalMessage(sectorCheck.reason!); return; }
+    const approxNotional = computePositionSize(accountBalance, plan.entry, plan.stop, row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED', row.primaryStrategy?.groupSizeMult ?? 1.0) * plan.entry;
+    const betaPortCheck = checkPortfolioBeta(paperTrades, row.beta ?? 1.0, approxNotional, accountBalance);
+    if (!betaPortCheck.ok) { setApprovalMessage(betaPortCheck.reason!); return; }
     // Stale entry filter: skip if price drifted >50% of risk past entry — no chasing
     const tradeDir = row.primaryStrategy?.direction ?? row.direction;
     const risk = Math.abs(plan.entry - plan.stop);
@@ -2053,6 +2063,8 @@ export function ProTradeScannerScreen() {
     if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
     const groupCbCheck = checkGroupCircuitBreaker(row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED');
     if (!groupCbCheck.ok) { setApprovalMessage(groupCbCheck.reason!); return; }
+    const sectorCheck = checkSectorConcentration(paperTrades, row.symbol);
+    if (!sectorCheck.ok) { setApprovalMessage(sectorCheck.reason!); return; }
     // Stale entry filter
     const plan = effectiveTradePlan(row, settings);
     if (plan) {
@@ -2066,6 +2078,9 @@ export function ProTradeScannerScreen() {
         setApprovalMessage(`Stale entry: price moved $${(plan.entry - row.price).toFixed(2)} past entry — skipped.`);
         return;
       }
+      const approxNotional = computePositionSize(accountBalance, plan.entry, plan.stop, row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED', row.primaryStrategy?.groupSizeMult ?? 1.0) * plan.entry;
+      const betaPortCheck = checkPortfolioBeta(paperTrades, row.beta ?? 1.0, approxNotional, accountBalance);
+      if (!betaPortCheck.ok) { setApprovalMessage(betaPortCheck.reason!); return; }
     }
     const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.spyTrend5m);
     if (!trade) {
