@@ -48,17 +48,41 @@ export function classifySignalGroup(allSignals: StrategySignal[]): GroupClassifi
   const hasE1  = ids.has('orb15m_retest');          // S10 = 15m OB
   const hasE2  = s5?.enginePath === 'ob';            // S5 OB-path = 5m OB
   const hasE3  = ids.has('rs_continuation');         // S3 = MSS/RS
+  const hasE4  = ids.has('sniper_1m');               // S14 = 1m sniper
   const hasE5a = s5?.enginePath === 'fvg';           // S5 FVG-path
 
   // ── Stock-analyzer parity groups ──────────────────────────────────────────
 
-  // GOLD: E1 + E2 + E3 all confirmed on same ticker
+  // GOLD path A: E4 (1m sniper) + E1 (15m OB) — tightest stop, use S14 as entry
+  if (hasE4 && hasE1) {
+    return {
+      group: 'GOLD',
+      sizingMultiplier: 1.0,
+      bestSignal: bestForGroup(fired, ['sniper_1m', 'orb15m_retest']),
+    };
+  }
+
+  // GOLD path B: E4 (1m sniper) + E2 (5m OB) — still precision entry
+  if (hasE4 && hasE2) {
+    return {
+      group: 'GOLD',
+      sizingMultiplier: 1.0,
+      bestSignal: bestForGroup(fired, ['sniper_1m', 'ob_fvg_retest']),
+    };
+  }
+
+  // GOLD path C: E1 + E2 + E3 — classic trifecta
   if (hasE1 && hasE2 && hasE3) {
     return {
       group: 'GOLD',
       sizingMultiplier: 1.0,
       bestSignal: bestForGroup(fired, ['orb15m_retest', 'ob_fvg_retest', 'rs_continuation']),
     };
+  }
+
+  // BLUE: E4 alone (HTF OB backing is a hard gate inside S14, but no separate E1/E2 signal)
+  if (hasE4) {
+    return { group: 'BLUE', sizingMultiplier: 1.0, bestSignal: fired.find((s) => s.strategyId === 'sniper_1m')! };
   }
 
   // BLUE: E1+E2, E1 alone (full size), or E2 alone (0.75× penalty — anticipatory only)

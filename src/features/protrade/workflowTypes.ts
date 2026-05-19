@@ -22,7 +22,8 @@ export type StrategyId =
   | 'orb15m_retest'
   | 'vwap15m_pullback'
   | 'ema20_bounce_15m'
-  | 'range_reversion';
+  | 'range_reversion'
+  | 'sniper_1m';
 
 export type MarketDataProviderId = 'yahoo' | 'alpaca' | 'polygon' | 'ibkr';
 
@@ -154,6 +155,7 @@ export const STRATEGY_LABELS: Record<StrategyId, string> = {
   vwap15m_pullback: '15m VWAP Pullback',
   ema20_bounce_15m: '15m EMA20 Bounce',
   range_reversion: 'Range Reversion',
+  sniper_1m: '1m Sniper',
 };
 
 export const STRATEGY_CODES: Record<StrategyId, string> = {
@@ -170,6 +172,7 @@ export const STRATEGY_CODES: Record<StrategyId, string> = {
   vwap15m_pullback: 'S11',
   ema20_bounce_15m: 'S12',
   range_reversion: 'S13',
+  sniper_1m: 'S14',
 };
 
 export const WORKFLOW_STAGE_ORDER: WorkflowStage[] = [

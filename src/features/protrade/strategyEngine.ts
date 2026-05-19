@@ -1363,6 +1363,122 @@ export function evaluateRangeBoundReversion(input: StrategyInput): StrategySigna
     }] : []);
 }
 
+// ─── S14: 1m Sniper (E4) ─────────────────────────────────────────────────────
+// Precision entry: finds a 1m order block that formed INSIDE a confirmed 15m OB
+// (E1 / S10) or 5m OB (E2 / S5 OB-path). Stop anchored to 1m OB boundary with
+// 0.3×ATR buffer — tighter than 5m (0.5×) or 15m (1.0×) — giving best R:R.
+// Self-determines direction from the 1m OB geometry.
+// When S14 fires alongside S10 (E1) or S5-ob (E2), classifier promotes to GOLD.
+// Hard gates: higherTfOb (price in 15m or 5m OB zone), atOb1m, obReject1m, RVOL≥1.0, R:R≥2.0.
+const STOP_BUFFER_1M = 0.3;  // tighter buffer — 1m zone is far more precise than 5m/15m
+const MIN_RR_SNIPER  = 2.0;  // precision entry demands higher reward to justify narrow stop
+
+export function evaluateSniper1m(input: StrategyInput): StrategySignal {
+  const one = input.candles.one;
+  const five = input.candles.five;
+  const fifteen = input.candles.fifteen;
+
+  if (one.length < 20) {
+    return signal('sniper_1m', input, [fail('Data', 'Need 20+ 1m bars for sniper detection')], null, 'Insufficient 1m data.');
+  }
+
+  // ── Confirm higher-TF OB zone first (E1 = 15m, E2 = 5m) ─────────────────
+  const bull15m = findOrderBlockZone(fifteen, 'BULL', 1.6, 30);
+  const bear15m = findOrderBlockZone(fifteen, 'BEAR', 1.6, 30);
+  const bull5m  = findOrderBlockZone(five,    'BULL', 1.1, 20);
+  const bear5m  = findOrderBlockZone(five,    'BEAR', 1.1, 20);
+
+  const htfTol = input.atr20 * 0.25;
+  const atBullHtf = (bull15m && input.price <= bull15m.high + htfTol && input.price >= bull15m.low - htfTol)
+                 || (bull5m  && input.price <= bull5m.high  + htfTol && input.price >= bull5m.low  - htfTol);
+  const atBearHtf = (bear15m && input.price >= bear15m.low - htfTol && input.price <= bear15m.high + htfTol)
+                 || (bear5m  && input.price >= bear5m.low  - htfTol && input.price <= bear5m.high  + htfTol);
+
+  // Self-determine direction from which higher-TF zone is being tested
+  let selfDir: 'BULL' | 'BEAR' | null = null;
+  if (atBullHtf && !atBearHtf) selfDir = 'BULL';
+  else if (atBearHtf && !atBullHtf) selfDir = 'BEAR';
+  else if (atBullHtf && atBearHtf) selfDir = input.price >= input.vwap ? 'BULL' : 'BEAR';
+
+  const selfInput = selfDir
+    ? { ...input, direction: selfDir, vwapAligned: selfDir === 'BULL' ? input.price > input.vwap : input.price < input.vwap, trendAligned: selfDir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN' }
+    : input;
+
+  const dir: 'BULL' | 'BEAR' = selfDir ?? 'BULL';
+
+  // ── Find 1m OB inside the confirmed HTF zone ──────────────────────────────
+  // Impulse threshold 1.0×ATR for 1m — lower bar than 5m (1.1×) because 1m bars
+  // are smaller; a genuine 1m impulse is still institutional context at this resolution.
+  const ob1m = findOrderBlockZone(one, dir, 1.0, 30);
+
+  const tol1m = input.atr20 * 0.10; // tight proximity — 1m OB is precise
+  const atOb1m = ob1m
+    ? (dir === 'BULL'
+        ? input.price <= ob1m.high + tol1m && input.price >= ob1m.low - tol1m
+        : input.price >= ob1m.low - tol1m && input.price <= ob1m.high + tol1m)
+    : false;
+
+  const obReject1m = ob1m && atOb1m ? rejectionCandle(one, dir, ob1m) : false;
+  const rvolOk = input.rvol >= 1.0;
+
+  const entry = input.price;
+  const rawStop = ob1m && atOb1m
+    ? (dir === 'BULL' ? ob1m.low - input.atr20 * STOP_BUFFER_1M : ob1m.high + input.atr20 * STOP_BUFFER_1M)
+    : entry;
+  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
+  const risk = Math.abs(entry - stop);
+  const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
+  const t2 = structuralT2(selfInput, entry, risk, t1);
+  const computedRR = ob1m && atOb1m ? rr(entry, stop, t2, dir) : 0;
+  const rrOk = computedRR >= MIN_RR_SNIPER;
+  const trigger = last(one);
+
+  const tradePlan = selfDir && atOb1m && obReject1m && rvolOk && rrOk && trigger
+    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
+    : null;
+
+  // Label which higher-TF zone is backing this entry
+  const htfLabel = (() => {
+    if (selfDir === 'BULL') {
+      if (bull15m && atBullHtf) return `15m OB ${round(bull15m.low, 2)}–${round(bull15m.high, 2)}`;
+      if (bull5m  && atBullHtf) return `5m OB ${round(bull5m.low, 2)}–${round(bull5m.high, 2)}`;
+    } else {
+      if (bear15m && atBearHtf) return `15m OB ${round(bear15m.low, 2)}–${round(bear15m.high, 2)}`;
+      if (bear5m  && atBearHtf) return `5m OB ${round(bear5m.low, 2)}–${round(bear5m.high, 2)}`;
+    }
+    return 'none';
+  })();
+  const ob1mLabel = ob1m ? `${round(ob1m.low, 2)}–${round(ob1m.high, 2)}` : 'none';
+
+  const checklist = [
+    selfDir
+      ? pass('HTF OB backing', `${selfDir} — price inside ${htfLabel}`)
+      : fail('HTF OB backing', 'No 15m or 5m OB zone at current price — sniper needs HTF structure'),
+    atOb1m
+      ? pass('1m OB detected', `Zone ${ob1mLabel} — unmitigated ✓`)
+      : fail('1m OB detected', ob1m ? `1m OB at ${ob1mLabel} but price not in zone` : 'No unmitigated 1m OB found'),
+    obReject1m
+      ? pass('1m rejection candle', `Close back ${dir === 'BULL' ? 'above' : 'below'} 1m OB ✓`)
+      : fail('1m rejection candle', 'No 1m rejection — OB may be breaking, not holding'),
+    rvolOk
+      ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`)
+      : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — sniper entry needs participation`),
+    rrOk
+      ? pass('R:R ≥2.0', `${round(computedRR, 2)} ✓ — tight 1m stop gives edge`)
+      : fail('R:R ≥2.0', `${round(computedRR, 2)} — 1m zone too close to entry`),
+    htfTrendCheck(selfInput),
+    pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above ✓' : 'Below ✓') : 'misaligned'} — informational`),
+    spySessionCheck(selfInput),
+  ];
+
+  return signal(
+    'sniper_1m', selfInput, checklist, tradePlan,
+    'S14 E4: 1m OB inside confirmed 15m or 5m OB zone. Tightest stop (0.3×ATR), best R:R. Promotes to GOLD when S10 or S5-ob also fires. Hard gates: HTF backing, atOb1m, obReject1m, RVOL≥1.0, R:R≥2.0.',
+    false,
+    ob1m && atOb1m ? [{ label: '1m OB Zone', startTime: one[ob1m.index]?.time ?? '', endTime: one[one.length - 1]?.time ?? '', high: ob1m.high, low: ob1m.low }] : [],
+  );
+}
+
 const SYMBOL_STRATEGY_EXCLUSIONS: Partial<Record<string, StrategyId[]>> = {
   TSLA: ['vwap_pullback', 'rs_continuation'],
 };
@@ -1385,6 +1501,9 @@ export function evaluateStrategies(input: StrategyInput): StrategySignal[] {
     evaluateEma20Bounce15m(input),
     // SIDEWAYS-optimised — range extreme + rejection wick + R:R to VWAP
     evaluateRangeBoundReversion(input),
+    // E4: 1m sniper inside confirmed 15m or 5m OB — tightest stop, best R:R
+    // Promotes to GOLD when S10 (E1) or S5-ob (E2) also fires on same ticker
+    evaluateSniper1m(input),
   ].filter((s): s is StrategySignal => s !== null);
 
   return signals
