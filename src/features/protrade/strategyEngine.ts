@@ -338,15 +338,30 @@ function ema1mCheck(input: StrategyInput): StrategyChecklistItem {
 export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const range = todayOpeningRange(input.candles.five);
   const trigger = last(input.candles.five);
-  const rangeBreak = range ? directionalBreak(input, input.price, range.high, range.low) : false;
-  const retest = range ? recentRetest(input, input.direction === 'BULL' ? range.high : range.low) : false;
+
+  // S1 self-determines direction from the ORB breakout side — no external Option C direction needed.
+  // price > ORB high → BULL (retesting breakout from above); price < ORB low → BEAR.
+  const selfDir: 'BULL' | 'BEAR' | null = range
+    ? (input.price > range.high ? 'BULL' : input.price < range.low ? 'BEAR' : null)
+    : null;
+  const dir: 'BULL' | 'BEAR' = selfDir ?? 'BULL'; // geometry fallback; tradePlan is null when selfDir=null
+  const selfInput = selfDir
+    ? {
+        ...input,
+        direction: selfDir,
+        vwapAligned: selfDir === 'BULL' ? input.price > input.vwap : input.price < input.vwap,
+        trendAligned: selfDir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN',
+      }
+    : input;
+
+  const retest = range ? recentRetest(selfInput, dir === 'BULL' ? range.high : range.low) : false;
   const entry = input.price;
   // Anchor stop to the structural ORB level, not the trigger bar's low/high.
   // 1×ATR behind ORB high/low survives the liquidity sweep before the real move.
-  const rawStop = input.direction === 'BULL'
+  const rawStop = dir === 'BULL'
     ? (range?.high ?? entry) - input.atr20 * 1.0
     : (range?.low ?? entry) + input.atr20 * 1.0;
-  const stop = enforceMinStop(input.direction as 'BULL' | 'BEAR', entry, noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20, input.vixLevel), input.atr20);
+  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel), input.atr20);
   // 9:45–10:00 AM ET: first 15 min after blackout — ORB barely formed, higher noise; require stronger RVOL
   const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
   const etMins = etNow.getHours() * 60 + etNow.getMinutes();
@@ -356,29 +371,29 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const orRange = range ? range.high - range.low : 0;
   const orbWidthPct = range ? orRange / entry : 0;
   const orbWidthOk = orbWidthPct >= 0.005; // ≥0.5% of price — tighter ranges have no institutional positioning
-  const breakoutLevel = range ? (input.direction === 'BULL' ? range.high : range.low) : entry;
-  const breakoutDistance = input.direction === 'BULL' ? (input.price - breakoutLevel) : (breakoutLevel - input.price);
+  const breakoutLevel = range ? (dir === 'BULL' ? range.high : range.low) : entry;
+  const breakoutDistance = dir === 'BULL' ? (input.price - breakoutLevel) : (breakoutLevel - input.price);
   const minBreakout = input.atr20 * 0.25;
   const confirmedBreak = breakoutDistance >= minBreakout;
-  const measuredMove = input.direction === 'BULL' ? breakoutLevel + orRange : breakoutLevel - orRange;
-  const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
-  const preferredTarget = input.direction === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
-  const t2 = input.direction === 'BULL' ? Math.max(measuredMove, preferredTarget) : Math.min(measuredMove, preferredTarget);
-  const tradePlan = directionOk(input) && range && confirmedBreak && retest && orbWidthOk ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const measuredMove = dir === 'BULL' ? breakoutLevel + orRange : breakoutLevel - orRange;
+  const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
+  const preferredTarget = dir === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
+  const t2 = dir === 'BULL' ? Math.max(measuredMove, preferredTarget) : Math.min(measuredMove, preferredTarget);
+  const tradePlan = selfDir && range && confirmedBreak && retest && orbWidthOk ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const checklist = [
-    directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
-    htfTrendCheck(input),
+    selfDir ? pass('Directional bias', `${selfDir} — self-determined from ORB break`) : fail('Directional bias', 'Price inside ORB — no breakout yet'),
+    htfTrendCheck(selfInput),
     range ? pass('Opening range formed', `${round(range.low, 2)}–${round(range.high, 2)}`) : fail('Opening range formed', 'Need first 15 min of 5m candles'),
     orbWidthOk ? pass('ORB width ≥0.5%', `${round(orbWidthPct * 100, 2)}% ✓`) : fail('ORB width ≥0.5%', `${round(orbWidthPct * 100, 2)}% — degenerate range: no institutional positioning`),
     confirmedBreak ? pass('ORB Breakout', `Clear of noise (+${round(breakoutDistance, 2)})`) : fail('ORB Breakout', `Inside noise floor (${round(minBreakout, 2)})`),
     retest ? pass('Retest hold', 'Breakout level retested and held') : fail('Retest hold', 'Waiting for controlled retest'),
     input.rvol >= rvolMin ? pass(`RVOL ≥${rvolMin}×`, `${round(input.rvol, 2)}× ✓`) : fail(`RVOL ≥${rvolMin}×`, `${round(input.rvol, 2)}× — ${earlySession ? 'early session (9:45–10:00) requires ≥1.5×' : 'ORB breakout requires RTH volume confirmation'}`),
     pass('ADR room', `${adrExhausted(input.candles.five, input.atr20) ? '>80% ATR used — watch' : '< 80% ATR used ✓'} — informational`),
-    pass('VWAP context', `${input.vwapAligned ? 'VWAP ✓' : 'early session'} — informational`),
+    pass('VWAP context', `${selfInput.vwapAligned ? 'VWAP ✓' : 'early session'} — informational`),
     ema1mCheck(input),
-    spyTapeCheck(input),
+    spyTapeCheck(selfInput),
   ];
-  return signal('orb_retest', input, checklist, tradePlan, 'S1 ORB retest: breakout + retest + ORB width ≥0.5% + stop 1×ATR behind structural level. Hard gates: direction, confirmedBreak, retest, orbWidthOk, rvol.', false, range ? [{
+  return signal('orb_retest', selfInput, checklist, tradePlan, 'S1 ORB retest: self-determined direction from ORB break + retest + ORB width ≥0.5% + stop 1×ATR behind structural level. Hard gates: selfDir, confirmedBreak, retest, orbWidthOk, rvol.', false, range ? [{
     label: 'Opening Range',
     startTime: range.startTime,
     endTime: range.endTime,
