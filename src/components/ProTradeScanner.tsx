@@ -1,6 +1,5 @@
 import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
-import { fetchTrading212Snapshot } from '../features/brokers/trading212LiveApi';
 import { placePaperBracketOrder, closeAllPaperPositions, closePaperPosition, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
 import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
 import { alpacaBarStream } from '../lib/alpacaBarStream';
@@ -19,7 +18,7 @@ import { loadAllTrades, persistTrade, todayET, tradeDateET } from '../lib/tradeS
 import { fetchBars } from '../lib/alpacaClient';
 import { ProTradeCandlePreview } from './ProTradeCandlePreview';
 import { TradingViewChartModal, type TradingViewInterval } from './TradingViewChart';
-import type { Signal, Trading212Snapshot } from '../types';
+import type { Signal } from '../types';
 
 type StageFilter = WorkflowStage;
 
@@ -28,8 +27,6 @@ const PROTRADE_SETTINGS_STORAGE_KEY = 'sutra.protrade.settings.v1';
 const WATCHLIST_KEY = 'sutra.dayWatchlist.v1';
 const WATCHLIST_ARCHIVE_KEY = 'sutra.watchlistArchive.v1';
 const WATCHLIST_NEXT_KEY = 'sutra.nextDayWatchlist.v1';
-const PAPER_NOTIONAL = 100;
-
 interface DayWatchlist { date: string; symbols: string[]; }
 
 function loadWatchlist(): DayWatchlist {
@@ -77,17 +74,10 @@ function saveArchive(records: WatchlistDayRecord[]) {
   localStorage.setItem(WATCHLIST_ARCHIVE_KEY, JSON.stringify(records.slice(0, 30)));
 }
 
-interface ProTradeSettings {
-  maxPerOrder: number;
-  tradingAmount: number;
-  tradingAmountPct: number;
-}
+// eslint-disable-next-line @typescript-eslint/no-empty-interface
+interface ProTradeSettings {}
 
-const DEFAULT_PROTRADE_SETTINGS: ProTradeSettings = {
-  maxPerOrder: PAPER_NOTIONAL,
-  tradingAmount: 0,
-  tradingAmountPct: 100,
-};
+const DEFAULT_PROTRADE_SETTINGS: ProTradeSettings = {};
 
 interface PaperTrade {
   id: string;
@@ -142,26 +132,12 @@ function savePaperTrades(trades: PaperTrade[]) {
   window.localStorage.setItem(PAPER_TRADES_STORAGE_KEY, JSON.stringify(trades));
 }
 
-function loadProTradeSettings() {
-  if (typeof window === 'undefined') return DEFAULT_PROTRADE_SETTINGS;
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(PROTRADE_SETTINGS_STORAGE_KEY) || '{}') as Partial<ProTradeSettings>;
-    return {
-      maxPerOrder: Number(parsed.maxPerOrder || DEFAULT_PROTRADE_SETTINGS.maxPerOrder),
-      tradingAmount: Number(parsed.tradingAmount || 0),
-      tradingAmountPct: Number(parsed.tradingAmountPct || DEFAULT_PROTRADE_SETTINGS.tradingAmountPct),
-    };
-  } catch {
-    return DEFAULT_PROTRADE_SETTINGS;
-  }
+function loadProTradeSettings(): ProTradeSettings {
+  return DEFAULT_PROTRADE_SETTINGS;
 }
 
-function saveProTradeSettings(settings: ProTradeSettings) {
-  window.localStorage.setItem(PROTRADE_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-}
-
-function normalizeSettingNumber(value: number, fallback = 0) {
-  return Number.isFinite(value) && value >= 0 ? value : fallback;
+function saveProTradeSettings(_settings: ProTradeSettings) {
+  window.localStorage.removeItem(PROTRADE_SETTINGS_STORAGE_KEY);
 }
 
 function fmtMoney(value?: number | null) {
@@ -237,24 +213,17 @@ function rowToSignal(row: ProTradeRow): Signal {
     dist: '-',
     age: `${row.dataStatus.ageSeconds}s`,
     status: row.workflowStage === 'locked' ? 'Locked' : row.workflowStage === 'confirmed' ? 'Confirmed' : 'Forming',
-    broker: 'Trading212',
+    broker: '',
     orderStatus: row.workflowStage === 'ordered' ? 'Open Position' : '-',
     reason: row.primaryStrategy?.reason || row.reason,
     riskSize: row.tradePlan?.riskSize,
   };
 }
 
-function buildOrderedSymbols(snapshot: Trading212Snapshot | null) {
-  const symbols = new Set<string>();
-  (snapshot?.positions || []).forEach((position) => symbols.add(baseSymbol(position.symbol)));
-  (snapshot?.orders || []).forEach((order) => symbols.add(baseSymbol(order.symbol)));
-  return symbols;
-}
-
-function withOrderedStage(rows: ProTradeRow[], orderedSymbols: Set<string>, paperTrades: PaperTrade[] = []) {
+function withOrderedStage(rows: ProTradeRow[], paperTrades: PaperTrade[] = []) {
   const paperSymbols = new Set(paperTrades.filter((trade) => trade.status === 'Open').map((trade) => baseSymbol(trade.symbol)));
   return rows.map((row) => (
-    orderedSymbols.has(baseSymbol(row.symbol)) || paperSymbols.has(baseSymbol(row.symbol))
+    paperSymbols.has(baseSymbol(row.symbol))
       ? { ...row, workflowStage: 'ordered' as WorkflowStage }
       : row
   ));
@@ -376,8 +345,7 @@ function effectiveTradePlan(row: ProTradeRow, _settings: ProTradeSettings) {
   return row.tradePlan;
 }
 
-function availablePaperNotional(settings: ProTradeSettings, trades: PaperTrade[], accountBalance: number) {
-  const maxPerOrder = settings.maxPerOrder > 0 ? settings.maxPerOrder : PAPER_NOTIONAL;
+function availablePaperNotional(_settings: ProTradeSettings, trades: PaperTrade[], accountBalance: number) {
   const cap = accountBalance * 0.65;
   const openNotional = trades
     .filter((trade) => trade.status === 'Open')
@@ -385,7 +353,7 @@ function availablePaperNotional(settings: ProTradeSettings, trades: PaperTrade[]
       // After T1 hit: trailing stop at BE, risk = $0. Count 50% so new entries aren't blocked.
       return total + (trade.t1HitAt ? trade.notional * 0.5 : trade.notional);
     }, 0);
-  return Math.min(maxPerOrder, Math.max(0, cap - openNotional));
+  return Math.max(0, cap - openNotional);
 }
 
 function etMinutesNow(): number {
@@ -1160,51 +1128,13 @@ function PaperTradeMonitor({
   );
 }
 
-function SettingsField({
-  label,
-  value,
-  suffix,
-  placeholder,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  suffix?: string;
-  placeholder?: string;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <label className="block">
-      <span className="text-[10px] uppercase tracking-widest text-slate-500 font-black">{label}</span>
-      <div className="mt-2 flex items-center rounded-xl border border-white/10 bg-black/20 overflow-hidden">
-        <input
-          type="number"
-          min="0"
-          step="0.01"
-          value={value > 0 ? value : ''}
-          placeholder={placeholder || 'System'}
-          onChange={(event) => onChange(normalizeSettingNumber(Number(event.target.value)))}
-          className="h-11 w-full bg-transparent px-3 text-sm text-white outline-none placeholder:text-slate-600"
-        />
-        {suffix && <span className="px-3 text-xs text-slate-500 font-black">{suffix}</span>}
-      </div>
-    </label>
-  );
-}
-
 function ProTradeSettingsPanel({
-  settings,
-  onChange,
   onClose,
 }: {
   settings: ProTradeSettings;
   onChange: (settings: ProTradeSettings) => void;
   onClose: () => void;
 }) {
-  const usableBudget = settings.tradingAmount > 0
-    ? settings.tradingAmount * (settings.tradingAmountPct > 0 ? settings.tradingAmountPct : 100) / 100
-    : 0;
-
   return (
     <div className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm flex items-center justify-end">
       <section className="h-full w-full max-w-[460px] bg-[#080b12] border-l border-white/10 shadow-2xl overflow-y-auto">
@@ -1220,43 +1150,19 @@ function ProTradeSettingsPanel({
 
         <div className="p-4 space-y-5">
           <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-3 text-xs text-cyan-100 leading-relaxed">
-            Blank target/stop fields use the system-calculated strategy levels. Enter percentages only when you want to override every paper order.
-          </div>
-
-          <div className="space-y-4">
-            <SettingsField
-              label="Max Amount Per Order"
-              value={settings.maxPerOrder}
-              suffix="$"
-              placeholder={`${PAPER_NOTIONAL}`}
-              onChange={(value) => onChange({ ...settings, maxPerOrder: value || PAPER_NOTIONAL })}
-            />
-            <SettingsField
-              label="Total Trading Amount"
-              value={settings.tradingAmount}
-              suffix="$"
-              placeholder="No cap"
-              onChange={(value) => onChange({ ...settings, tradingAmount: value })}
-            />
-            <SettingsField
-              label="% Of Trading Amount To Use"
-              value={settings.tradingAmountPct}
-              suffix="%"
-              placeholder="100"
-              onChange={(value) => onChange({ ...settings, tradingAmountPct: Math.min(value || 100, 100) })}
-            />
+            Sizing is fully risk-based: 3% of account equity per trade, capped at 65% total utilization. Stop and target levels come directly from the strategy engine.
           </div>
 
           <div className="rounded-xl border border-white/10 bg-white/5 p-3">
             <p className="text-[10px] uppercase tracking-widest text-slate-500 font-black">Effective Rules</p>
             <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
               <div>
-                <p className="text-slate-500">Per order cap</p>
-                <p className="font-mono text-white">{fmtMoney(settings.maxPerOrder || PAPER_NOTIONAL)}</p>
+                <p className="text-slate-500">Risk per trade</p>
+                <p className="font-mono text-white">3% of account equity</p>
               </div>
               <div>
-                <p className="text-slate-500">Usable budget</p>
-                <p className="font-mono text-white">{usableBudget > 0 ? fmtMoney(usableBudget) : 'No cap'}</p>
+                <p className="text-slate-500">Max utilization</p>
+                <p className="font-mono text-white">65% of account balance</p>
               </div>
               <div>
                 <p className="text-slate-500">Stop loss</p>
@@ -1274,7 +1180,7 @@ function ProTradeSettingsPanel({
             onClick={onClose}
             className="h-11 w-full rounded-xl border border-emerald-500/30 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25"
           >
-            <span className="text-[10px] uppercase tracking-widest font-black">Save And Close</span>
+            <span className="text-[10px] uppercase tracking-widest font-black">Close</span>
           </button>
         </div>
       </section>
@@ -1526,7 +1432,6 @@ export function ProTradeScannerScreen() {
   const [snapshot, setSnapshot] = React.useState<ProTradeSnapshot | null>(null);
   const snapshotRef = React.useRef<ProTradeSnapshot | null>(null);
   React.useEffect(() => { snapshotRef.current = snapshot; }, [snapshot]);
-  const [brokerSnapshot, setBrokerSnapshot] = React.useState<Trading212Snapshot | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [manualLoading, setManualLoading] = React.useState(false);
   const [error, setError] = React.useState('');
@@ -1559,13 +1464,11 @@ export function ProTradeScannerScreen() {
         setLoading(true);
       }
       setError('');
-      const [nextSnapshot, nextBroker, acct] = await Promise.all([
+      const [nextSnapshot, acct] = await Promise.all([
         fetchProTradeScannerSnapshot(watchlist.symbols),
-        fetchTrading212Snapshot({ fast: true }).catch(() => null),
         getPaperAccount().catch(() => null),
       ]);
       setSnapshot(nextSnapshot);
-      setBrokerSnapshot(nextBroker);
       if (acct) {
         const bal = parseFloat(acct.equity);
         if (bal > 0) { setAccountBalance(bal); initDailyBalance(bal); }
@@ -1674,8 +1577,7 @@ export function ProTradeScannerScreen() {
   const awaitingConfirmRef = React.useRef<Map<string, ConfirmationEntry>>(new Map());
   const [pendingConfirmCount, setPendingConfirmCount] = React.useState(0);
 
-  const orderedSymbols = React.useMemo(() => buildOrderedSymbols(brokerSnapshot), [brokerSnapshot]);
-  const rows = React.useMemo(() => withOrderedStage(snapshot?.rows || [], orderedSymbols, paperTrades), [snapshot?.rows, orderedSymbols, paperTrades]);
+  const rows = React.useMemo(() => withOrderedStage(snapshot?.rows || [], paperTrades), [snapshot?.rows, paperTrades]);
   // Symbols blocked from re-entry today because they stopped out. Key = "SYMBOL|DIRECTION".
   // T1 Profit, Target, EOD, Manual exits do NOT block — only a stop invalidates the direction thesis.
   const stoppedTodaySet = React.useMemo(() => {
@@ -1702,7 +1604,7 @@ export function ProTradeScannerScreen() {
     ? rows.filter((row) => watchlistSet.has(row.symbol))
     : strategyFilteredRows;
   const orderedPaperTrades = paperTrades.filter((trade) => baseSymbol(trade.symbol) && (trade.status === 'Open' || trade.status === 'Closed'));
-  const selected = selectedRow ? withOrderedStage([selectedRow], orderedSymbols, paperTrades)[0] : null;
+  const selected = selectedRow ? withOrderedStage([selectedRow], paperTrades)[0] : null;
   const strategyIds = Object.keys(STRATEGY_LABELS) as StrategyId[];
   const lastUpdated = snapshot?.fetchedAt ? new Date(snapshot.fetchedAt) : null;
   const stale = rows.some((row) => row.dataStatus.stale);
@@ -1923,7 +1825,7 @@ export function ProTradeScannerScreen() {
       const sym = baseSymbol(row.symbol);
       if (row.workflowStage !== 'trade_ready') return;
       if (!canPaperTradeRow(row, settings, paperTrades, accountBalance)) return;
-      if (orderedSymbols.has(sym) || tradedSymbols.has(sym) || pending.has(sym) || firedInstantRef.current.has(sym)) return;
+      if (tradedSymbols.has(sym) || pending.has(sym) || firedInstantRef.current.has(sym)) return;
       if (row.earningsDays !== null && Math.abs(row.earningsDays) <= 1) return;
       if (!checkStrategyCircuitBreaker(row.primaryStrategy?.strategyId || row.symbol).ok) return;
       if (isTideBlocked(row, snapshot.spyTrend5m, row.primaryStrategy ?? undefined)) return;
@@ -2050,7 +1952,7 @@ export function ProTradeScannerScreen() {
         }).catch((err: unknown) => console.warn(`Alpaca order skipped for ${trade.symbol}:`, err instanceof Error ? err.message : err));
       });
     })();
-  }, [snapshot?.rows, orderedSymbols, paperTrades, settings, stoppedTodaySet]);
+  }, [snapshot?.rows, paperTrades, settings, stoppedTodaySet]);
 
   // EOD flat: at 3:57 PM ET close all open positions before 4:00 PM market close.
   // Stable deps [] so the interval is never reset by hot-set refreshes or paperTrades changes.
