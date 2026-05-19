@@ -63,6 +63,17 @@ export interface ChartZone {
   low: number;
 }
 
+export type SignalGroup =
+  | 'GOLD'
+  | 'BLUE'
+  | 'TREND'
+  | 'FVG'
+  | 'BREAKOUT'
+  | 'PULLBACK'
+  | 'MOMENTUM'
+  | 'SIDEWAYS'
+  | 'UNCLASSIFIED';
+
 export interface StrategySignal {
   strategyId: StrategyId;
   strategyName: string;
@@ -76,6 +87,9 @@ export interface StrategySignal {
   zones: ChartZone[];
   canAutoReady: boolean;
   orderBlockReason: string;
+  enginePath?: 'ob' | 'fvg';  // S5 only: which zone type triggered
+  signalGroup?: SignalGroup;   // set by confluence classifier after all strategies run
+  groupSizeMult?: number;      // sizing multiplier from group classification (e.g. 0.75 for E2-alone)
 }
 
 export interface TradeLifecycleEvent {

@@ -1,6 +1,13 @@
-const RISK_KEY = 'sutra.riskManager.v1';
+import type { SignalGroup } from '../features/protrade/workflowTypes';
+import { GROUP_NOTIONAL_CAP } from '../features/protrade/confluenceClassifier';
+
+const RISK_KEY = 'sutra.riskManager.v2';
 const SETTINGS_KEY = 'sutra.riskSettings.v1';
-const CB_PAUSE_MS = 60 * 60 * 1000;
+const CB_PAUSE_MS = 60 * 60 * 1000;        // Layer 1: 2-hour pause window
+const LAYER2_WINDOW = 30;                   // Layer 2: WR over last 30 trades
+const LAYER2_WR_THRESHOLD = 0.58;           // Layer 2: WR < 58% → session pause
+const LAYER3_WINDOW = 40;                   // Layer 3: rolling 40 trades
+const LAYER3_WR_THRESHOLD = 0.57;           // Layer 3: WR < 57% → 50% size
 
 // ── User-configurable risk settings ──────────────────────────────────────────
 
@@ -39,11 +46,21 @@ export const MAX_POSITIONS = DEFAULT_RISK_SETTINGS.maxPositions;
 export const RISK_PER_TRADE_PCT = DEFAULT_RISK_SETTINGS.riskPerTradePct;
 
 interface CbState { count: number; pauseUntil: number; }
+
+interface GroupCbState {
+  count: number;        // consecutive losses (Layer 1)
+  pauseUntil: number;   // epoch ms — Layer 1 pause expires here
+  sessionPaused: boolean; // Layer 2: WR < 58% in last 30 → rest-of-session block
+  sizeReduced: boolean;   // Layer 3: WR < 57% rolling 40 → 50% size
+  history: boolean[];     // true=win, false=loss; capped at LAYER3_WINDOW (40)
+}
+
 interface RiskState {
   dailyDate: string;
   dailyStartBalance: number;
   dailyRealizedPnl: number;
-  strategyCb: Record<string, CbState>;
+  strategyCb: Record<string, CbState>;  // legacy per-strategy CB (kept for migration)
+  groupCb: Partial<Record<SignalGroup, GroupCbState>>;
 }
 
 function toETDate(): string {
@@ -58,10 +75,15 @@ function load(): RiskState {
       dailyStartBalance: raw.dailyStartBalance || 0,
       dailyRealizedPnl: raw.dailyRealizedPnl || 0,
       strategyCb: raw.strategyCb || {},
+      groupCb: raw.groupCb || {},
     };
   } catch {
-    return { dailyDate: '', dailyStartBalance: 0, dailyRealizedPnl: 0, strategyCb: {} };
+    return { dailyDate: '', dailyStartBalance: 0, dailyRealizedPnl: 0, strategyCb: {}, groupCb: {} };
   }
+}
+
+function defaultGroupCb(): GroupCbState {
+  return { count: 0, pauseUntil: 0, sessionPaused: false, sizeReduced: false, history: [] };
 }
 
 function save(state: RiskState): void {
@@ -78,18 +100,125 @@ export function initDailyBalance(accountBalance: number): void {
     for (const [key, cb] of Object.entries(state.strategyCb)) {
       resetCb[key] = { count: 0, pauseUntil: cb.pauseUntil };
     }
-    save({ ...state, dailyDate: today, dailyStartBalance: accountBalance, dailyRealizedPnl: 0, strategyCb: resetCb });
+    // Group CB: reset consecutive count + session pause; preserve Layer 1 pauseUntil and rolling history.
+    const resetGroupCb: Partial<Record<SignalGroup, GroupCbState>> = {};
+    for (const [key, gcb] of Object.entries(state.groupCb) as [SignalGroup, GroupCbState][]) {
+      resetGroupCb[key] = { ...gcb, count: 0, sessionPaused: false };
+    }
+    save({ ...state, dailyDate: today, dailyStartBalance: accountBalance, dailyRealizedPnl: 0, strategyCb: resetCb, groupCb: resetGroupCb });
   } else if (state.dailyStartBalance <= 0) {
     save({ ...state, dailyStartBalance: accountBalance });
   }
 }
 
-// qty = (account × riskPerTradePct) / |entry - stop|
-export function computePositionSize(accountBalance: number, entry: number, stop: number): number {
+// ── Group-level circuit breaker ───────────────────────────────────────────────
+
+export interface GroupCbResult {
+  ok: boolean;
+  reason?: string;
+  sizeMult: number; // 1.0 normal, 0.5 on Layer 3, 0.0 when blocked
+}
+
+export function checkGroupCircuitBreaker(group: SignalGroup): GroupCbResult {
+  const state = load();
+  const gcb = state.groupCb[group];
+  if (!gcb) return { ok: true, sizeMult: 1.0 };
+
+  // Layer 1: time-based pause (3 consecutive losses)
+  if (gcb.pauseUntil > Date.now()) {
+    const mins = Math.ceil((gcb.pauseUntil - Date.now()) / 60_000);
+    return { ok: false, sizeMult: 0, reason: `${group} CB Layer 1: paused ${mins}m (3 consecutive losses)` };
+  }
+
+  // Layer 2: session pause (WR < 58% last 30)
+  if (gcb.sessionPaused) {
+    return { ok: false, sizeMult: 0, reason: `${group} CB Layer 2: session paused (WR < 58% last 30 trades)` };
+  }
+
+  // Layer 3: size reduction (WR < 57% rolling 40) — still tradeable, half size
+  if (gcb.sizeReduced) {
+    return { ok: true, sizeMult: 0.5, reason: `${group} CB Layer 3: 50% size (WR < 57% rolling 40 trades)` };
+  }
+
+  return { ok: true, sizeMult: 1.0 };
+}
+
+export function recordGroupTradeResult(group: SignalGroup, pnl: number): void {
+  const state = load();
+  const { cbLossThreshold } = getRiskSettings();
+  if (!state.groupCb[group]) state.groupCb[group] = defaultGroupCb();
+  const gcb = state.groupCb[group]!;
+
+  const win = pnl >= 0;
+  gcb.history = [...gcb.history, win].slice(-LAYER3_WINDOW); // keep last 40
+
+  if (win) {
+    gcb.count = 0;
+  } else {
+    gcb.count++;
+    // Layer 1: N consecutive losses → 2hr pause
+    if (gcb.count >= cbLossThreshold) {
+      gcb.pauseUntil = Date.now() + CB_PAUSE_MS * 2; // 2hr
+      gcb.count = 0;
+    }
+  }
+
+  // Layer 2: WR over last 30
+  if (gcb.history.length >= LAYER2_WINDOW) {
+    const last30 = gcb.history.slice(-LAYER2_WINDOW);
+    const wr30 = last30.filter(Boolean).length / LAYER2_WINDOW;
+    gcb.sessionPaused = wr30 < LAYER2_WR_THRESHOLD;
+  }
+
+  // Layer 3: WR over rolling 40
+  if (gcb.history.length >= LAYER3_WINDOW) {
+    const wr40 = gcb.history.filter(Boolean).length / LAYER3_WINDOW;
+    gcb.sizeReduced = wr40 < LAYER3_WR_THRESHOLD;
+  }
+
+  save(state);
+}
+
+export function getGroupCbSummary(): Array<{ group: SignalGroup; layer: number; detail: string }> {
+  const state = load();
+  const out: Array<{ group: SignalGroup; layer: number; detail: string }> = [];
+  for (const [g, gcb] of Object.entries(state.groupCb) as [SignalGroup, GroupCbState][]) {
+    if (gcb.pauseUntil > Date.now()) {
+      out.push({ group: g, layer: 1, detail: `Paused ${Math.ceil((gcb.pauseUntil - Date.now()) / 60_000)}m` });
+    } else if (gcb.sessionPaused) {
+      out.push({ group: g, layer: 2, detail: 'Session paused (WR<58% last 30)' });
+    } else if (gcb.sizeReduced) {
+      out.push({ group: g, layer: 3, detail: '50% size (WR<57% rolling 40)' });
+    }
+  }
+  return out;
+}
+
+export function unpauseGroupCb(group: SignalGroup): void {
+  const state = load();
+  state.groupCb[group] = defaultGroupCb();
+  save(state);
+}
+
+// ── Position sizing ───────────────────────────────────────────────────────────
+
+// qty = min(risk-proportional shares, notional cap shares)
+// risk-proportional: (account × riskPerTradePct) / |entry - stop|
+// notional cap: (account × groupNotionalCap × groupSizeMult) / entry
+export function computePositionSize(
+  accountBalance: number,
+  entry: number,
+  stop: number,
+  group: SignalGroup = 'UNCLASSIFIED',
+  groupSizeMult = 1.0,
+): number {
   const { riskPerTradePct } = getRiskSettings();
   const stopDist = Math.abs(entry - stop);
   if (stopDist <= 0 || entry <= 0) return 1;
-  return Math.max(1, Math.floor((accountBalance * riskPerTradePct) / stopDist));
+  const riskShares = Math.floor((accountBalance * riskPerTradePct) / stopDist);
+  const notionalCap = GROUP_NOTIONAL_CAP[group] ?? 0.03;
+  const capShares = Math.floor((accountBalance * notionalCap * groupSizeMult) / entry);
+  return Math.max(1, Math.min(riskShares, capShares));
 }
 
 export function checkDailyLossLimit(accountBalance: number): { ok: boolean; reason?: string } {

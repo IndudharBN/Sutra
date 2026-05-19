@@ -6,6 +6,7 @@ import { ema, sessionCandles, sessionVwap, sessionVwapSlope } from '../scanner/i
 import type { Candle, CandleSet } from '../scanner/ohlcv';
 import { closes, last, round } from '../scanner/ohlcv';
 import { evaluateStrategies } from './strategyEngine';
+import { stampGroupClassification } from './confluenceClassifier';
 import type { MarketDataProviderStatus, StrategySignal, WorkflowStage } from './workflowTypes';
 import { getRiskSettings } from '../../lib/riskManager';
 import { fetchSharesOutstanding, getFloatFromCache } from '../../lib/alpacaBroker';
@@ -379,7 +380,9 @@ function buildRowFromAlpaca(
     dataStatus: providerStatus,
     candles,
   });
-  const strategySignals = allSignals.filter((s) => !disabledStrategies.includes(s.strategyId));
+  const strategySignals = stampGroupClassification(
+    allSignals.filter((s) => !disabledStrategies.includes(s.strategyId))
+  );
 
   const primaryStrategy = strategySignals[0] || null;
   const workflowStage: WorkflowStage = primaryStrategy?.stage ?? 'screened_universe';

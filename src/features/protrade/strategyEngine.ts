@@ -3,7 +3,7 @@ import { ema, sessionCandles } from '../scanner/indicators';
 import type { Candle } from '../scanner/ohlcv';
 import { closes, last, round } from '../scanner/ohlcv';
 import { findOrderBlockZone, rejectionCandle } from '../scanner/smc';
-import type { StrategyChecklistItem, StrategyId, StrategyInput, StrategySignal, TradePlan, WorkflowStage } from './workflowTypes';
+import type { SignalGroup, StrategyChecklistItem, StrategyId, StrategyInput, StrategySignal, TradePlan, WorkflowStage } from './workflowTypes';
 import { STRATEGY_LABELS, workflowStageRank } from './workflowTypes';
 
 const MIN_RR = 1.5;
@@ -729,7 +729,8 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
     ema1mCheck(input),
     spyTapeCheck(selfInput),
   ];
-  return signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5: OB or FVG retest. Hard gates: OB needs rejection candle; FVG needs gap ≥ 0.25×ATR; both need RVOL≥1.0× and entry before 15:00 ET.');
+  const sig = signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5: OB or FVG retest. Hard gates: OB needs rejection candle; FVG needs gap ≥ 0.25×ATR; both need RVOL≥1.0× and entry before 15:00 ET.');
+  return { ...sig, enginePath: (atOb ? 'ob' : atFvg ? 'fvg' : undefined) as StrategySignal['enginePath'] };
 }
 
 export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
@@ -1023,60 +1024,90 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
 const STOP_BUFFER_15M = 1.0;
 const MIN_RR_15M = 2.0;
 
-// ─── S10: 15m ORB Retest ─────────────────────────────────────────────────────
-// ORB defined by first 2 session 15m bars (9:30-10:00 AM ET = 30 min).
-// Price breaks the ORB, pulls back to retest the level, then continues.
-// Hard gates: direction, orbFormed, breakout, retest, adrOk, rvolOk, rrOk.
+// ─── S10: 15m OB Retest (E1) ─────────────────────────────────────────────────
+// True E1 engine: unmitigated 15m order block created by a ≥1.6×ATR impulse bar.
+// Self-determines direction from which 15m OB is currently being tested.
+// Stop anchored to zone boundary with 1×ATR buffer; rejection candle required.
+// Hard gates: atOb (zone at price), obReject, RVOL≥1.0, ADR≥3%, R:R≥2.0.
 export function evaluateOrb15mRetest(input: StrategyInput): StrategySignal {
-  if (!directionOk(input)) {
-    return signal('orb15m_retest', input, [fail('Directional bias', 'No BULL/BEAR bias')], null, 'No directional bias.');
-  }
-  const dir = input.direction as 'BULL' | 'BEAR';
   const fifteen = input.candles.fifteen;
-  if (fifteen.length < 6) {
-    return signal('orb15m_retest', input, [fail('Data', 'Need 6+ 15m bars')], null, 'Insufficient candle data.');
+  if (fifteen.length < 20) {
+    return signal('orb15m_retest', input, [fail('Data', 'Need 20+ 15m bars for OB detection')], null, 'Insufficient 15m data.');
   }
-  const sessionBars = sessionCandles(fifteen);
-  if (sessionBars.length < 2) {
-    return signal('orb15m_retest', input, [fail('ORB forming', 'Wait for 10:00 AM ET (2nd session 15m bar)')], null, 'ORB not yet formed.');
-  }
-  const orbBars = sessionBars.slice(0, 2);
-  const orbHigh = Math.max(...orbBars.map(c => c.high));
-  const orbLow = Math.min(...orbBars.map(c => c.low));
-  const postOrb = sessionBars.slice(2);
-  const breakout = dir === 'BULL'
-    ? postOrb.some(c => c.close > orbHigh)
-    : postOrb.some(c => c.close < orbLow);
-  const tolerance = Math.max(input.atr20 * 0.2, input.price * 0.002);
-  const recent3 = fifteen.slice(-3);
-  const retest = dir === 'BULL'
-    ? recent3.some(c => c.low <= orbHigh + tolerance && c.close > orbHigh - tolerance)
-    : recent3.some(c => c.high >= orbLow - tolerance && c.close < orbLow + tolerance);
-  const adrOk = input.atrPct >= 3.0;
+
+  // E1: impulse threshold 1.6×ATR — only institutional-grade 15m bars create valid OBs.
+  // maxAge 30 bars = ~7.5 hours of 15m history — covers full session + prior day.
+  const bullOb = findOrderBlockZone(fifteen, 'BULL', 1.6, 30);
+  const bearOb = findOrderBlockZone(fifteen, 'BEAR', 1.6, 30);
+
+  const tolerance = input.atr20 * 0.25;
+  const atBullOb = bullOb
+    ? (input.price <= bullOb.high + tolerance && input.price >= bullOb.low - tolerance)
+    : false;
+  const atBearOb = bearOb
+    ? (input.price >= bearOb.low - tolerance && input.price <= bearOb.high + tolerance)
+    : false;
+
+  let selfDir: 'BULL' | 'BEAR' | null = null;
+  if (atBullOb && !atBearOb) selfDir = 'BULL';
+  else if (atBearOb && !atBullOb) selfDir = 'BEAR';
+  else if (atBullOb && atBearOb) selfDir = input.price >= input.vwap ? 'BULL' : 'BEAR';
+
+  const selfInput = selfDir
+    ? { ...input, direction: selfDir, vwapAligned: selfDir === 'BULL' ? input.price > input.vwap : input.price < input.vwap, trendAligned: selfDir === 'BULL' ? input.trend15m === 'UP' : input.trend15m === 'DOWN' }
+    : input;
+
+  const dir: 'BULL' | 'BEAR' = selfDir ?? 'BULL';
+  const ob = dir === 'BULL' ? bullOb : bearOb;
+  const atOb = dir === 'BULL' ? atBullOb : atBearOb;
+  const obReject = ob && atOb ? rejectionCandle(fifteen, dir, ob) : false;
   const rvolOk = input.rvol >= 1.0;
+  const adrOk = input.atrPct >= 3.0;
+
   const entry = input.price;
-  const swing = dir === 'BULL' ? Math.min(...recent3.map(c => c.low)) : Math.max(...recent3.map(c => c.high));
-  const rawStop = dir === 'BULL' ? swing - input.atr20 * STOP_BUFFER_15M : swing + input.atr20 * STOP_BUFFER_15M;
+  const rawStop = ob && atOb
+    ? (dir === 'BULL' ? ob.low - input.atr20 * STOP_BUFFER_15M : ob.high + input.atr20 * STOP_BUFFER_15M)
+    : entry;
   const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
-  const t2 = structuralT2(input, entry, risk, t1);
-  const rrOk = rr(entry, stop, t2, dir) >= MIN_RR_15M;
-  const tradePlan = breakout && retest && adrOk && rvolOk && rrOk
-    ? planFromLevelsT1T2(input, entry, stop, t1, t2)
+  const t2 = structuralT2(selfInput, entry, risk, t1);
+  const computedRR = ob && atOb ? rr(entry, stop, t2, dir) : 0;
+  const rrOk = computedRR >= MIN_RR_15M;
+  const trigger = last(fifteen);
+
+  const tradePlan = selfDir && atOb && obReject && rvolOk && adrOk && rrOk && trigger
+    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
     : null;
+
+  const obLabel = ob ? `${round(ob.low, 2)}–${round(ob.high, 2)}` : 'none';
   const checklist = [
-    directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
-    htfTrendCheck(input),
-    sessionBars.length >= 2 ? pass('ORB formed', `H ${round(orbHigh, 2)} / L ${round(orbLow, 2)} (30m)`) : fail('ORB formed', 'Waiting for 10:00 AM ET'),
-    breakout ? pass('ORB breakout', `${dir === 'BULL' ? 'Above' : 'Below'} ORB confirmed`) : fail('ORB breakout', 'No ORB breakout yet'),
-    retest ? pass('ORB retest', `${dir === 'BULL' ? 'Retested ORB high' : 'Retested ORB low'} ✓`) : fail('ORB retest', 'Waiting for pullback to ORB level'),
-    adrOk ? pass('ADR ≥3%', `${round(input.atrPct, 1)}% ✓`) : fail('ADR ≥3%', `${round(input.atrPct, 1)}% — 15m needs ≥3% range`),
-    rvolOk ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — breakout retest needs participation`),
-    rrOk ? pass('R:R ≥2.0', '✓') : fail('R:R ≥2.0', 'Reward insufficient vs 1×ATR stop'),
-    pass('VWAP', `${input.vwapAligned ? (dir === 'BULL' ? 'Above ✓' : 'Below ✓') : 'misaligned'} — informational`),
+    selfDir
+      ? pass('15m OB detected', `${selfDir} zone ${obLabel} — unmitigated ✓`)
+      : fail('15m OB detected', `No unmitigated 15m OB at price${bullOb || bearOb ? ' — price not in any zone' : ' — no ≥1.6×ATR impulse found'}`),
+    obReject
+      ? pass('Rejection candle', `15m close back ${dir === 'BULL' ? 'above' : 'below'} OB zone ✓`)
+      : fail('Rejection candle', 'No rejection — price slicing through OB means break, not hold'),
+    rvolOk
+      ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`)
+      : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — 15m OB retest needs participation`),
+    adrOk
+      ? pass('ADR ≥3%', `${round(input.atrPct, 1)}% ✓`)
+      : fail('ADR ≥3%', `${round(input.atrPct, 1)}% — 15m OB needs ≥3% daily range`),
+    rrOk
+      ? pass('R:R ≥2.0', `${round(computedRR, 2)} ✓`)
+      : fail('R:R ≥2.0', `${round(computedRR, 2)} — insufficient reward vs 1×ATR buffer stop`),
+    htfTrendCheck(selfInput),
+    pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above ✓' : 'Below ✓') : 'misaligned'} — informational`),
+    spySessionCheck(selfInput),
   ];
-  return signal('orb15m_retest', input, checklist, tradePlan, 'S10 15m ORB: breakout + retest + ADR≥3% + RVOL≥1.0 + R:R≥2.0. Hard gates: direction, breakout, retest, adrOk, rvolOk, rrOk.');
+
+  return signal(
+    'orb15m_retest', selfInput, checklist, tradePlan,
+    'S10 E1: Unmitigated 15m OB (≥1.6×ATR impulse) retest. Self-determines direction from zone geometry. Hard gates: atOb, obReject, RVOL≥1.0, ADR≥3%, R:R≥2.0.',
+    false,
+    ob && atOb ? [{ label: '15m OB Zone', startTime: fifteen[ob.index]?.time ?? '', endTime: fifteen[fifteen.length - 1]?.time ?? '', high: ob.high, low: ob.low }] : [],
+  );
 }
 
 // ─── S11: 15m VWAP Pullback ───────────────────────────────────────────────────

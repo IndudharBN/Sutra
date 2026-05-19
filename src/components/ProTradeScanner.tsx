@@ -1,7 +1,7 @@
 import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
 import { placePaperBracketOrder, closeAllPaperPositions, closePaperPosition, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
-import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, recordTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
+import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkGroupCircuitBreaker, recordTradeResult, recordGroupTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
 import { alpacaBarStream } from '../lib/alpacaBarStream';
 import { clearBarCache } from '../lib/alpacaClient';
 import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot, clearUniverseCache, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
@@ -10,9 +10,11 @@ import {
   STRATEGY_LABELS,
   WORKFLOW_STAGE_LABELS,
   WORKFLOW_STAGE_ORDER,
+  type SignalGroup,
   type StrategyId,
   type WorkflowStage,
 } from '../features/protrade/workflowTypes';
+import { stampGroupClassification } from '../features/protrade/confluenceClassifier';
 import { baseSymbol } from '../lib/symbols';
 import { loadAllTrades, persistTrade, todayET, tradeDateET } from '../lib/tradeStore';
 import { fetchBars } from '../lib/alpacaClient';
@@ -106,6 +108,7 @@ interface PaperTrade {
   pnl?: number;
   pnlPercent?: number;
   reason: string;
+  signalGroup?: SignalGroup;
 }
 
 const STAGE_TONES: Record<WorkflowStage, string> = {
@@ -414,7 +417,9 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
   }
 
   const effectiveMult = tideMult;
-  const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop);
+  const signalGroup = row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED';
+  const sigGroupSizeMult = row.primaryStrategy?.groupSizeMult ?? 1.0;
+  const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop, signalGroup, sigGroupSizeMult);
   const riskNotional = riskQty * plan.entry * effectiveMult;
   
   const budgetCap = availablePaperNotional(settings, currentTrades, accountBalance);
@@ -444,6 +449,7 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
     notional,
     openedAt,
     reason: (row.primaryStrategy?.reason || row.reason) + heatNote,
+    signalGroup: row.primaryStrategy?.signalGroup,
   };
 }
 
@@ -1799,7 +1805,10 @@ export function ProTradeScannerScreen() {
         // Record results in risk manager (circuit breaker + daily loss)
         // Use strategyId (not strategyName) — must match the key used in checkStrategyCircuitBreaker
         validUpdates.forEach((t) => {
-          if (t.pnl !== undefined) recordTradeResult(t.strategyId ?? t.strategyName, t.pnl, accountBalance);
+          if (t.pnl !== undefined) {
+            recordTradeResult(t.strategyId ?? t.strategyName, t.pnl, accountBalance);
+            recordGroupTradeResult(t.signalGroup ?? 'UNCLASSIFIED', t.pnl);
+          }
         });
       } catch {
         // Sync is best-effort — never block the UI
@@ -1990,8 +1999,23 @@ export function ProTradeScannerScreen() {
     const strategyName = row.primaryStrategy?.strategyId || row.symbol;
     const lossCheck = checkDailyLossLimit(accountBalance);
     if (!lossCheck.ok) { setApprovalMessage(lossCheck.reason!); return; }
+    // Legacy per-strategy CB (kept for backward compat) + new group-level CB
     const cbCheck = checkStrategyCircuitBreaker(strategyName);
     if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
+    const groupCbCheck = checkGroupCircuitBreaker(row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED');
+    if (!groupCbCheck.ok) { setApprovalMessage(groupCbCheck.reason!); return; }
+    // Stale entry filter: skip if price drifted >50% of risk past entry — no chasing
+    const tradeDir = row.primaryStrategy?.direction ?? row.direction;
+    const risk = Math.abs(plan.entry - plan.stop);
+    const currentPrice = row.price;
+    if (tradeDir === 'BULL' && currentPrice > plan.entry + risk * 0.5) {
+      setApprovalMessage(`Stale entry: price moved $${(currentPrice - plan.entry).toFixed(2)} past entry — skipped to avoid chasing.`);
+      return;
+    }
+    if (tradeDir === 'BEAR' && currentPrice < plan.entry - risk * 0.5) {
+      setApprovalMessage(`Stale entry: price moved $${(plan.entry - currentPrice).toFixed(2)} past entry — skipped to avoid chasing.`);
+      return;
+    }
     const usedNotional = paperTrades.filter(t => t.status === 'Open').reduce((s, t) => s + (t.t1HitAt ? t.notional * 0.5 : t.notional), 0);
     if (usedNotional >= accountBalance * 0.65) { setApprovalMessage(`Balance utilization at ${((usedNotional / accountBalance) * 100).toFixed(0)}% — 65% cap reached. Wait for a position to close.`); return; }
     // P3: Earnings warning (manual override allowed, but alert the trader)
@@ -2001,7 +2025,9 @@ export function ProTradeScannerScreen() {
     try {
       setApprovalBusy(true);
       setApprovalMessage('');
-      const qty = computePositionSize(accountBalance, plan.entry, plan.stop);
+      const approveGroup = row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED';
+      const approveGroupMult = (row.primaryStrategy?.groupSizeMult ?? 1.0) * groupCbCheck.sizeMult;
+      const qty = computePositionSize(accountBalance, plan.entry, plan.stop, approveGroup, approveGroupMult);
       const order = await placePaperBracketOrder({
         symbol: row.symbol,
         direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL',
@@ -2025,6 +2051,22 @@ export function ProTradeScannerScreen() {
     if (!lossCheck.ok) { setApprovalMessage(lossCheck.reason!); return; }
     const cbCheck = checkStrategyCircuitBreaker(strategyName);
     if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
+    const groupCbCheck = checkGroupCircuitBreaker(row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED');
+    if (!groupCbCheck.ok) { setApprovalMessage(groupCbCheck.reason!); return; }
+    // Stale entry filter
+    const plan = effectiveTradePlan(row, settings);
+    if (plan) {
+      const tradeDir = row.primaryStrategy?.direction ?? row.direction;
+      const risk = Math.abs(plan.entry - plan.stop);
+      if (tradeDir === 'BULL' && row.price > plan.entry + risk * 0.5) {
+        setApprovalMessage(`Stale entry: price moved $${(row.price - plan.entry).toFixed(2)} past entry — skipped.`);
+        return;
+      }
+      if (tradeDir === 'BEAR' && row.price < plan.entry - risk * 0.5) {
+        setApprovalMessage(`Stale entry: price moved $${(plan.entry - row.price).toFixed(2)} past entry — skipped.`);
+        return;
+      }
+    }
     const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.spyTrend5m);
     if (!trade) {
       const plan = effectiveTradePlan(row, settings);
@@ -2082,6 +2124,7 @@ export function ProTradeScannerScreen() {
     setPaperTrades((current) => current.map((item) => item.id === trade.id ? closed : item));
     if (closed.pnl !== undefined) {
       recordTradeResult(trade.strategyName, closed.pnl, accountBalance);
+      recordGroupTradeResult(trade.signalGroup ?? 'UNCLASSIFIED', closed.pnl);
     }
     closePaperPosition(trade.symbol).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
