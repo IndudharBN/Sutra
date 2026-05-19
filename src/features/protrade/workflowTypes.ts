@@ -18,7 +18,11 @@ export type StrategyId =
   | 'mss_breakout'
   | 's7_volume_surge'
   | 'ema20_bounce'
-  | 'flag_break';
+  | 'flag_break'
+  | 'orb15m_retest'
+  | 'vwap15m_pullback'
+  | 'ema20_bounce_15m'
+  | 'range_reversion';
 
 export type MarketDataProviderId = 'yahoo' | 'alpaca' | 'polygon' | 'ibkr';
 
@@ -132,6 +136,10 @@ export const STRATEGY_LABELS: Record<StrategyId, string> = {
   s7_volume_surge: 'Volume Surge',
   ema20_bounce: 'EMA20 Bounce',
   flag_break: 'Flag Break',
+  orb15m_retest: '15m ORB Retest',
+  vwap15m_pullback: '15m VWAP Pullback',
+  ema20_bounce_15m: '15m EMA20 Bounce',
+  range_reversion: 'Range Reversion',
 };
 
 export const STRATEGY_CODES: Record<StrategyId, string> = {
@@ -144,6 +152,10 @@ export const STRATEGY_CODES: Record<StrategyId, string> = {
   s7_volume_surge: 'S7',
   ema20_bounce: 'S8',
   flag_break: 'S9',
+  orb15m_retest: 'S10',
+  vwap15m_pullback: 'S11',
+  ema20_bounce_15m: 'S12',
+  range_reversion: 'S13',
 };
 
 export const WORKFLOW_STAGE_ORDER: WorkflowStage[] = [

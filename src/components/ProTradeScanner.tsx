@@ -1963,18 +1963,23 @@ export function ProTradeScannerScreen() {
       if (mins < 15 * 60 + 57 || mins > 16 * 60) return;
       const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
       if (eodFiredRef.current === today) return;
-      const openTrades = paperTradesRef.current.filter((t) => t.status === 'Open');
+      // 15m strategies (S10/S11/S12) are exempt from EOD force-close — their wider
+      // stops and R:R≥2.0 mean cutting at 3:57 PM systematically kills the T2 leg.
+      // They run to their natural exit (T2 hit or trailing stop) before 4:00 PM.
+      const S15M_IDS = new Set(['orb15m_retest', 'vwap15m_pullback', 'ema20_bounce_15m']);
+      const openTrades = paperTradesRef.current.filter((t) => t.status === 'Open' && !S15M_IDS.has(t.strategyId ?? ''));
       eodFiredRef.current = today;
       if (!openTrades.length) return;
       const closedAt = new Date().toISOString();
       setPaperTrades((current) => current.map((t) => {
         if (t.status !== 'Open') return t;
+        if (S15M_IDS.has(t.strategyId ?? '')) return t;
         const row = snapshotRef.current?.rows.find((r) => baseSymbol(r.symbol) === baseSymbol(t.symbol));
         const exitPrice = row?.price ?? t.entry;
         return closePaperTrade(t, exitPrice, 'EOD', closedAt);
       }));
       closeAllPaperPositions().catch(() => { });
-      setApprovalMessage(`EOD 3:57 PM — closed ${openTrades.length} open position(s) flat.`);
+      setApprovalMessage(`EOD 3:57 PM — closed ${openTrades.length} position(s) flat. 15m strategies (S10/S11/S12) run to natural exit.`);
     }, 30_000);
     return () => clearInterval(interval);
   }, []);
