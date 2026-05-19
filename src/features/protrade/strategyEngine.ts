@@ -639,7 +639,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   // S5 self-determines direction from which OB/FVG zone price is currently retesting
   const bullOb = findOrderBlockZone(five, 'BULL', 1.1, 20);
   const bearOb = findOrderBlockZone(five, 'BEAR', 1.1, 20);
-  const fvgResult = detectFvg(five, 8);
+  const fvgResult = detectFvg(five, 20);
   const gap = fvgResult.latestGap;
 
   const atBullOb = bullOb
@@ -692,11 +692,14 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
   const rvolOk = input.rvol >= 1.0;
+  const fvgSizeOk = atFvg && gap ? (gap.gapHigh - gap.gapLow) >= input.atr20 * 0.25 : true;
+  const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const etMins = etNow.getHours() * 60 + etNow.getMinutes();
+  const lateSession = etMins >= 15 * 60;
   // OB entries require a rejection candle — price slicing through an OB without a wick/reversal
   // bar means the zone is breaking, not holding. FVG entries don't need it (the gap is the magnet).
   const entryConfirmed = atOb ? obReject : atFvg;
-  const tradePlan = entryConfirmed && rvolOk ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
-  const fvgSizeOk = fvgAligned && gap ? (gap.gapHigh - gap.gapLow) >= input.atr20 * 0.25 : false;
+  const tradePlan = entryConfirmed && rvolOk && fvgSizeOk && !lateSession ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const structureLabel = atOb && atFvg
     ? `OB+FVG confluence`
     : atOb ? `OB entry`
@@ -711,8 +714,9 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
       ? pass('Structure zone', structureLabel)
       : fail('Structure zone', 'No active OB or unfilled FVG at current price'),
     atFvg && !fvgSizeOk
-      ? fail('FVG quality', `Gap too small (< 0.25×ATR)`)
+      ? fail('FVG quality', `Gap too small (< 0.25×ATR) — entry blocked`)
       : atFvg ? pass('FVG quality', `Gap size ok`) : pass('FVG quality', 'OB entry — no FVG required'),
+    lateSession ? fail('Session time', 'After 15:00 ET — no new S5 entries (close-of-day noise)') : pass('Session time', 'Before 15:00 ET ✓'),
     pass('5m trend aligned', `${selfInput.trend5m}${selfInput.trendAligned ? ' ✓' : ' — pullback entry phase'} — informational`),
     atOb
       ? (obReject ? pass('OB rejection candle', 'Wick/reversal bar at OB ✓') : fail('OB rejection candle', 'Price through OB without rejection — zone likely breaking, not bouncing'))
@@ -725,7 +729,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
     ema1mCheck(input),
     spyTapeCheck(selfInput),
   ];
-  return signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5: OB or FVG retest. Hard gates: OB needs rejection candle (zone holding, not breaking); FVG just needs price in gap; both need RVOL≥1.0×.');
+  return signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5: OB or FVG retest. Hard gates: OB needs rejection candle; FVG needs gap ≥ 0.25×ATR; both need RVOL≥1.0× and entry before 15:00 ET.');
 }
 
 export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
