@@ -412,42 +412,60 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const vwapSlope = ema9Prev && Number.isFinite(ema9Prev) && Number.isFinite(ema9)
     ? (ema9 - ema9Prev) / ema9Prev
     : null;
-  // Flat VWAP = range session: pullback reclaims are 50/50, not trending. Require 0.05% directional slope over 50m.
-  const vwapSlopeOk = vwapSlope !== null
-    ? (input.direction === 'BULL' ? vwapSlope >= 0.0005 : vwapSlope <= -0.0005)
-    : true;
-  const touchedValue = recent.some((c) => input.direction === 'BULL'
+
+  // S2 self-determines direction from VWAP slope — immune to Option C's 5m dip mismatch at entry.
+  // During the pullback the 5m trend is temporarily DOWN (that IS the setup), so VWAP+5m Option C
+  // reads NEUTRAL/BEAR and blocks the entry. Slope over ~50 bars captures the session trend through the dip.
+  const selfDir: 'BULL' | 'BEAR' | null = vwapSlope !== null
+    ? (vwapSlope >= 0.0005 ? 'BULL' : vwapSlope <= -0.0005 ? 'BEAR' : null)
+    : null;
+  const dir: 'BULL' | 'BEAR' = selfDir ?? 'BULL'; // geometry fallback; tradePlan is null when selfDir=null
+  const selfInput = selfDir
+    ? {
+        ...input,
+        direction: selfDir,
+        vwapAligned: selfDir === 'BULL' ? input.price > input.vwap : input.price < input.vwap,
+        trendAligned: selfDir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN',
+      }
+    : input;
+
+  const vwapSlopeOk = Boolean(selfDir); // flat VWAP = range session: pullback reclaims are 50/50
+  const touchedValue = recent.some((c) => dir === 'BULL'
     ? (c.low <= input.vwap + tolerance || c.low <= ema9 + tolerance)
     : (c.high >= input.vwap - tolerance || c.high >= ema9 - tolerance)
   );
-  const reclaimed = trigger ? directionalAbove(input, trigger.close, Math.min(input.vwap, ema9)) : false;
+  const reclaimed = trigger
+    ? (dir === 'BULL' ? trigger.close > Math.min(input.vwap, ema9) : trigger.close < Math.min(input.vwap, ema9))
+    : false;
   const rvolOk = input.rvol >= 0.8; // dead-volume reclaims almost never hold
   const rsOk = input.rsVsBenchmark >= 1.0; // stock must lead or match SPY — laggards VWAP reclaim on a strong SPY day, then fail
   const rsLabel = `RS ${round(input.rsVsBenchmark, 4)} vs SPY${rsOk ? ' ✓' : ' — lagging'}`;
   const entry = input.price;
-  const swing = input.direction === 'BULL' ? Math.min(...recent.map((c) => c.low)) : Math.max(...recent.map((c) => c.high));
-  const rawStop = input.direction === 'BULL' ? swing - input.atr20 * STOP_BUFFER_ATR : swing + input.atr20 * STOP_BUFFER_ATR;
-  const stop = enforceMinStop(input.direction as 'BULL' | 'BEAR', entry, noiseFlooredStop(input.direction as 'BULL' | 'BEAR', entry, rawStop, input.atr20, input.vixLevel), input.atr20);
+  const swing = dir === 'BULL' ? Math.min(...recent.map((c) => c.low)) : Math.max(...recent.map((c) => c.high));
+  const rawStop = dir === 'BULL' ? swing - input.atr20 * STOP_BUFFER_ATR : swing + input.atr20 * STOP_BUFFER_ATR;
+  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel), input.atr20);
   const risk = Math.abs(entry - stop);
-  const t1 = input.direction === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
-  const t2 = structuralT2(input, entry, risk, t1);
-  const tradePlan = directionOk(input) && touchedValue && reclaimed && rvolOk && rsOk && vwapSlopeOk ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger) : null;
+  const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
+  const t2 = structuralT2(selfInput, entry, risk, t1);
+  const tradePlan = selfDir && touchedValue && reclaimed && rvolOk && rsOk ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const checklist = [
-    directionOk(input) ? pass('Directional bias', input.direction) : fail('Directional bias', 'No BULL/BEAR bias'),
-    htfTrendCheck(input),
+    selfDir ? pass('Directional bias', `${selfDir} — self-determined from VWAP slope`) : fail('Directional bias', 'VWAP flat — range session, no pullback direction'),
+    htfTrendCheck(selfInput),
     touchedValue ? pass('Pullback into value', 'Recent 30m tested VWAP/EMA zone') : fail('Pullback into value', 'No fresh test in last 30m'),
     reclaimed ? pass('Reclaim candle', 'Latest candle reclaimed direction') : fail('Reclaim candle', 'Waiting for reclaim'),
-    input.trendAligned ? pass('5m trend aligned', `${input.trend5m} ✓ — Phase 3 reclaim confirmed`) : fail('5m trend aligned', `5m still ${input.trend5m} — pullback not complete`),
+    selfInput.trendAligned
+      ? pass('5m trend aligned', `${selfInput.trend5m} ✓ — Phase 3 reclaim confirmed`)
+      : pass('5m trend aligned', `${selfInput.trend5m} — pullback phase, reclaim pending — informational`),
     rvolOk ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — dead-volume reclaims fail`),
-    pass('VWAP context', `${input.vwapAligned ? 'Above VWAP ✓' : 'Near VWAP'} — informational`),
+    pass('VWAP context', `${selfInput.vwapAligned ? 'Above VWAP ✓' : 'Near VWAP'} — informational`),
     rsOk ? pass('RS vs SPY ≥1.0×', rsLabel) : fail('RS vs SPY ≥1.0×', `${rsLabel} — laggard VWAP reclaims fail on strong SPY days`),
     vwapSlopeOk
       ? pass('VWAP slope', `${round((vwapSlope ?? 0) * 100, 3)}% over 50m — directional session ✓`)
       : fail('VWAP slope', `VWAP flat (${round((vwapSlope ?? 0) * 100, 3)}%) — range session: pullback 50/50`),
     ema1mCheck(input),
-    spySessionCheck(input),
+    spySessionCheck(selfInput),
   ];
-  return signal('vwap_pullback', input, checklist, tradePlan, 'S2 VWAP pullback: fresh 30m test + reclaim + 5m aligned + RVOL≥0.8 + RS≥1.0 + VWAP slope. Hard gates: direction, touchedValue, reclaimed, trendAligned, rvolOk, rsOk, vwapSlopeOk.');
+  return signal('vwap_pullback', selfInput, checklist, tradePlan, 'S2 VWAP pullback: self-determined direction from VWAP slope + fresh 30m test + reclaim + RVOL≥0.8 + RS≥1.0. Hard gates: selfDir (slope ≥0.05%), touchedValue, reclaimed, rvolOk, rsOk.');
 }
 
 export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
