@@ -294,8 +294,10 @@ function directionOk(input: StrategyInput) {
   return input.direction === 'BULL' || input.direction === 'BEAR';
 }
 
-function htfTrendCheck(input: StrategyInput) {
-  return pass('15m directional context', `${input.trend15m}${input.trend15mAligned ? ' ✓ aligned' : ' — watch'} — informational`);
+function htfTrendContext(input: StrategyInput) {
+  return pass('15m trend (informational)', input.trend15mAligned
+    ? `${input.trend15m} ✓ aligned with ${input.direction}`
+    : `${input.trend15m} — counter-trend entry`);
 }
 
 function directionalAbove(input: StrategyInput, value: number, reference: number) {
@@ -433,7 +435,7 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const tradePlan = selfDir && range && confirmedBreak && retest && orbWidthOk && input.rvol >= rvolMin ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from ORB break`) : fail('Directional bias', 'Price inside ORB — no breakout yet'),
-    htfTrendCheck(selfInput),
+    htfTrendContext(selfInput),
     range ? pass('Opening range formed', `${round(range.low, 2)}–${round(range.high, 2)}`) : fail('Opening range formed', 'Need first 15 min of 5m candles'),
     orbWidthOk ? pass('ORB width ≥0.5%', `${round(orbWidthPct * 100, 2)}% ✓`) : fail('ORB width ≥0.5%', `${round(orbWidthPct * 100, 2)}% — degenerate range: no institutional positioning`),
     confirmedBreak ? pass('ORB Breakout', `Clear of noise (+${round(breakoutDistance, 2)})`) : fail('ORB Breakout', `Inside noise floor (${round(minBreakout, 2)})`),
@@ -501,7 +503,7 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const tradePlan = selfDir && touchedValue && reclaimed && rvolOk && rsOk ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from VWAP slope`) : fail('Directional bias', 'VWAP flat — range session, no pullback direction'),
-    htfTrendCheck(selfInput),
+    htfTrendContext(selfInput),
     touchedValue ? pass('Pullback into value', 'Recent 30m tested VWAP/EMA zone') : fail('Pullback into value', 'No fresh test in last 30m'),
     reclaimed ? pass('Reclaim candle', 'Latest candle reclaimed direction') : fail('Reclaim candle', 'Waiting for reclaim'),
     selfInput.trendAligned
@@ -760,7 +762,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const rsiOk = dir === 'BULL' ? rsiVal < 65 : rsiVal > 35;
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from ${atOb ? 'OB' : 'FVG'} at price`) : fail('Directional bias', 'No OB or FVG at current price — direction unknown'),
-    htfTrendCheck(selfInput),
+    htfTrendContext(selfInput),
     hasStructure
       ? pass('Structure zone', structureLabel)
       : fail('Structure zone', 'No active OB or unfilled FVG at current price'),
@@ -834,7 +836,7 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
   const tradePlan = mssOk && bar2Ok && !zoneBlocked && volOk ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from structural break`) : fail('Directional bias', 'No structural break in last 30m — direction unknown'),
-    htfTrendCheck(selfInput),
+    htfTrendContext(selfInput),
     mssOk ? pass('MSS detected', 'Structural high/low broken') : fail('MSS detected', 'Waiting for break'),
     bar2Ok ? pass('Bar-2 hold', 'MSS level maintained ✓') : fail('Bar-2 hold', 'Price extended too far from break — do not chase'),
     !zoneBlocked ? pass('Zone clearance', 'Clear path ahead ✓') : fail('Zone clearance', 'Opposing OB within 1×ATR — insufficient clearance'),
@@ -975,7 +977,7 @@ export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
     reclaimed
       ? pass('Recovery candle', `Close ${dir === 'BULL' ? 'above' : 'below'} EMA20 ✓`)
       : fail('Recovery candle', 'Waiting for bar to close back through EMA20'),
-    htfTrendCheck(selfInput),
+    htfTrendContext(selfInput),
     pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP misaligned — watch'} — informational`),
     input.rvol >= 0.8 ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — EMA bounce in low volume is chop, not trend`),
     ema1mCheck(input),
@@ -1048,7 +1050,7 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
     volExpansion
       ? pass('Volume expansion', `Break bar ${round(trigger.volume / Math.max(flagMaxVol, 1), 1)}× flag max vol ✓`)
       : fail('Volume expansion', `Break bar vol below flag max (${flagMaxVol.toLocaleString()}) — drift break, not institutional`),
-    htfTrendCheck(selfInput),
+    htfTrendContext(selfInput),
     pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP misaligned — watch'} — informational`),
     ema1mCheck(input),
     spyTapeCheck(selfInput),
@@ -1138,7 +1140,7 @@ export function evaluateOrb15mRetest(input: StrategyInput): StrategySignal {
     rrOk
       ? pass('R:R ≥2.0', `${round(computedRR, 2)} ✓`)
       : fail('R:R ≥2.0', `${round(computedRR, 2)} — insufficient reward vs 1×ATR buffer stop`),
-    htfTrendCheck(selfInput),
+    htfTrendContext(selfInput),
     pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above ✓' : 'Below ✓') : 'misaligned'} — informational`),
     spySessionCheck(selfInput),
   ];
@@ -1188,7 +1190,7 @@ export function evaluateVwap15mPullback(input: StrategyInput): StrategySignal {
     : null;
   const checklist = [
     directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
-    htfTrendCheck(input),
+    htfTrendContext(input),
     touchedVwap ? pass('15m VWAP test', 'Within 60m on 15m chart') : fail('15m VWAP test', 'No 15m VWAP test in last 60m'),
     reclaimed ? pass('VWAP reclaim', `15m close ${dir === 'BULL' ? 'above' : 'below'} VWAP ✓`) : fail('VWAP reclaim', 'Waiting for 15m close back through VWAP'),
     rsOk ? pass('RS vs SPY ≥0.5%', `${round(input.rsVsBenchmark, 4)} ✓`) : fail('RS vs SPY ≥0.5%', `${round(input.rsVsBenchmark, 4)} — 15m reclaim requires RS edge`),
@@ -1256,7 +1258,7 @@ export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
     rvolOk ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — 15m bounce needs volume`),
     adrOk ? pass('ADR ≥3%', `${round(input.atrPct, 1)}% ✓`) : fail('ADR ≥3%', `${round(input.atrPct, 1)}% — 15m needs ≥3% range`),
     rrOk ? pass('R:R ≥2.0', '✓') : fail('R:R ≥2.0', 'Reward insufficient vs 1×ATR stop'),
-    htfTrendCheck(input),
+    htfTrendContext(input),
     pass('VWAP', `${input.vwapAligned ? (dir === 'BULL' ? 'Above ✓' : 'Below ✓') : 'misaligned'} — informational`),
   ];
   return signal('ema20_bounce_15m', input, checklist, tradePlan, 'S12 15m EMA20 bounce: 1h rising slope + 45m touch + reclaim + RVOL≥1.0 + R:R≥2.0. Hard gates: direction, emaRising, touchedEma, reclaimed, rvolOk, rrOk.');
@@ -1456,7 +1458,7 @@ export function evaluateSniper1m(input: StrategyInput): StrategySignal {
     rrOk
       ? pass('R:R ≥2.0', `${round(computedRR, 2)} ✓ — tight 1m stop gives edge`)
       : fail('R:R ≥2.0', `${round(computedRR, 2)} — 1m zone too close to entry`),
-    htfTrendCheck(selfInput),
+    htfTrendContext(selfInput),
     pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above ✓' : 'Below ✓') : 'misaligned'} — informational`),
     spySessionCheck(selfInput),
   ];
