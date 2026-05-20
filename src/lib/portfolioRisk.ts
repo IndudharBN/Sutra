@@ -37,7 +37,9 @@ export function computeBeta(
 // 1.5/beta clamped [0.4, 1.5] — high-beta stocks get smaller size
 export function betaAdjustedSizingMult(beta: number): number {
   if (beta <= 0) return 1.0;
-  return Math.max(0.4, Math.min(1.5, 1.5 / beta));
+  // Capped at 1.0 — beta only reduces size for high-beta stocks, never inflates above group cap.
+  // Previously 1.5/β with max 1.5 punched through group caps for typical β=1.0–1.4 stocks.
+  return Math.max(0.4, Math.min(1.0, 1.5 / beta));
 }
 
 interface OpenTrade { symbol: string; status: string; }
