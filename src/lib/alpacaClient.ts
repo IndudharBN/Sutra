@@ -234,14 +234,15 @@ export function selectTopSymbols(metas: SymbolMeta[], n = 60): string[] {
 }
 
 // ── Dynamic universe builder (replaces static hardcoded list) ────────────────
-// Fetches today's active movers from Alpaca screener, enriches with 60-day
-// daily bars, applies 4 hard gates (beta 1.2–2.8, ADR% ≥2.5%, dollar vol ≥$3M,
-// price $1–$1500), ranks by activity score, caches top 75 for 6 hours.
+// Fetches today's active movers from Alpaca screener (top 80 most-active +
+// top 40 movers), enriches with 60-day daily bars, applies 4 hard gates
+// (beta 1.2–2.8, ADR% ≥2.5%, dollar vol ≥$3M, price $1–$1500), ranks by
+// activity score (gap% × 3 + RVOL × 20), caches top 120 for 6 hours.
 // Falls back to the static list passed by the caller if screener is unavailable.
 
 const UNIVERSE_CACHE_KEY = 'dynamic_universe_v2';
 const UNIVERSE_TTL_MS = 6 * 60 * 60 * 1000;   // 6 hours
-const UNIVERSE_TARGET = 90;
+const UNIVERSE_TARGET = 120;
 
 // Tracks when buildDynamicUniverse last locked the symbol pool
 let _universeBuiltAt: string | null = null;
@@ -265,8 +266,8 @@ interface MoversResp { gainers: ScreenerStock[]; losers: ScreenerStock[]; }
 
 async function fetchScreenerCandidates(): Promise<string[]> {
   const [actives, movers] = await Promise.allSettled([
-    alpacaGet<MostActivesResp>('/v2/screener/stocks/most-actives', { by: 'dollar_volume', top: '50' }),
-    alpacaGet<MoversResp>('/v2/screener/stocks/movers', { top: '25' }),
+    alpacaGet<MostActivesResp>('/v2/screener/stocks/most-actives', { by: 'dollar_volume', top: '80' }),
+    alpacaGet<MoversResp>('/v2/screener/stocks/movers', { top: '40' }),
   ]);
   const symbols = new Set<string>();
   if (actives.status === 'fulfilled') actives.value.most_actives?.forEach(s => symbols.add(s.symbol));
@@ -379,7 +380,7 @@ export async function buildDynamicUniverse(
       return true;
     });
 
-    if (qualified.length < 15) throw new Error(`only ${qualified.length} symbols passed gates — screener may be limited`);
+    if (qualified.length < 20) throw new Error(`only ${qualified.length} symbols passed gates — screener may be limited`);
 
     // Rank by live activity score (gap% + RVOL estimate) and take top 75
     const snaps = await fetchSnapshots(qualified);
