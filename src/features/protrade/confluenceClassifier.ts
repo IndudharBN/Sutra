@@ -112,23 +112,28 @@ export function classifySignalGroup(allSignals: StrategySignal[]): GroupClassifi
 
   // ── Sutra-native groups ───────────────────────────────────────────────────
 
-  // BREAKOUT: S1 and/or S9 — both together get +25% boost
+  // BREAKOUT: S1 solo=1.0×, S1+S9 together=1.25×, S9 solo=0.5× (informational — flag needs ORB to validate)
   const breakoutFired = fired.filter((s) => BREAKOUT_IDS.has(s.strategyId));
   if (breakoutFired.length) {
     const bothBreakout = ids.has('orb_retest') && ids.has('flag_break');
+    const flagAlone    = ids.has('flag_break') && !ids.has('orb_retest');
     return {
       group: 'BREAKOUT',
-      sizingMultiplier: bothBreakout ? 1.25 : 1.0,
+      sizingMultiplier: bothBreakout ? 1.25 : flagAlone ? 0.5 : 1.0,
       bestSignal: bestForGroup(breakoutFired, ['orb_retest', 'flag_break']),
     };
   }
 
-  // PULLBACK: S2, S4, S11, S12 — S2+S11 dual-timeframe gets +20%; S4-alone gets 0.75×
+  // PULLBACK: S2 solo=1.0×, S2+S11 dual-timeframe=1.2×, S4 alone=0.75×,
+  //           S11 alone=0.75× (informational — 15m forming, wait for 5m),
+  //           S12 alone=0.5× (informational — no VWAP anchor)
   const pullbackFired = fired.filter((s) => PULLBACK_IDS.has(s.strategyId));
   if (pullbackFired.length) {
-    const dualVwap = ids.has('vwap_pullback') && ids.has('vwap15m_pullback');
-    const sweepAlone = ids.has('liquidity_sweep') && pullbackFired.length === 1;
-    const mult = dualVwap ? 1.2 : sweepAlone ? 0.75 : 1.0;
+    const dualVwap    = ids.has('vwap_pullback') && ids.has('vwap15m_pullback');
+    const sweepAlone  = ids.has('liquidity_sweep') && pullbackFired.length === 1;
+    const vwap15Alone = ids.has('vwap15m_pullback') && !ids.has('vwap_pullback') && pullbackFired.length === 1;
+    const ema15Alone  = ids.has('ema20_bounce_15m') && !ids.has('vwap_pullback') && pullbackFired.length === 1;
+    const mult = dualVwap ? 1.2 : sweepAlone || vwap15Alone ? 0.75 : ema15Alone ? 0.5 : 1.0;
     return {
       group: 'PULLBACK',
       sizingMultiplier: mult,
@@ -136,13 +141,14 @@ export function classifySignalGroup(allSignals: StrategySignal[]): GroupClassifi
     };
   }
 
-  // MOMENTUM: S7, S8 — S7+S8 or S8+S12 gets +20%
+  // MOMENTUM: S8 solo=1.0×, S7+S8 together=1.2×, S7 solo=0.5× (informational — no structural stop)
   const momentumFired = fired.filter((s) => MOMENTUM_IDS.has(s.strategyId));
   if (momentumFired.length) {
-    const dualMomentum = (ids.has('s7_volume_surge') && ids.has('ema20_bounce'));
+    const dualMomentum = ids.has('s7_volume_surge') && ids.has('ema20_bounce');
+    const surgAlone    = ids.has('s7_volume_surge') && !ids.has('ema20_bounce');
     return {
       group: 'MOMENTUM',
-      sizingMultiplier: dualMomentum ? 1.2 : 1.0,
+      sizingMultiplier: dualMomentum ? 1.2 : surgAlone ? 0.5 : 1.0,
       bestSignal: bestForGroup(momentumFired, ['s7_volume_surge', 'ema20_bounce']),
     };
   }
