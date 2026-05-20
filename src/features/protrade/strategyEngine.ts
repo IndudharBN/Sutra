@@ -430,7 +430,7 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const preferredTarget = dir === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
   const t2 = dir === 'BULL' ? Math.max(measuredMove, preferredTarget) : Math.min(measuredMove, preferredTarget);
-  const tradePlan = selfDir && range && confirmedBreak && retest && orbWidthOk ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = selfDir && range && confirmedBreak && retest && orbWidthOk && input.rvol >= rvolMin ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from ORB break`) : fail('Directional bias', 'Price inside ORB — no breakout yet'),
     htfTrendCheck(selfInput),
@@ -550,7 +550,7 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
-  const tradePlan = recent.length >= 6 && rsEdge && breakout && stopSide ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = recent.length >= 6 && rsEdge && breakout && stopSide && input.rvol >= 1.0 ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const fifteen = input.candles.fifteen;
   const trend1h: 'UP' | 'DOWN' | 'FLAT' = fifteen.length >= 5
     ? (fifteen[fifteen.length - 1].close > fifteen[fifteen.length - 5].close * 1.001 ? 'UP'
@@ -910,17 +910,7 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
     pass('ADR room', `${!adrExhausted(input.candles.five, input.atr20) ? '< 80% ATR used ✓' : '>80% ATR used — watch sizing'} — informational`),
     spyTapeCheck(selfInput),
   ];
-  const sig = signal('s7_volume_surge', selfInput, checklist, tradePlan, 'S7: Institutional 2× volume surge on 30m range break + RVOL≥0.8×. Hard gates: volSpike (2× projected), selfDir (range break), rvolOk (0.8×), vwapAligned, spyTape.');
-  // Pre-blackout gap fire: allow S7 to fire at 9:30–9:45 AM on strong gap days (>3% gap + live data)
-  if (
-    sig.stage === 'locked' &&
-    sessionGate() === 'blackout' &&
-    input.dataStatus.mode === 'live' && !input.dataStatus.stale &&
-    ((dir === 'BULL' && input.gapPct >= 3) || (dir === 'BEAR' && input.gapPct <= -3))
-  ) {
-    return { ...sig, stage: 'trade_ready' as const };
-  }
-  return sig;
+  return signal('s7_volume_surge', selfInput, checklist, tradePlan, 'S7: Institutional 2× volume surge on 30m range break + RVOL≥0.8×. Hard gates: volSpike (2× projected), selfDir (range break), rvolOk (0.8×), vwapAligned, spyTape.');
 }
 
 // ─── S8: EMA20 Bounce ────────────────────────────────────────────────────────
@@ -1485,7 +1475,7 @@ const SYMBOL_STRATEGY_EXCLUSIONS: Partial<Record<string, StrategyId[]>> = {
 
 export function evaluateStrategies(input: StrategyInput): StrategySignal[] {
   const excluded = SYMBOL_STRATEGY_EXCLUSIONS[input.symbol] ?? [];
-  const signals = [
+  let signals = [
     evaluateOrbRetest(input),
     evaluateVwapPullback(input),
     evaluateRsContinuation(input),
@@ -1504,9 +1494,24 @@ export function evaluateStrategies(input: StrategyInput): StrategySignal[] {
     // E4: 1m sniper inside confirmed 15m or 5m OB — tightest stop, best R:R
     // Promotes to GOLD when S10 (E1) or S5-ob (E2) also fires on same ticker
     evaluateSniper1m(input),
-  ].filter((s): s is StrategySignal => s !== null);
+  ].filter((s): s is StrategySignal => s !== null)
+   .filter((sig) => !excluded.includes(sig.strategyId))
+   .sort((a, b) => workflowStageRank(b.stage) - workflowStageRank(a.stage) || b.confidence - a.confidence);
 
-  return signals
-    .filter((sig) => !excluded.includes(sig.strategyId))
-    .sort((a, b) => workflowStageRank(b.stage) - workflowStageRank(a.stage) || b.confidence - a.confidence);
+  // S7 pre-blackout gap fire — only when S8 (EMA20 bounce) is confirmed or higher.
+  // Moved here from checkS7VolumeSurge so S8's stage is visible before promoting S7.
+  const s7 = signals.find((s) => s.strategyId === 's7_volume_surge');
+  const s8 = signals.find((s) => s.strategyId === 'ema20_bounce');
+  if (
+    s7 && s8 &&
+    s7.stage === 'locked' &&
+    workflowStageRank(s8.stage) >= workflowStageRank('confirmed') &&
+    sessionGate() === 'blackout' &&
+    input.dataStatus.mode === 'live' && !input.dataStatus.stale &&
+    ((s7.direction === 'BULL' && input.gapPct >= 3) || (s7.direction === 'BEAR' && input.gapPct <= -3))
+  ) {
+    signals = signals.map((s) => s.strategyId === 's7_volume_surge' ? { ...s, stage: 'trade_ready' as const } : s);
+  }
+
+  return signals;
 }

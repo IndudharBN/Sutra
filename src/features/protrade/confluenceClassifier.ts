@@ -105,9 +105,9 @@ export function classifySignalGroup(allSignals: StrategySignal[]): GroupClassifi
     return { group: 'TREND', sizingMultiplier: 1.0, bestSignal: fired.find((s) => s.strategyId === 'rs_continuation')! };
   }
 
-  // FVG: S5 FVG-path only
+  // FVG: S5 FVG-path only — 0.75× because FVG alone has no OB anchor or rejection candle
   if (hasE5a) {
-    return { group: 'FVG', sizingMultiplier: 1.0, bestSignal: s5! };
+    return { group: 'FVG', sizingMultiplier: 0.75, bestSignal: s5! };
   }
 
   // ── Sutra-native groups ───────────────────────────────────────────────────
