@@ -8,10 +8,30 @@ import { closes, last, round } from '../scanner/ohlcv';
 import { evaluateStrategies } from './strategyEngine';
 import { stampGroupClassification } from './confluenceClassifier';
 import type { MarketDataProviderStatus, StrategySignal, WorkflowStage } from './workflowTypes';
+import { workflowStageRank } from './workflowTypes';
 import { getRiskSettings } from '../../lib/riskManager';
 import { computeBeta } from '../../lib/portfolioRisk';
 import { fetchSharesOutstanding, getFloatFromCache } from '../../lib/alpacaBroker';
 import { fetchEarningsCalendar, getEarningsDays } from '../../lib/finnhubClient';
+
+// S9 (flag_break) and S7 (s7_volume_surge) are scout strategies — they need their
+// partner (S1 / S8 respectively) to be active before they can progress past forming.
+// Without the partner there is no structural context for an entry.
+function capScoutSignals(signals: StrategySignal[]): StrategySignal[] {
+  const FORMING_RANK = workflowStageRank('forming');
+  const aboveForming = new Set(
+    signals.filter(s => workflowStageRank(s.stage) > FORMING_RANK).map(s => s.strategyId)
+  );
+  return signals.map(s => {
+    const needsPartner =
+      (s.strategyId === 'flag_break'       && !aboveForming.has('orb_retest')) ||
+      (s.strategyId === 's7_volume_surge'  && !aboveForming.has('ema20_bounce'));
+    if (needsPartner && workflowStageRank(s.stage) > FORMING_RANK) {
+      return { ...s, stage: 'forming' as WorkflowStage, tradePlan: null };
+    }
+    return s;
+  });
+}
 
 const DEFAULT_LIVE_UNIVERSE = [
   'LITE', 'VIAV', 'CIEN', 'SNDK', 'MRVL', 'GLW', 'DOCN', 'STX', 'CAVA', 'PL', 'ON', 'GFS', 'ESI', 'RSI', 'HPE', 'ATI', 'FLEX', 'SMTC', 'CAT', 'CENX', 'AVGO', 'ADI', 'RVMD', 'ALGM', 'ANET', 'AMAT', 'BTSG', 'STT', 'HWM', 'TPR', 'NET', 'C', 'APG', 'TWLO', 'ALLY', 'MU', 'MRNA', 'ROKU', 'GTES', 'DECK', 'XYZ', 'LEVI', 'VFC', 'ABNB', 'MCHP', 'NVDA', 'MS', 'DD', 'AMD', 'NRG', 'FLR', 'DAL', 'IBKR', 'AMZN', 'GE', 'ARWR', 'ALB', 'GS', 'SYF', 'GOOGL', 'PPG', 'GOOG', 'CCL', 'META', 'NXT', 'APH', 'GAP', 'BBIO', 'COF', 'LNC', 'EQH', 'CRBG', 'CMG', 'IP', 'SARO', 'SNOW', 'KTOS', 'FLUT', 'GM', 'EXPE', 'ORCL', 'EMR', 'DDOG', 'RCL', 'IR', 'TRMB', 'ELAN', 'CRH', 'NCLH', 'BAM', 'MP', 'BKNG', 'AFRM', 'APO', 'TRU', 'VNO', 'SNPS', 'UAL', 'DASH', 'SGI', 'PYPL', 'CHWY', 'BROS', 'TECH', 'IVZ', 'AXTA', 'TEM', 'TOST', 'CG', 'PLTR', 'KKR', 'CVNA', 'RBLX', 'BRKR', 'UEC', 'GH', 'ARES', 'JEF', 'KRMN', 'RDDT', 'SOFI', 'IQV', 'BLDR', 'FOUR', 'LMND', 'TPG', 'FND', 'ASTS', 'Z', 'SAIL', 'EL', 'U', 'HL',
@@ -382,9 +402,9 @@ function buildRowFromAlpaca(
     dataStatus: providerStatus,
     candles,
   });
-  const strategySignals = stampGroupClassification(
+  const strategySignals = capScoutSignals(stampGroupClassification(
     allSignals.filter((s) => !disabledStrategies.includes(s.strategyId))
-  );
+  ));
 
   const primaryStrategy = strategySignals[0] || null;
   const workflowStage: WorkflowStage = primaryStrategy?.stage ?? 'screened_universe';

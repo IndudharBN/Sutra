@@ -149,7 +149,8 @@ export function classifySignalGroup(allSignals: StrategySignal[]): GroupClassifi
     return {
       group: 'MOMENTUM',
       sizingMultiplier: dualMomentum ? 1.2 : surgAlone ? 0.5 : 1.0,
-      bestSignal: bestForGroup(momentumFired, ['s7_volume_surge', 'ema20_bounce']),
+      // S8 owns the structural entry/stop; S7 is the volume confirmation — S8 is primary when both fire
+      bestSignal: bestForGroup(momentumFired, dualMomentum ? ['ema20_bounce', 's7_volume_surge'] : ['s7_volume_surge', 'ema20_bounce']),
     };
   }
 

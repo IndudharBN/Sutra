@@ -1924,29 +1924,8 @@ export function ProTradeScannerScreen() {
       const level = row.tradePlan?.entry;
       if (!level) return;
 
-      // S7 (Volume Surge) fires INSTANTLY — 2× spike expires in ~60s, no time to wait for bar close
-      // S1 (ORB Retest) uses 1m confirmation — mid-bar entry on snapshot tick carries too much risk
-      const stratId = row.primaryStrategy?.strategyId;
-      if (stratId === 's7_volume_surge') {
-        firedInstantRef.current.add(sym);
-    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.spyTrend5m);
-        if (trade) {
-          setPaperTrades((current) => [trade, ...current]);
-          setMonitorDate(todayET()); // snap Monitor to today — page may have been open since a previous session
-          placePaperBracketOrder({
-            symbol: trade.symbol,
-            direction: trade.direction === 'BEAR' ? 'BEAR' : 'BULL',
-            entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional,
-          }).catch(() => {});
-          // ADR exhausted (>80% ATR used) — queue for tomorrow's gap watch
-          const adrDetail = row.primaryStrategy?.checklist?.find((c) => c.label === 'ADR room')?.detail ?? '';
-          if (adrDetail.includes('>80%')) {
-            saveNextDayQueue([...loadNextDayQueue(), sym]);
-          }
-          return;
-        }
-      }
-
+      // All strategies use 1m bar confirmation — S7 alone is blocked at forming (capScoutSignals),
+      // S7+S8 together uses S8 structural entry which doesn't expire like a raw volume spike.
       pending.set(sym, { row, level, direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL', addedAt: now });
     });
 
