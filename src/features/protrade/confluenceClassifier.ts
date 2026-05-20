@@ -50,6 +50,7 @@ export function classifySignalGroup(allSignals: StrategySignal[]): GroupClassifi
   const hasE3  = ids.has('rs_continuation');         // S3 = MSS/RS
   const hasE4  = ids.has('sniper_1m');               // S14 = 1m sniper
   const hasE5a = s5?.enginePath === 'fvg';           // S5 FVG-path
+  const hasS1  = ids.has('orb_retest');              // S1 ORB Retest (confluence booster)
 
   // ── Stock-analyzer parity groups ──────────────────────────────────────────
 
@@ -96,15 +97,27 @@ export function classifySignalGroup(allSignals: StrategySignal[]): GroupClassifi
   if (hasE1) {
     return { group: 'BLUE', sizingMultiplier: 1.0, bestSignal: fired.find((s) => s.strategyId === 'orb15m_retest')! };
   }
+  // S1 + E2: ORB retest confirms the anticipatory OB → full BLUE (not 0.75× anticipatory)
+  if (hasS1 && hasE2) {
+    return { group: 'BLUE', sizingMultiplier: 1.0, bestSignal: bestForGroup(fired, ['orb_retest', 'ob_fvg_retest']) };
+  }
   if (hasE2) {
     return { group: 'BLUE', sizingMultiplier: 0.75, bestSignal: s5! }; // E2 alone = forming context
   }
 
+  // S1 + E3: ORB retest + RS continuation = two structural confirmations → BLUE (not TREND)
+  if (hasS1 && hasE3) {
+    return { group: 'BLUE', sizingMultiplier: 1.0, bestSignal: bestForGroup(fired, ['orb_retest', 'rs_continuation']) };
+  }
   // TREND: E3 alone (no OB zone backing)
   if (hasE3) {
     return { group: 'TREND', sizingMultiplier: 1.0, bestSignal: fired.find((s) => s.strategyId === 'rs_continuation')! };
   }
 
+  // S1 + E5a: FVG at ORB level has structural anchor → BREAKOUT (not FVG 0.75×)
+  if (hasS1 && hasE5a) {
+    return { group: 'BREAKOUT', sizingMultiplier: 1.0, bestSignal: bestForGroup(fired, ['orb_retest', 'ob_fvg_retest']) };
+  }
   // FVG: S5 FVG-path only — 0.75× because FVG alone has no OB anchor or rejection candle
   if (hasE5a) {
     return { group: 'FVG', sizingMultiplier: 0.75, bestSignal: s5! };
@@ -154,8 +167,11 @@ export function classifySignalGroup(allSignals: StrategySignal[]): GroupClassifi
     };
   }
 
-  // TREND (MSS Breakout S6 alone — treated at TREND tier)
+  // TREND (MSS Breakout S6 — alone=TREND, S1+S6=BLUE: ORB retest confirms the MSS structural break)
   if (ids.has('mss_breakout')) {
+    if (hasS1) {
+      return { group: 'BLUE', sizingMultiplier: 1.0, bestSignal: bestForGroup(fired, ['orb_retest', 'mss_breakout']) };
+    }
     return { group: 'TREND', sizingMultiplier: 1.0, bestSignal: fired.find((s) => s.strategyId === 'mss_breakout')! };
   }
 
