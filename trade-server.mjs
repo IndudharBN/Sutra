@@ -115,6 +115,14 @@ const server = createServer(async (req, res) => {
   res.end('Method Not Allowed');
 });
 
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.log(`Trade server already running on port ${PORT} — skipping.`);
+    process.exit(0);
+  }
+  throw err;
+});
+
 server.listen(PORT, () => {
   console.log(`Trade server  →  http://localhost:${PORT}`);
   console.log(`Trades file   →  ${TRADES_FILE}`);
