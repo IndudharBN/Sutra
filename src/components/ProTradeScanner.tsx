@@ -17,7 +17,7 @@ import {
 } from '../features/protrade/workflowTypes';
 import { stampGroupClassification } from '../features/protrade/confluenceClassifier';
 import { baseSymbol } from '../lib/symbols';
-import { loadAllTrades, persistTrade, todayET, tradeDateET } from '../lib/tradeStore';
+import { clearAllTrades, loadAllTrades, persistTrade, todayET, tradeDateET } from '../lib/tradeStore';
 import { fetchBars } from '../lib/alpacaClient';
 import { ProTradeCandlePreview } from './ProTradeCandlePreview';
 import { TradingViewChartModal, type TradingViewInterval } from './TradingViewChart';
@@ -1781,19 +1781,28 @@ export function ProTradeScannerScreen() {
   }, [monitorDate]);
 
   // Load all trades from server on mount (server is source of truth).
-  // If server returns empty array, trust it and clear localStorage too —
-  // prevents stale localStorage overriding a deliberate server clear.
   const serverLoadDone = React.useRef(false);
   React.useEffect(() => {
-    void loadAllTrades<PaperTrade>().then((serverTrades) => {
-      serverLoadDone.current = true;
-      if (serverTrades.length > 0) {
-        setPaperTrades(serverTrades);
-      } else {
-        setPaperTrades([]);
-        savePaperTrades([]);
-      }
-    }).catch(() => { serverLoadDone.current = true; });
+    // Fetch the raw server response first so we know if it was intentionally cleared.
+    // loadAllTrades() merges LS data in, hiding a server [] behind stale LS trades.
+    fetch('/api/trades', { signal: AbortSignal.timeout(3000) })
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then(async (raw: PaperTrade[]) => {
+        serverLoadDone.current = true;
+        if (raw.length === 0) {
+          // Server is empty — atomically wipe LS too so the merge loop can't repopulate it
+          await clearAllTrades();
+          setPaperTrades([]);
+        } else {
+          // Server has trades — normal merge (picks up any LS-only drafts)
+          const merged = await loadAllTrades<PaperTrade>();
+          setPaperTrades(merged);
+        }
+      })
+      .catch(() => {
+        // Server unreachable — fall back to whatever LS has
+        serverLoadDone.current = true;
+      });
   }, []);
 
   // Persist to localStorage + server on every change (skip very first render to avoid writing stale localStorage to server)

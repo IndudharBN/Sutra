@@ -70,6 +70,17 @@ export async function loadAllTrades<T extends { id: string; openedAt: string }>(
 }
 
 /**
+ * Atomically clear all trades: DELETE from server AND wipe localStorage.
+ * Breaks the merge+back-migration loop that causes cleared trades to reappear.
+ */
+export async function clearAllTrades(): Promise<void> {
+  localStorage.removeItem(LS_KEY);
+  try {
+    await fetch(API, { method: 'DELETE', signal: AbortSignal.timeout(4000) });
+  } catch { /* server unreachable — LS already cleared */ }
+}
+
+/**
  * Upsert a single trade (by id) to the server.
  * Fire-and-forget — always updates localStorage immediately as a fallback.
  */

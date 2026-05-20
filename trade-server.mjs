@@ -57,7 +57,7 @@ function dateET(isoString) {
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
@@ -108,6 +108,14 @@ const server = createServer(async (req, res) => {
         res.end('Bad JSON');
       }
     });
+    return;
+  }
+
+  // DELETE /api/trades — wipe all trades (clears the JSON file)
+  if (req.method === 'DELETE') {
+    enqueueWrite([]);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
     return;
   }
 

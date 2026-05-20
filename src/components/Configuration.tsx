@@ -1,7 +1,7 @@
 import React from 'react';
 import { Activity, AlertTriangle, BarChart, CheckCircle2, Shield, Wallet, TrendingUp, Clock, Zap, RefreshCcw, Lock } from 'lucide-react';
 import { getRiskSettings, saveRiskSettings, getRiskSummary, type RiskSettings } from '../lib/riskManager';
-import { loadAllTrades } from '../lib/tradeStore';
+import { clearAllTrades, loadAllTrades } from '../lib/tradeStore';
 import { getPaperAccount } from '../lib/alpacaBroker';
 import { STRATEGY_LABELS, STRATEGY_CODES, type StrategyId } from '../features/protrade/workflowTypes';
 import { env, hasAlpacaConfig } from '../lib/env';
@@ -57,8 +57,17 @@ function toETDate(iso: string): string {
 function usePaperStats() {
   const [trades, setTrades] = React.useState<PaperTradeRecord[]>([]);
   React.useEffect(() => {
-    void loadAllTrades<PaperTradeRecord>()
-      .then((all) => setTrades(Array.isArray(all) ? all : []))
+    fetch('/api/trades', { signal: AbortSignal.timeout(3000) })
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then(async (raw: PaperTradeRecord[]) => {
+        if (raw.length === 0) {
+          await clearAllTrades();
+          setTrades([]);
+        } else {
+          const merged = await loadAllTrades<PaperTradeRecord>();
+          setTrades(Array.isArray(merged) ? merged : []);
+        }
+      })
       .catch(() => setTrades([]));
   }, []);
 
