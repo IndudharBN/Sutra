@@ -744,7 +744,10 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
-  const rvolOk = input.rvol >= 1.0;
+  const fvgPathOnly = !atOb && atFvg;  // pure FVG path — OB+FVG confluence stays on OB rules
+  const fvg15mOk   = fvgPathOnly ? input.trend15mAligned : true;  // 15m trend: hard gate for FVG solo
+  const rvolThreshold = fvgPathOnly ? 1.5 : 1.0;                  // FVG solo needs more participation
+  const rvolOk = input.rvol >= rvolThreshold;
   const fvgSizeOk = atFvg && gap ? (gap.gapHigh - gap.gapLow) >= input.atr20 * 0.25 : true;
   const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
   const etMins = etNow.getHours() * 60 + etNow.getMinutes();
@@ -752,7 +755,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   // OB entries require a rejection candle — price slicing through an OB without a wick/reversal
   // bar means the zone is breaking, not holding. FVG entries don't need it (the gap is the magnet).
   const entryConfirmed = atOb ? obReject : atFvg;
-  const tradePlan = entryConfirmed && rvolOk && fvgSizeOk && !lateSession ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = entryConfirmed && rvolOk && fvgSizeOk && !lateSession && fvg15mOk ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const structureLabel = atOb && atFvg
     ? `OB+FVG confluence`
     : atOb ? `OB entry`
@@ -762,7 +765,11 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const rsiOk = dir === 'BULL' ? rsiVal < 65 : rsiVal > 35;
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from ${atOb ? 'OB' : 'FVG'} at price`) : fail('Directional bias', 'No OB or FVG at current price — direction unknown'),
-    htfTrendContext(selfInput),
+    fvgPathOnly
+      ? (fvg15mOk
+          ? pass('15m trend (hard gate)', `${input.trend15m} ✓ aligned — FVG solo confirmed`)
+          : fail('15m trend (hard gate)', `${input.trend15m} — counter-trend FVG blocked`))
+      : htfTrendContext(selfInput),
     hasStructure
       ? pass('Structure zone', structureLabel)
       : fail('Structure zone', 'No active OB or unfilled FVG at current price'),
@@ -775,14 +782,14 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
       ? (obReject ? pass('OB rejection candle', 'Wick/reversal bar at OB ✓') : fail('OB rejection candle', 'Price through OB without rejection — zone likely breaking, not bouncing'))
       : pass('OB rejection candle', 'FVG entry — no rejection candle required'),
     pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP (below — watch for reclaim)'} — informational`),
-    rvolOk ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — no institutional flow at zone`),
+    rvolOk ? pass(`RVOL ≥${rvolThreshold}×`, `${round(input.rvol, 2)}× ✓`) : fail(`RVOL ≥${rvolThreshold}×`, `${round(input.rvol, 2)}× — no institutional flow at zone`),
     pass('RSI context', `RSI ${round(rsiVal, 1)}${rsiOk ? ' — not extended ✓' : ' — extended, watch'} — informational`),
     pass('RTH bars', `${rthBars} bars${rthBars >= 5 ? ' ✓' : ' — early session'} — informational`),
     pass('ADR room', `${adrExhausted(input.candles.five, input.atr20) ? '>80% ATR used — watch' : '< 80% ATR used ✓'} — informational`),
     ema1mCheck(input),
     spyTapeCheck(selfInput),
   ];
-  const sig = signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5: OB or FVG retest. Hard gates: OB needs rejection candle; FVG needs gap ≥ 0.25×ATR; both need RVOL≥1.0× and entry before 15:00 ET.');
+  const sig = signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5: OB or FVG retest. Hard gates: OB needs rejection candle + RVOL≥1.0×; FVG solo needs 15m trend aligned + RVOL≥1.5× + gap ≥ 0.25×ATR; both blocked after 15:00 ET.');
   return { ...sig, enginePath: (atOb ? 'ob' : atFvg ? 'fvg' : undefined) as StrategySignal['enginePath'] };
 }
 
