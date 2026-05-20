@@ -67,8 +67,8 @@ export async function placePaperBracketOrder(params: {
 }): Promise<AlpacaOrderResult> {
   const { symbol, direction, entry, stop, target, notional } = params;
   const side = direction === 'BULL' ? 'buy' : 'sell';
-  // whole shares only — avoids fractional share requirements on paper account
-  const qty = Math.max(1, Math.floor(notional / entry));
+  // fractional shares — 4 decimal places, min 0.0001 to avoid zero-qty rejection
+  const qty = Math.max(0.0001, Math.round((notional / entry) * 10000) / 10000);
   // stop-limit buffer: 0.1% beyond stop to ensure fill on fast moves
   const buff = Number((entry * 0.001).toFixed(2));
   const stopLimitPrice = direction === 'BULL'

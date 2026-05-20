@@ -1,7 +1,7 @@
 import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
 import { placePaperBracketOrder, closeAllPaperPositions, closePaperPosition, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
-import { computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkGroupCircuitBreaker, recordTradeResult, recordGroupTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
+import { computeNotional, computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkGroupCircuitBreaker, recordTradeResult, recordGroupTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
 import { betaAdjustedSizingMult, checkSectorConcentration, checkPortfolioBeta } from '../lib/portfolioRisk';
 import { alpacaBarStream } from '../lib/alpacaBarStream';
 import { clearBarCache } from '../lib/alpacaClient';
@@ -395,7 +395,7 @@ function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT
   return Boolean(plan && plan.rr >= 1.5 && availablePaperNotional(settings, trades, accountBalance) > 0);
 }
 
-function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, spyTrend5m?: 'UP' | 'DOWN' | 'FLAT'): PaperTrade | null {
+function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, spyTrend5m?: 'UP' | 'DOWN' | 'FLAT', cbSizeMult = 1.0): PaperTrade | null {
   const plan = effectiveTradePlan(row, settings);
   if (!plan || plan.rr < 1.5) return null;
 
@@ -423,14 +423,14 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
   const effectiveMult = tideMult * betaMult;
   const signalGroup = row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED';
   const sigGroupSizeMult = row.primaryStrategy?.groupSizeMult ?? 1.0;
-  const riskQty = computePositionSize(accountBalance, plan.entry, plan.stop, signalGroup, sigGroupSizeMult);
-  const riskNotional = riskQty * plan.entry * effectiveMult;
-  
+  // Notional-first: min(risk-proportional $, group cap $), then tide/beta/CB adjustments
+  const baseNotional = computeNotional(accountBalance, plan.entry, plan.stop, signalGroup, sigGroupSizeMult);
+  const adjustedNotional = baseNotional * effectiveMult * cbSizeMult;
   const budgetCap = availablePaperNotional(settings, currentTrades, accountBalance);
-  
-  const notional = Math.min(budgetCap, riskNotional);
+  const notional = Math.min(budgetCap, adjustedNotional);
   if (notional <= 0) return null;
-  const quantity = Math.max(1, Math.floor(notional / plan.entry));
+  // Fractional shares — 4 decimal places, no floor to 1
+  const quantity = Math.round((notional / plan.entry) * 10000) / 10000;
   return {
     id: `paper-${row.symbol}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     symbol: row.symbol,
@@ -2011,7 +2011,7 @@ export function ProTradeScannerScreen() {
     if (!groupCbCheck.ok) { setApprovalMessage(groupCbCheck.reason!); return; }
     const sectorCheck = checkSectorConcentration(paperTrades, row.symbol);
     if (!sectorCheck.ok) { setApprovalMessage(sectorCheck.reason!); return; }
-    const approxNotional = computePositionSize(accountBalance, plan.entry, plan.stop, row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED', row.primaryStrategy?.groupSizeMult ?? 1.0) * plan.entry;
+    const approxNotional = computeNotional(accountBalance, plan.entry, plan.stop, row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED', row.primaryStrategy?.groupSizeMult ?? 1.0);
     const betaPortCheck = checkPortfolioBeta(paperTrades, row.beta ?? 1.0, approxNotional, accountBalance);
     if (!betaPortCheck.ok) { setApprovalMessage(betaPortCheck.reason!); return; }
     // Stale entry filter: skip if price drifted >50% of risk past entry — no chasing
@@ -2037,14 +2037,14 @@ export function ProTradeScannerScreen() {
       setApprovalMessage('');
       const approveGroup = row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED';
       const approveGroupMult = (row.primaryStrategy?.groupSizeMult ?? 1.0) * groupCbCheck.sizeMult;
-      const qty = computePositionSize(accountBalance, plan.entry, plan.stop, approveGroup, approveGroupMult);
+      const orderNotional = computeNotional(accountBalance, plan.entry, plan.stop, approveGroup, approveGroupMult);
       const order = await placePaperBracketOrder({
         symbol: row.symbol,
         direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL',
         entry: plan.entry,
         stop: plan.stop,
         target: plan.target,
-        notional: qty * plan.entry,
+        notional: orderNotional,
       });
       setApprovalMessage(`Alpaca paper bracket submitted: ${order.id.slice(0, 8)} · ${row.symbol} ${order.side.toUpperCase()} ${order.qty} shares`);
       await load(true);
@@ -2078,11 +2078,11 @@ export function ProTradeScannerScreen() {
         setApprovalMessage(`Stale entry: price moved $${(plan.entry - row.price).toFixed(2)} past entry — skipped.`);
         return;
       }
-      const approxNotional = computePositionSize(accountBalance, plan.entry, plan.stop, row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED', row.primaryStrategy?.groupSizeMult ?? 1.0) * plan.entry;
+      const approxNotional = computeNotional(accountBalance, plan.entry, plan.stop, row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED', row.primaryStrategy?.groupSizeMult ?? 1.0);
       const betaPortCheck = checkPortfolioBeta(paperTrades, row.beta ?? 1.0, approxNotional, accountBalance);
       if (!betaPortCheck.ok) { setApprovalMessage(betaPortCheck.reason!); return; }
     }
-    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.spyTrend5m);
+    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.spyTrend5m, groupCbCheck.sizeMult);
     if (!trade) {
       const plan = effectiveTradePlan(row, settings);
       if (!plan) {

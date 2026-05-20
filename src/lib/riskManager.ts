@@ -202,6 +202,26 @@ export function unpauseGroupCb(group: SignalGroup): void {
 
 // ── Position sizing ───────────────────────────────────────────────────────────
 
+// Notional-first sizing: min(risk-proportional notional, group cap notional)
+// risk notional: account × riskPct × entry / stopDist  (what you'd need to risk exactly riskPct)
+// cap notional:  account × groupCap × sizeMult          (hard ceiling per group)
+// Returns dollar amount — caller divides by entry for fractional qty.
+export function computeNotional(
+  accountBalance: number,
+  entry: number,
+  stop: number,
+  group: SignalGroup = 'UNCLASSIFIED',
+  groupSizeMult = 1.0,
+): number {
+  const { riskPerTradePct } = getRiskSettings();
+  const stopDist = Math.abs(entry - stop);
+  if (stopDist <= 0 || entry <= 0) return 0;
+  const riskNotional = (accountBalance * riskPerTradePct * entry) / stopDist;
+  const notionalCap = GROUP_NOTIONAL_CAP[group] ?? 0.03;
+  const capNotional = accountBalance * notionalCap * groupSizeMult;
+  return Math.min(riskNotional, capNotional);
+}
+
 // qty = min(risk-proportional shares, notional cap shares)
 // risk-proportional: (account × riskPerTradePct) / |entry - stop|
 // notional cap: (account × groupNotionalCap × groupSizeMult) / entry
