@@ -897,13 +897,12 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
     vwapAligned: dir === 'BULL' ? price > input.vwap : price < input.vwap,
     trendAligned: dir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN',
   };
-  const rvolOk = input.rvol >= 0.8;
   const rawStop = dir === 'BULL' ? bar.low : bar.high;
   const stop = enforceMinStop(dir, price, noiseFlooredStop(dir, price, rawStop, atr20, input.vixLevel), atr20);
   const risk = Math.abs(price - stop);
   const t1 = dir === 'BULL' ? price + risk * T1_RR : price - risk * T1_RR;
   const t2 = dir === 'BULL' ? price + risk * PREFERRED_RR : price - risk * PREFERRED_RR;
-  const tradePlan = volSpike && selfDir && rvolOk ? planFromLevelsT1T2(selfInput, price, stop, t1, t2, bar) : null;
+  const tradePlan = volSpike && selfDir ? planFromLevelsT1T2(selfInput, price, stop, t1, t2, bar) : null;
   const checklist = [
     selfDir
       ? pass('Directional bias', `${selfDir} — self-determined from 30m range break`)
@@ -914,12 +913,12 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
     selfDir
       ? pass('30m range break', `${selfDir === 'BULL' ? 'Above' : 'Below'} 30m range ✓`)
       : fail('30m range break', `Inside range — no break yet`),
-    rvolOk ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓ session active`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — below session minimum; vol spike may be isolated`),
+    pass('RVOL', `${round(input.rvol, 2)}× — informational (2× bar surge is the primary volume gate)`),
     selfInput.vwapAligned ? pass('VWAP aligned', `${dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓'}`) : fail('VWAP aligned', `${dir === 'BULL' ? 'Below VWAP' : 'Above VWAP'} — surge against session anchor`),
     pass('ADR room', `${!adrExhausted(input.candles.five, input.atr20) ? '< 80% ATR used ✓' : '>80% ATR used — watch sizing'} — informational`),
     spyTapeCheck(selfInput),
   ];
-  return signal('s7_volume_surge', selfInput, checklist, tradePlan, 'S7: Institutional 2× volume surge on 30m range break + RVOL≥0.8×. Hard gates: volSpike (2× projected), selfDir (range break), rvolOk (0.8×), vwapAligned, spyTape.');
+  return signal('s7_volume_surge', selfInput, checklist, tradePlan, 'S7: Institutional 2× volume surge on 30m range break. Hard gates: volSpike (2× projected bar volume), selfDir (range break). RVOL informational — 2× surge implies session activity.');
 }
 
 // ─── S8: EMA20 Bounce ────────────────────────────────────────────────────────
