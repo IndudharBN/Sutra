@@ -1780,12 +1780,19 @@ export function ProTradeScannerScreen() {
     return () => clearInterval(id);
   }, [monitorDate]);
 
-  // Load all trades from server on mount (server is source of truth; localStorage is fallback)
+  // Load all trades from server on mount (server is source of truth).
+  // If server returns empty array, trust it and clear localStorage too —
+  // prevents stale localStorage overriding a deliberate server clear.
   const serverLoadDone = React.useRef(false);
   React.useEffect(() => {
     void loadAllTrades<PaperTrade>().then((serverTrades) => {
       serverLoadDone.current = true;
-      if (serverTrades.length > 0) setPaperTrades(serverTrades);
+      if (serverTrades.length > 0) {
+        setPaperTrades(serverTrades);
+      } else {
+        setPaperTrades([]);
+        savePaperTrades([]);
+      }
     }).catch(() => { serverLoadDone.current = true; });
   }, []);
 
