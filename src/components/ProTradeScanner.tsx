@@ -1,7 +1,7 @@
 import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
 import { placePaperBracketOrder, closeAllPaperPositions, closePaperPosition, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
-import { computeNotional, computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkGroupCircuitBreaker, recordTradeResult, recordGroupTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, migrateCbKeys, unpauseCbStrategy } from '../lib/riskManager';
+import { computeNotional, computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkGroupCircuitBreaker, recordTradeResult, recordGroupTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, getGroupCbSummary, migrateCbKeys, unpauseCbStrategy, unpauseGroupCb } from '../lib/riskManager';
 import { betaAdjustedSizingMult, checkSectorConcentration, checkPortfolioBeta } from '../lib/portfolioRisk';
 import { alpacaBarStream } from '../lib/alpacaBarStream';
 import { clearBarCache } from '../lib/alpacaClient';
@@ -161,6 +161,28 @@ function stageBadge(stage: WorkflowStage) {
   return (
     <span className={`px-2 py-1 rounded-md border text-[10px] uppercase tracking-widest font-black ${STAGE_TONES[stage]}`}>
       {WORKFLOW_STAGE_LABELS[stage]}
+    </span>
+  );
+}
+
+const GROUP_COLORS: Record<SignalGroup, string> = {
+  GOLD:         'border-amber-400/50 bg-amber-400/15 text-amber-300',
+  BLUE:         'border-blue-400/50 bg-blue-400/15 text-blue-300',
+  TREND:        'border-emerald-400/50 bg-emerald-400/15 text-emerald-300',
+  FVG:          'border-violet-400/50 bg-violet-400/15 text-violet-300',
+  BREAKOUT:     'border-orange-400/50 bg-orange-400/15 text-orange-300',
+  PULLBACK:     'border-cyan-400/50 bg-cyan-400/15 text-cyan-300',
+  MOMENTUM:     'border-fuchsia-400/50 bg-fuchsia-400/15 text-fuchsia-300',
+  SIDEWAYS:     'border-slate-500/40 bg-slate-500/15 text-slate-400',
+  UNCLASSIFIED: 'border-slate-600/30 bg-slate-800/20 text-slate-500',
+};
+
+function groupBadge(group: SignalGroup | undefined, sizeMult?: number) {
+  if (!group || group === 'UNCLASSIFIED') return <span className="text-slate-600">--</span>;
+  const dim = sizeMult !== undefined && sizeMult < 0.99;
+  return (
+    <span className={`px-2 py-0.5 rounded border text-[9px] uppercase tracking-widest font-black ${GROUP_COLORS[group]} ${dim ? 'opacity-60' : ''}`}>
+      {group}{dim ? ` ${(sizeMult! * 100).toFixed(0)}%` : ''}
     </span>
   );
 }
@@ -634,6 +656,7 @@ function WorkflowTable({
   reasonMode = 'strategy',
   orderedTrades = [],
   watchlistSet = new Set<string>(),
+  accountBalance = 0,
 }: {
   rows: ProTradeRow[];
   selected: ProTradeRow | null;
@@ -641,6 +664,7 @@ function WorkflowTable({
   reasonMode?: 'strategy' | 'base';
   orderedTrades?: PaperTrade[];
   watchlistSet?: Set<string>;
+  accountBalance?: number;
 }) {
   const PAGE = 25;
   const [expandedSymbol, setExpandedSymbol] = React.useState<string | null>(null);
@@ -669,26 +693,29 @@ function WorkflowTable({
         </button>
       </div>
       {!minimized && <div className="overflow-auto max-h-[60vh]">
-        <table className="w-full min-w-[1180px] text-left border-collapse">
+        <table className="w-full min-w-[1400px] text-left border-collapse">
           <thead className="text-[9px] uppercase text-slate-500 font-bold tracking-widest bg-slate-900/50 sticky top-0 z-10">
             <tr>
               <th className="py-2.5 px-3 border-r border-white/5">Ticker / Company</th>
+              <th className="py-2.5 px-3 border-r border-white/5">Group</th>
               <th className="py-2.5 px-3 border-r border-white/5">Stage</th>
               <th className="py-2.5 px-3 border-r border-white/5">Primary Strategy</th>
               <th className="py-2.5 px-3 border-r border-white/5">Strategies Passed</th>
               <th className="py-2.5 px-3 border-r border-white/5">Dir</th>
+              <th className="py-2 px-3 border-r border-white/5 text-right">RVOL</th>
+              <th className="py-2 px-3 border-r border-white/5 text-right">Beta</th>
               <th className="py-2 px-3 border-r border-white/5 text-right">Entry</th>
               <th className="py-2 px-3 border-r border-white/5 text-right">Stop</th>
               <th className="py-2 px-3 border-r border-white/5 text-right">T1</th>
               <th className="py-2 px-3 border-r border-white/5 text-right">T2</th>
-              <th className="py-2 px-3 border-r border-white/5 text-right bg-indigo-500/10">Active Trail</th>
-              <th className="py-2 px-3 border-r border-white/5 text-right">Qty</th>
+              <th className="py-2 px-3 border-r border-white/5 text-right">R:R</th>
+              <th className="py-2 px-3 border-r border-white/5 text-right">Notional</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">Confidence</th>
               {orderedMode && (
                 <>
                   <th className="py-2.5 px-3 border-r border-white/5 text-right">Qty</th>
                   <th className="py-2.5 px-3 border-r border-white/5 text-right">Current</th>
-                  <th className="py-2.5 px-3 border-r border-white/5 text-right">Submitted Value</th>
+                  <th className="py-2.5 px-3 border-r border-white/5 text-right">Notional</th>
                   <th className="py-2.5 px-3 border-r border-white/5">Order Time</th>
                   <th className="py-2.5 px-3 border-r border-white/5 text-right">Exit Price</th>
                   <th className="py-2.5 px-3 border-r border-white/5">Exit Time</th>
@@ -733,6 +760,7 @@ function WorkflowTable({
                         Details
                       </button>
                     </td>
+                    <td className="py-3 px-3 border-r border-white/5">{groupBadge(row.primaryStrategy?.signalGroup, row.primaryStrategy?.groupSizeMult)}</td>
                     <td className="py-3 px-3 border-r border-white/5">{stageBadge(row.workflowStage)}</td>
                     <td className="py-3 px-3 border-r border-white/5 text-slate-300">
                       {row.primaryStrategy ? (
@@ -747,12 +775,27 @@ function WorkflowTable({
                     </td>
                     <td className="py-3 px-3 border-r border-white/5 min-w-[120px]"><StrategyCodeList row={row} /></td>
                     <td className={`py-3 px-3 border-r border-white/5 font-black ${row.direction === 'BULL' ? 'text-emerald-400' : row.direction === 'BEAR' ? 'text-rose-400' : 'text-slate-500'}`}>{row.direction}</td>
+                    <td className={`py-3 px-3 border-r border-white/5 text-right font-mono ${row.rvol >= 1.5 ? 'text-emerald-300 font-black' : row.rvol >= 1.0 ? 'text-slate-200' : 'text-slate-500'}`}>
+                      {row.rvol > 0 ? `${row.rvol.toFixed(1)}x` : '--'}
+                    </td>
+                    <td className={`py-3 px-3 border-r border-white/5 text-right font-mono ${(row.beta ?? 0) > 2.0 ? 'text-rose-300' : (row.beta ?? 0) > 1.3 ? 'text-amber-300' : 'text-slate-400'}`}>
+                      {(row.beta ?? 0) > 0 ? (row.beta ?? 0).toFixed(2) : '--'}
+                    </td>
                     <td className="py-3 px-3 border-r border-white/5 text-right text-white">{fmtMoney(row.tradePlan?.entry)}</td>
                     <td className="py-3 px-3 border-r border-white/5 text-right text-rose-300">{fmtMoney(row.tradePlan?.stop)}</td>
                     <td className="py-3 px-3 border-r border-white/5 text-right text-cyan-300">{fmtMoney(row.tradePlan?.target1 || row.tradePlan?.target)}</td>
                     <td className="py-3 px-3 border-r border-white/5 text-right text-emerald-300">{fmtMoney(row.tradePlan?.target2 || row.tradePlan?.target)}</td>
-                    <td className="py-3 px-3 border-r border-white/5 text-right text-indigo-300 font-black bg-indigo-500/5">{fmtMoney(row.tradePlan?.stop)}</td>
-                    <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">--</td>
+                    <td className={`py-3 px-3 border-r border-white/5 text-right font-mono font-black ${(row.tradePlan?.rr ?? 0) >= 2.5 ? 'text-emerald-300' : (row.tradePlan?.rr ?? 0) >= 1.5 ? 'text-slate-200' : 'text-slate-500'}`}>
+                      {row.tradePlan ? row.tradePlan.rr.toFixed(1) : '--'}
+                    </td>
+                    <td className="py-3 px-3 border-r border-white/5 text-right text-indigo-200 font-mono font-black">
+                      {accountBalance > 0 && row.tradePlan ? (
+                        (() => {
+                          const n = computeNotional(accountBalance, row.tradePlan.entry, row.tradePlan.stop, row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED', row.primaryStrategy?.groupSizeMult ?? 1.0);
+                          return n > 0 ? `$${n.toFixed(0)}` : '--';
+                        })()
+                      ) : '--'}
+                    </td>
                     <td className="py-3 px-3 border-r border-white/5 text-right text-indigo-300 font-black">{row.confidence || '--'}</td>
                     {orderedMode && (
                       <>
@@ -786,7 +829,7 @@ function WorkflowTable({
                   </tr>
                   {expanded && (
                     <tr className="border-b border-white/5 bg-slate-950/70">
-                      <td colSpan={orderedMode ? 21 : 13} className="p-4">
+                      <td colSpan={orderedMode ? 25 : 17} className="p-4">
                         <DetailPanel row={row} />
                       </td>
                     </tr>
@@ -1042,23 +1085,24 @@ function PaperTradeMonitor({
         </div>
       </div>
       <div className="overflow-auto max-h-[480px]">
-        <table className="w-full min-w-[1120px] text-left border-collapse">
+        <table className="w-full min-w-[1320px] text-left border-collapse">
           <thead className="text-[9px] uppercase text-slate-500 font-bold tracking-widest bg-slate-900/50 sticky top-0 z-10">
             <tr>
               <th className="py-2.5 px-3 border-r border-white/5">Opened</th>
               <th className="py-2.5 px-3 border-r border-white/5">Symbol</th>
               <th className="py-2.5 px-3 border-r border-white/5">Strategy</th>
+              <th className="py-2.5 px-3 border-r border-white/5">Group</th>
               <th className="py-2.5 px-3 border-r border-white/5">Dir</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">Entry</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">Current/Exit</th>
-              <th className="py-2.5 px-3 border-r border-white/5 text-right">Exit Price</th>
-              <th className="py-2.5 px-3 border-r border-white/5 text-right">Stop</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">Stop / Trail</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">T1</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">T2</th>
-              <th className="py-2.5 px-3 border-r border-white/5 text-right">Trail</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">Qty</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">Notional</th>
               <th className="py-2.5 px-3 border-r border-white/5">Status</th>
               <th className="py-2.5 px-3 border-r border-white/5 text-right">P&L</th>
+              <th className="py-2.5 px-3 border-r border-white/5 text-right">R-mult</th>
               <th className="py-2.5 px-3">Action</th>
             </tr>
           </thead>
@@ -1087,17 +1131,28 @@ function PaperTradeMonitor({
                     <div className="text-[10px] text-slate-500 uppercase truncate max-w-[160px]">{trade.company}</div>
                   </td>
                   <td className="py-3 px-3 border-r border-white/5 text-slate-300">{trade.strategyCode} {trade.strategyName}</td>
+                  <td className="py-3 px-3 border-r border-white/5">{groupBadge(trade.signalGroup, undefined)}</td>
                   <td className={`py-3 px-3 border-r border-white/5 font-black ${trade.direction === 'BULL' ? 'text-emerald-400' : 'text-rose-400'}`}>{trade.direction}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-white">{fmtMoney(trade.entry)}</td>
                   <td className={`py-3 px-3 border-r border-white/5 text-right font-bold ${currentColor}`}>{fmtMoney(current)}</td>
-                  <td className={`py-3 px-3 border-r border-white/5 text-right font-mono font-bold ${trade.status === 'Closed' ? 'text-white' : 'text-slate-500'}`}>
-                    {trade.status === 'Closed' ? fmtMoney(trade.exitPrice) : '--'}
+                  <td className="py-3 px-3 border-r border-white/5 text-right">
+                    {trade.status === 'Open' ? (
+                      <span className="text-rose-300">{fmtMoney(trade.stop)}</span>
+                    ) : (
+                      <span className="text-amber-300">{fmtMoney(trade.exitPrice ?? trade.stop)}</span>
+                    )}
+                    {trade.status === 'Open' && trade.t1HitAt && (
+                      <div className="text-[9px] text-amber-300 font-black">Trail {fmtMoney(paperTrailingStop(trade))}</div>
+                    )}
                   </td>
-                  <td className="py-3 px-3 border-r border-white/5 text-right text-rose-300">{fmtMoney(trade.stop)}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-cyan-300">{fmtMoney(paperTarget1(trade))}</td>
                   <td className="py-3 px-3 border-r border-white/5 text-right text-emerald-300">{fmtMoney(paperTarget2(trade))}</td>
-                  <td className="py-3 px-3 border-r border-white/5 text-right text-amber-300">{fmtMoney(paperTrailingStop(trade))}</td>
-                  <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300">{trade.quantity.toFixed(4)}</td>
+                  <td className="py-3 px-3 border-r border-white/5 text-right text-slate-300 font-mono">
+                    {trade.quantity >= 1 ? trade.quantity.toFixed(2) : trade.quantity.toFixed(4)} sh
+                  </td>
+                  <td className="py-3 px-3 border-r border-white/5 text-right text-indigo-200 font-mono font-black">
+                    {fmtMoney(trade.notional)}
+                  </td>
                   <td className="py-3 px-3 border-r border-white/5">
                     <span className={`px-2 py-1 rounded border text-[10px] uppercase tracking-widest font-black ${trade.status === 'Open'
                         ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
@@ -1111,7 +1166,20 @@ function PaperTradeMonitor({
                     </span>
                   </td>
                   <td className={`py-3 px-3 border-r border-white/5 text-right font-black ${livePnl.pnl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
-                    {livePnl.pnl >= 0 ? '+' : ''}${livePnl.pnl.toFixed(2)} ({livePnl.pnlPercent >= 0 ? '+' : ''}{livePnl.pnlPercent.toFixed(2)}%)
+                    <div>{livePnl.pnl >= 0 ? '+' : ''}${livePnl.pnl.toFixed(2)}</div>
+                    <div className="text-[10px] opacity-70">{livePnl.pnlPercent >= 0 ? '+' : ''}{livePnl.pnlPercent.toFixed(2)}%</div>
+                  </td>
+                  <td className="py-3 px-3 border-r border-white/5 text-right font-mono">
+                    {(() => {
+                      const rRisk = trade.quantity * Math.abs(trade.entry - trade.stop);
+                      if (rRisk <= 0) return <span className="text-slate-600">--</span>;
+                      const rMult = livePnl.pnl / rRisk;
+                      return (
+                        <span className={`font-black ${rMult >= 1 ? 'text-emerald-300' : rMult >= 0 ? 'text-slate-300' : 'text-rose-300'}`}>
+                          {rMult >= 0 ? '+' : ''}{rMult.toFixed(1)}R
+                        </span>
+                      );
+                    })()}
                   </td>
                   <td className="py-3 px-3">
                     {trade.status === 'Open' ? (
@@ -1161,7 +1229,7 @@ function ProTradeSettingsPanel({
 
         <div className="p-4 space-y-5">
           <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-3 text-xs text-cyan-100 leading-relaxed">
-            Sizing is fully risk-based: 3% of account equity per trade, capped at 65% total utilization. Stop and target levels come directly from the strategy engine.
+            Notional-first fractional sizing: dollars deployed = min(risk-proportional $, group cap $). Fractional shares to 4dp — no whole-share floor. Adjustments: beta, tide, group quality tier, CB layer 3.
           </div>
 
           <div className="rounded-xl border border-white/10 bg-white/5 p-3">
@@ -1169,11 +1237,19 @@ function ProTradeSettingsPanel({
             <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
               <div>
                 <p className="text-slate-500">Risk per trade</p>
-                <p className="font-mono text-white">3% of account equity</p>
+                <p className="font-mono text-white">3% of equity (risk-proportional)</p>
+              </div>
+              <div>
+                <p className="text-slate-500">Group notional cap</p>
+                <p className="font-mono text-white">GOLD 15% · BLUE/TREND/FVG 10%</p>
               </div>
               <div>
                 <p className="text-slate-500">Max utilization</p>
                 <p className="font-mono text-white">65% of account balance</p>
+              </div>
+              <div>
+                <p className="text-slate-500">Beta adjustment</p>
+                <p className="font-mono text-white">1.5÷β (clamped 0.4–1.5×)</p>
               </div>
               <div>
                 <p className="text-slate-500">Stop loss</p>
@@ -2181,9 +2257,13 @@ export function ProTradeScannerScreen() {
         const scanAge = snapshot?.fetchedAt ? Math.floor((Date.now() - new Date(snapshot.fetchedAt).getTime()) / 1000) : 0;
         const tradeReadyCount = rows.filter((r) => r.workflowStage === 'trade_ready').length;
         const formingCount = rows.filter((r) => r.workflowStage === 'forming').length;
+        const openNotional = openTrades.reduce((s, t) => s + (t.t1HitAt ? t.notional * 0.5 : t.notional), 0);
+        const deployedPct = accountBalance > 0 ? Math.min(100, (openNotional / (accountBalance * 0.65)) * 100) : 0;
+        const groupCbList = cbTick >= 0 ? getGroupCbSummary() : [];
+        const vixLevel = snapshot?.regime?.vixLevel;
         return (
           <div className="shrink-0 rounded-xl border border-white/5 bg-white/[0.025] px-4 py-3 space-y-3">
-            {/* Row 1: P&L · Record · Equity · Scan health */}
+            {/* Row 1: P&L · Record · Equity · SPY tide · VIX · Scan health */}
             <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
               <div>
                 <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">Today P&L</p>
@@ -2204,6 +2284,26 @@ export function ProTradeScannerScreen() {
                 <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">Equity</p>
                 <p className="text-sm font-mono font-bold text-white leading-none">${accountBalance.toLocaleString()}</p>
               </div>
+              <div>
+                <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">SPY Tide</p>
+                <p className="text-sm font-mono font-black leading-none">
+                  <span className={snapshot?.spyTrend5m === 'UP' ? 'text-emerald-400' : snapshot?.spyTrend5m === 'DOWN' ? 'text-rose-400' : 'text-slate-400'}>
+                    5m {snapshot?.spyTrend5m ?? '--'}
+                  </span>
+                  <span className="text-slate-600 mx-1">·</span>
+                  <span className={snapshot?.spyTrend15m === 'UP' ? 'text-emerald-400' : snapshot?.spyTrend15m === 'DOWN' ? 'text-rose-400' : 'text-slate-400'}>
+                    15m {snapshot?.spyTrend15m ?? '--'}
+                  </span>
+                </p>
+              </div>
+              {vixLevel != null && (
+                <div>
+                  <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">VIX</p>
+                  <p className={`text-sm font-mono font-black leading-none ${vixLevel > 28 ? 'text-rose-400' : vixLevel > 22 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                    {vixLevel.toFixed(1)}
+                  </p>
+                </div>
+              )}
               <div className="ml-auto text-right">
                 <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">Scan Health</p>
                 <p className="text-xs font-mono text-slate-300 leading-none">
@@ -2219,9 +2319,9 @@ export function ProTradeScannerScreen() {
               </div>
             </div>
 
-            {/* Row 2: Risk bar · Circuit breaker · Entry cutoff */}
+            {/* Row 2: Daily risk · Capital deployed · Group CB · Entry cutoff */}
             <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
-              <div className="flex-1 min-w-[160px] max-w-xs">
+              <div className="min-w-[140px] max-w-[180px]">
                 <div className="flex justify-between text-[9px] uppercase tracking-widest font-black mb-1">
                   <span className="text-slate-500">Daily Risk</span>
                   <span className={riskPct > 80 ? 'text-rose-400' : riskPct > 50 ? 'text-amber-400' : 'text-slate-400'}>
@@ -2229,29 +2329,45 @@ export function ProTradeScannerScreen() {
                   </span>
                 </div>
                 <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all duration-500 ${riskPct > 80 ? 'bg-rose-500' : riskPct > 50 ? 'bg-amber-500' : 'bg-emerald-500'}`}
-                    style={{ width: `${riskPct}%` }}
-                  />
+                  <div className={`h-full rounded-full transition-all duration-500 ${riskPct > 80 ? 'bg-rose-500' : riskPct > 50 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${riskPct}%` }} />
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                {pausedStrats.length > 0 ? (
+              <div className="min-w-[140px] max-w-[180px]">
+                <div className="flex justify-between text-[9px] uppercase tracking-widest font-black mb-1">
+                  <span className="text-slate-500">Capital Deployed</span>
+                  <span className={deployedPct > 80 ? 'text-amber-400' : 'text-slate-400'}>
+                    ${openNotional.toFixed(0)} / ${(accountBalance * 0.65).toFixed(0)}
+                  </span>
+                </div>
+                <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+                  <div className={`h-full rounded-full transition-all duration-500 ${deployedPct > 80 ? 'bg-amber-500' : 'bg-indigo-500'}`} style={{ width: `${deployedPct}%` }} />
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {groupCbList.length > 0 ? (
                   <>
-                    <span className="text-[9px] uppercase tracking-widest text-rose-400 font-black">CB Paused:</span>
+                    <span className="text-[9px] uppercase tracking-widest text-rose-400 font-black">Group CB:</span>
+                    {groupCbList.map((g) => (
+                      <span key={g.group} className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[9px] font-black uppercase ${g.layer === 1 ? 'border-rose-500/40 bg-rose-500/10 text-rose-300' : g.layer === 2 ? 'border-rose-500/30 bg-rose-500/10 text-rose-300' : 'border-amber-500/30 bg-amber-500/10 text-amber-300'}`}>
+                        {g.group} L{g.layer} · {g.detail}
+                        {(g.layer === 1 || g.layer === 2) && (
+                          <button onClick={() => { unpauseGroupCb(g.group); setCbTick((t) => t + 1); }} className="ml-0.5 hover:text-white leading-none" title="Reset group CB">✕</button>
+                        )}
+                      </span>
+                    ))}
+                  </>
+                ) : pausedStrats.length > 0 ? (
+                  <>
+                    <span className="text-[9px] uppercase tracking-widest text-rose-400 font-black">CB:</span>
                     {pausedStrats.map((s) => (
                       <span key={s.name} className="flex items-center gap-1 px-2 py-0.5 rounded border border-rose-500/30 bg-rose-500/10 text-rose-300 text-[9px] font-black uppercase">
                         {STRATEGY_LABELS[s.name as StrategyId] ?? s.name} {s.minsLeft}m
-                        <button
-                          onClick={() => { unpauseCbStrategy(s.name); setCbTick((t) => t + 1); }}
-                          className="ml-0.5 text-rose-400 hover:text-white leading-none"
-                          title="Unpause strategy"
-                        >✕</button>
+                        <button onClick={() => { unpauseCbStrategy(s.name); setCbTick((t) => t + 1); }} className="ml-0.5 hover:text-white leading-none">✕</button>
                       </span>
                     ))}
                   </>
                 ) : (
-                  <span className="text-[9px] uppercase tracking-widest text-emerald-400 font-black">● All strategies active</span>
+                  <span className="text-[9px] uppercase tracking-widest text-emerald-400 font-black">● All groups active</span>
                 )}
               </div>
               {!stale && etMins >= 15 * 60 && minsLeft > 0 && (
@@ -2266,7 +2382,7 @@ export function ProTradeScannerScreen() {
               )}
             </div>
 
-            {/* Row 3: Open positions mini-strip */}
+            {/* Row 3: Live positions strip — group · symbol · notional · P&L */}
             {openTrades.length > 0 && (
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-2 border-t border-white/5">
                 <span className="text-[9px] uppercase tracking-widest text-slate-500 font-black shrink-0">Live:</span>
@@ -2275,8 +2391,15 @@ export function ProTradeScannerScreen() {
                   const { pnl } = paperPnl(t, px);
                   const up = pnl >= 0;
                   return (
-                    <span key={t.id} className={`text-[11px] font-mono font-black tabular-nums ${up ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      {baseSymbol(t.symbol)} {up ? '▲' : '▼'} {pnl >= 0 ? '+' : ''}${Math.abs(pnl).toFixed(0)}
+                    <span key={t.id} className="flex items-center gap-1.5">
+                      {t.signalGroup && t.signalGroup !== 'UNCLASSIFIED' && (
+                        <span className={`px-1.5 py-0.5 rounded border text-[8px] font-black uppercase ${GROUP_COLORS[t.signalGroup]}`}>{t.signalGroup}</span>
+                      )}
+                      <span className={`text-[11px] font-mono font-black tabular-nums ${up ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {baseSymbol(t.symbol)} {up ? '▲' : '▼'} {pnl >= 0 ? '+' : ''}${Math.abs(pnl).toFixed(2)}
+                      </span>
+                      <span className="text-[9px] text-slate-500 font-mono">${t.notional.toFixed(0)} · {t.quantity.toFixed(2)}sh</span>
+                      {t.t1HitAt && <span className="text-[8px] font-black text-cyan-400 uppercase">T1✓</span>}
                     </span>
                   );
                 })}
@@ -2437,6 +2560,7 @@ export function ProTradeScannerScreen() {
             reasonMode={activeStage === 'pro_watchlist' && activeStrategy === 'all' ? 'base' : 'strategy'}
             orderedTrades={activeStage === 'ordered' && activeStrategy === 'all' ? orderedPaperTrades : []}
             watchlistSet={watchlistSet}
+            accountBalance={accountBalance}
             onSelect={(row) => { setSelectedRow(row); setApprovalMessage(''); }}
           />
         </>
