@@ -134,13 +134,16 @@ export async function fetchBars(symbols: string[], interval: Interval): Promise<
   const hit = cacheGet<Record<string, Candle[]>>(cacheKey);
   if (hit) return hit;
 
-  const data = await alpacaGet<{ bars: Record<string, AlpacaBar[]> }>('/v2/stocks/bars', {
+  // Daily bars use SIP (default) — IEX doesn't carry daily OHLCV reliably.
+  // Intraday uses IEX to avoid SIP subscription requirement.
+  const params: Record<string, string> = {
     symbols: symbols.join(','),
     timeframe: ALPACA_TF[interval],
     limit: String(BAR_LIMIT[interval]),
     sort: 'asc',
-    feed: 'iex',
-  });
+  };
+  if (interval !== '1d') params['feed'] = 'iex';
+  const data = await alpacaGet<{ bars: Record<string, AlpacaBar[]> }>('/v2/stocks/bars', params);
 
   const result: Record<string, Candle[]> = {};
   for (const [sym, bars] of Object.entries(data.bars || {})) {
