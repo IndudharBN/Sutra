@@ -1,4 +1,4 @@
-import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNewsFlags, fetchSectorTrends, fetchSpyDailyBars, buildDynamicUniverse, clearUniverseCache, getUniverseBuiltAt, SYMBOL_SECTOR, type CatalystTier } from '../../lib/alpacaClient';
+import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNewsFlags, fetchSectorTrends, fetchSpyDailyBars, buildDynamicUniverse, clearUniverseCache, getUniverseBuiltAt, SYMBOL_SECTOR, UNIVERSE_TARGET, type CatalystTier } from '../../lib/alpacaClient';
 import { classifyMarketRegime } from '../marketRegime/marketRegimeLogic';
 import type { MarketRegime } from '../marketRegime/marketRegimeTypes';
 import type { SymbolMeta } from '../../lib/alpacaClient';
@@ -515,7 +515,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
   });
 
   const metas = await fetchUniverseMeta(universe);
-  const scored = selectTopSymbols(metas, 90);
+  const scored = selectTopSymbols(metas, UNIVERSE_TARGET);
   // Guarantee pinned watchlist symbols are always scanned regardless of score rank
   const top = [...new Set([...scored, ...pinnedSymbols])];
 

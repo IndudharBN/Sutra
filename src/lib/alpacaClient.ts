@@ -245,7 +245,7 @@ export function selectTopSymbols(metas: SymbolMeta[], n = 60): string[] {
 
 const UNIVERSE_CACHE_KEY = 'dynamic_universe_v2';
 const UNIVERSE_TTL_MS = 6 * 60 * 60 * 1000;   // 6 hours
-const UNIVERSE_TARGET = 120;
+export const UNIVERSE_TARGET = 120;
 
 // Tracks when buildDynamicUniverse last locked the symbol pool
 let _universeBuiltAt: string | null = null;
