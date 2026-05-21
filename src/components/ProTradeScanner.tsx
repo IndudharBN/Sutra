@@ -1029,6 +1029,7 @@ function PaperTradeMonitor({
   onCloseTrade,
   onClearClosed,
   onFixZeroPnl,
+  eodMessage,
 }: {
   trades: PaperTrade[];
   rows: ProTradeRow[];
@@ -1037,6 +1038,7 @@ function PaperTradeMonitor({
   onCloseTrade: (trade: PaperTrade, price: number) => void;
   onClearClosed: () => void;
   onFixZeroPnl: () => void;
+  eodMessage?: string;
 }) {
   const priceBySymbol = new Map(rows.map((row) => [baseSymbol(row.symbol), row.price]));
   const filteredTrades = trades.filter((t) => tradeDateET(t) === monitorDate);
@@ -1084,6 +1086,12 @@ function PaperTradeMonitor({
           )}
         </div>
       </div>
+      {eodMessage && (
+        <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/20 flex items-center gap-2">
+          <span className="text-[9px] font-black uppercase tracking-widest text-amber-400 border border-amber-500/40 px-1.5 py-0.5 rounded">EOD</span>
+          <span className="text-[11px] text-amber-300/80">{eodMessage}</span>
+        </div>
+      )}
       <div className="overflow-auto max-h-[480px]">
         <table className="w-full min-w-[1320px] text-left border-collapse">
           <thead className="text-[9px] uppercase text-slate-500 font-bold tracking-widest bg-slate-900/50 sticky top-0 z-10">
@@ -1532,7 +1540,12 @@ export function ProTradeScannerScreen() {
   const [paperTrades, setPaperTrades] = React.useState<PaperTrade[]>(() => loadPaperTrades());
   const paperTradesRef = React.useRef<PaperTrade[]>(paperTrades);
   React.useEffect(() => { paperTradesRef.current = paperTrades; }, [paperTrades]);
-  const eodFiredRef = React.useRef<string>('');
+  const eodFiredRef = React.useRef<string>(localStorage.getItem('sutra.eodFiredDate') ?? '');
+  const [eodMessage, setEodMessage] = React.useState<string>(() => {
+    const storedDate = localStorage.getItem('sutra.eodFiredDate') ?? '';
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    return storedDate === today ? (localStorage.getItem('sutra.eodMessage') ?? '') : '';
+  });
   const [monitorDate, setMonitorDate] = React.useState<string>(() => todayET());
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [settings, setSettings] = React.useState<ProTradeSettings>(() => loadProTradeSettings());
@@ -2054,6 +2067,7 @@ export function ProTradeScannerScreen() {
       const S15M_IDS = new Set(['orb15m_retest', 'vwap15m_pullback', 'ema20_bounce_15m']);
       const openTrades = paperTradesRef.current.filter((t) => t.status === 'Open' && !S15M_IDS.has(t.strategyId ?? ''));
       eodFiredRef.current = today;
+      localStorage.setItem('sutra.eodFiredDate', today);
       if (!openTrades.length) return;
       const closedAt = new Date().toISOString();
       setPaperTrades((current) => current.map((t) => {
@@ -2064,7 +2078,10 @@ export function ProTradeScannerScreen() {
         return closePaperTrade(t, exitPrice, 'EOD', closedAt);
       }));
       closeAllPaperPositions().catch(() => { });
-      setApprovalMessage(`EOD 3:57 PM — closed ${openTrades.length} position(s) flat. 15m strategies (S10/S11/S12) run to natural exit.`);
+      const msg = `EOD 3:57 PM — closed ${openTrades.length} position(s) flat. 15m strategies (S10/S11/S12) run to natural exit.`;
+      localStorage.setItem('sutra.eodMessage', msg);
+      setEodMessage(msg);
+      setApprovalMessage(msg);
     }, 30_000);
     return () => clearInterval(interval);
   }, []);
@@ -2569,6 +2586,7 @@ export function ProTradeScannerScreen() {
         onCloseTrade={manualClosePaperTrade}
         onClearClosed={clearClosedTrades}
         onFixZeroPnl={fixZeroPnlTrades}
+        eodMessage={eodMessage}
       />
 
       <WatchlistHistoryPanel />
