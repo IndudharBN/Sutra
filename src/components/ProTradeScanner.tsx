@@ -2612,8 +2612,9 @@ function isTideBlocked(row: ProTradeRow, spyTrend: 'UP' | 'DOWN' | 'FLAT' | unde
   const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
   if (isReversal) return false;
 
-  // FLAT tide: S1/S2 need directional SPY to work — ORB gets contested, VWAP becomes noise
-  if (spyTrend === 'FLAT' && (strategyId === 'orb_retest' || strategyId === 'vwap_pullback')) return true;
+  // FLAT tide: S1 (ORB) needs directional SPY — contested range without trend context.
+  // S2 (VWAP pullback) runs its own slope gate (≥0.1%) and fires best when stock shows RS vs flat tape.
+  if (spyTrend === 'FLAT' && strategyId === 'orb_retest') return true;
 
   // Counter-tide signals are NOT blocked — 0.75× tideMult in buildPaperTrade is the penalty.
   // Blocking AND sizing-penalising was double punishment; sizing alone is sufficient.

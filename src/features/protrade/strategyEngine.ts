@@ -464,11 +464,10 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
     ? (ema9 - ema9Prev) / ema9Prev
     : null;
 
-  // S2 self-determines direction from VWAP slope — immune to Option C's 5m dip mismatch at entry.
-  // During the pullback the 5m trend is temporarily DOWN (that IS the setup), so VWAP+5m Option C
-  // reads NEUTRAL/BEAR and blocks the entry. Slope over ~50 bars captures the session trend through the dip.
+  // S2 self-determines direction from VWAP slope. Threshold raised to 0.1% — filters near-flat
+  // sessions where VWAP pullback reclaims are 50/50 by definition.
   const selfDir: 'BULL' | 'BEAR' | null = vwapSlope !== null
-    ? (vwapSlope >= 0.0005 ? 'BULL' : vwapSlope <= -0.0005 ? 'BEAR' : null)
+    ? (vwapSlope >= 0.001 ? 'BULL' : vwapSlope <= -0.001 ? 'BEAR' : null)
     : null;
   const dir: 'BULL' | 'BEAR' = selfDir ?? 'BULL'; // geometry fallback; tradePlan is null when selfDir=null
   const selfInput = selfDir
@@ -480,30 +479,51 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
       }
     : input;
 
-  const vwapSlopeOk = Boolean(selfDir); // flat VWAP = range session: pullback reclaims are 50/50
+  const vwapSlopeOk = Boolean(selfDir);
   const touchedValue = recent.some((c) => dir === 'BULL'
     ? (c.low <= input.vwap + tolerance || c.low <= ema9 + tolerance)
     : (c.high >= input.vwap - tolerance || c.high >= ema9 - tolerance)
   );
+  // Rejection wick: most recent bar that touched VWAP must show institutional defence (≥25% wick)
+  const vwapTouchBar = [...recent].reverse().find((c) => dir === 'BULL'
+    ? c.low <= input.vwap + tolerance
+    : c.high >= input.vwap - tolerance
+  );
+  const touchBarRange = vwapTouchBar ? vwapTouchBar.high - vwapTouchBar.low : 0;
+  const wickOk = vwapTouchBar && touchBarRange > 1e-8 && (
+    dir === 'BULL'
+      ? (vwapTouchBar.close - vwapTouchBar.low) / touchBarRange >= 0.25
+      : (vwapTouchBar.high - vwapTouchBar.close) / touchBarRange >= 0.25
+  );
+  // Reclaim: trigger bar must close above VWAP itself — EMA9 reclaim mid-pullback is not enough
   const reclaimed = trigger
-    ? (dir === 'BULL' ? trigger.close > Math.min(input.vwap, ema9) : trigger.close < Math.min(input.vwap, ema9))
+    ? (dir === 'BULL' ? trigger.close > input.vwap : trigger.close < input.vwap)
     : false;
-  const rvolOk = input.rvol >= 0.8; // dead-volume reclaims almost never hold
-  const rsOk = input.rsVsBenchmark >= 1.0; // stock must lead or match SPY — laggards VWAP reclaim on a strong SPY day, then fail
+  const rvolOk = input.rvol >= 0.8;
+  const rsOk = input.rsVsBenchmark >= 1.0;
   const rsLabel = `RS ${round(input.rsVsBenchmark, 4)} vs SPY${rsOk ? ' ✓' : ' — lagging'}`;
   const entry = input.price;
-  const swing = dir === 'BULL' ? Math.min(...recent.map((c) => c.low)) : Math.max(...recent.map((c) => c.high));
-  const rawStop = dir === 'BULL' ? swing - input.atr20 * STOP_BUFFER_ATR : swing + input.atr20 * STOP_BUFFER_ATR;
+  // Stop anchored to VWAP — if price loses VWAP again the setup is wrong; swing low was too wide and arbitrary
+  const rawStop = dir === 'BULL'
+    ? input.vwap - input.atr20 * STOP_BUFFER_ATR
+    : input.vwap + input.atr20 * STOP_BUFFER_ATR;
   const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel), input.atr20);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
-  const tradePlan = selfDir && touchedValue && reclaimed && rvolOk && rsOk ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = selfDir && touchedValue && wickOk && reclaimed && rvolOk && rsOk
+    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
+    : null;
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from VWAP slope`) : fail('Directional bias', 'VWAP flat — range session, no pullback direction'),
     htfTrendContext(selfInput),
-    touchedValue ? pass('Pullback into value', 'Recent 30m tested VWAP/EMA zone') : fail('Pullback into value', 'No fresh test in last 30m'),
-    reclaimed ? pass('Reclaim candle', 'Latest candle reclaimed direction') : fail('Reclaim candle', 'Waiting for reclaim'),
+    touchedValue ? pass('Pullback into value', 'Recent 30m tested VWAP/EMA9 zone') : fail('Pullback into value', 'No fresh VWAP/EMA9 test in last 30m'),
+    wickOk
+      ? pass('Rejection wick', `VWAP defended — ${dir === 'BULL' ? 'lower' : 'upper'} wick ≥25% of bar range ✓`)
+      : fail('Rejection wick', 'No rejection wick at VWAP — no institutional defence evidence'),
+    reclaimed
+      ? pass('VWAP reclaim', `Closed ${dir === 'BULL' ? 'above' : 'below'} VWAP ✓`)
+      : fail('VWAP reclaim', `Waiting for close ${dir === 'BULL' ? 'above' : 'below'} VWAP — EMA9 reclaim not sufficient`),
     selfInput.trendAligned
       ? pass('5m trend aligned', `${selfInput.trend5m} ✓ — Phase 3 reclaim confirmed`)
       : pass('5m trend aligned', `${selfInput.trend5m} — pullback phase, reclaim pending — informational`),
@@ -516,7 +536,7 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
     ema1mCheck(input),
     spySessionCheck(selfInput),
   ];
-  return signal('vwap_pullback', selfInput, checklist, tradePlan, 'S2 VWAP pullback: self-determined direction from VWAP slope + fresh 30m test + reclaim + RVOL≥0.8 + RS≥1.0. Hard gates: selfDir (slope ≥0.05%), touchedValue, reclaimed, rvolOk, rsOk.');
+  return signal('vwap_pullback', selfInput, checklist, tradePlan, 'S2 VWAP pullback: slope ≥0.1% + VWAP touch + rejection wick ≥25% + VWAP reclaim + RVOL≥0.8 + RS≥1.0. Stop: VWAP−0.5×ATR. Hard gates: selfDir, touchedValue, wickOk, reclaimed (above VWAP), rvolOk, rsOk.');
 }
 
 export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
