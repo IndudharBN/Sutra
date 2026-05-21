@@ -744,7 +744,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const t2 = structuralT2(selfInput, entry, risk, t1);
   const fvgPathOnly = !atOb && atFvg;  // pure FVG path — OB+FVG confluence stays on OB rules
   const fvg15mOk   = fvgPathOnly ? input.trend15mAligned : true;  // 15m trend: hard gate for FVG solo
-  const rvolThreshold = fvgPathOnly ? 1.5 : 1.0;                  // FVG solo needs more participation
+  const rvolThreshold = fvgPathOnly ? 1.2 : 1.0;                  // FVG solo: 1.2× filters dead-volume days; real fills are quiet absorption, not surges
   const rvolOk = input.rvol >= rvolThreshold;
   const fvgSizeOk = atFvg && gap ? (gap.gapHigh - gap.gapLow) >= input.atr20 * 0.25 : true;
   const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
