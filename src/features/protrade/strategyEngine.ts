@@ -1164,15 +1164,34 @@ export function evaluateOrb15mRetest(input: StrategyInput): StrategySignal {
 // RS gate is hard (was soft in S2) — 15m VWAP reclaims on lagging stocks fail.
 // Hard gates: direction, touchedVwap, reclaimed, rsOk, rvolOk, rrOk.
 export function evaluateVwap15mPullback(input: StrategyInput): StrategySignal {
-  if (!directionOk(input)) {
-    return signal('vwap15m_pullback', input, [fail('Directional bias', 'No BULL/BEAR bias')], null, 'No directional bias.');
-  }
-  const dir = input.direction as 'BULL' | 'BEAR';
   const fifteen = input.candles.fifteen;
   const trigger = last(fifteen);
   if (fifteen.length < 5 || !trigger) {
     return signal('vwap15m_pullback', input, [fail('Data', 'Need 5+ 15m bars')], null, 'Insufficient candle data.');
   }
+
+  // S11 self-determines direction from 15m EMA9 slope — mirrors S2's approach one timeframe up.
+  // During a 15m VWAP pullback, price dips to/below VWAP so Option C reads NEUTRAL/BEAR and would
+  // block it. Slope over ~10 15m bars (~2.5h) captures the session trend through the dip.
+  const ema9Series15m = ema(closes(fifteen), 9);
+  const ema9Now = last(ema9Series15m);
+  const ema9Prev = ema9Series15m.length >= 11 ? ema9Series15m[ema9Series15m.length - 11] : null;
+  const vwapSlope15m = ema9Prev && Number.isFinite(ema9Prev) && Number.isFinite(ema9Now)
+    ? (ema9Now - ema9Prev) / ema9Prev
+    : null;
+  const selfDir: 'BULL' | 'BEAR' | null = vwapSlope15m !== null
+    ? (vwapSlope15m >= 0.0005 ? 'BULL' : vwapSlope15m <= -0.0005 ? 'BEAR' : null)
+    : null;
+  const dir: 'BULL' | 'BEAR' = selfDir ?? 'BULL'; // geometry fallback; tradePlan null when selfDir=null
+  const selfInput = selfDir
+    ? {
+        ...input,
+        direction: selfDir,
+        vwapAligned: selfDir === 'BULL' ? input.price > input.vwap : input.price < input.vwap,
+        trendAligned: selfDir === 'BULL' ? input.trend15m === 'UP' : input.trend15m === 'DOWN',
+      }
+    : input;
+
   const recent4 = fifteen.slice(-4); // 60-min window on 15m
   const tolerance = Math.max(input.atr20 * 0.25, input.price * 0.002);
   const touchedVwap = recent4.some(c => dir === 'BULL'
@@ -1189,23 +1208,25 @@ export function evaluateVwap15mPullback(input: StrategyInput): StrategySignal {
   const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
-  const t2 = structuralT2(input, entry, risk, t1);
+  const t2 = structuralT2(selfInput, entry, risk, t1);
   const rrOk = rr(entry, stop, t2, dir) >= MIN_RR_15M;
-  const tradePlan = touchedVwap && reclaimed && rsOk && rvolOk && rrOk
-    ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger)
+  const tradePlan = selfDir && touchedVwap && reclaimed && rsOk && rvolOk && rrOk
+    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
     : null;
   const checklist = [
-    directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
-    htfTrendContext(input),
+    selfDir
+      ? pass('Directional bias', `${selfDir} — self-determined from 15m EMA9 slope`)
+      : fail('Directional bias', '15m EMA9 flat — range/choppy session, no pullback direction'),
+    htfTrendContext(selfInput),
     touchedVwap ? pass('15m VWAP test', 'Within 60m on 15m chart') : fail('15m VWAP test', 'No 15m VWAP test in last 60m'),
     reclaimed ? pass('VWAP reclaim', `15m close ${dir === 'BULL' ? 'above' : 'below'} VWAP ✓`) : fail('VWAP reclaim', 'Waiting for 15m close back through VWAP'),
     rsOk ? pass('RS vs SPY ≥0.5%', `${round(input.rsVsBenchmark, 4)} ✓`) : fail('RS vs SPY ≥0.5%', `${round(input.rsVsBenchmark, 4)} — 15m reclaim requires RS edge`),
     rvolOk ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — low-volume 15m reclaim unreliable`),
     adrOk ? pass('ADR ≥3%', `${round(input.atrPct, 1)}% ✓`) : fail('ADR ≥3%', `${round(input.atrPct, 1)}% — 15m needs ≥3% range`),
     rrOk ? pass('R:R ≥2.0', '✓') : fail('R:R ≥2.0', 'Reward insufficient vs 1×ATR stop'),
-    pass('5m trend', `${input.trend5m}${input.trendAligned ? ' aligned ✓' : ''} — informational`),
+    pass('15m trend', `${input.trend15m}${selfInput.trendAligned ? ' aligned ✓' : ''} — informational`),
   ];
-  return signal('vwap15m_pullback', input, checklist, tradePlan, 'S11 15m VWAP pullback: 60m VWAP test + reclaim + RS≥0.5% + RVOL≥1.0 + R:R≥2.0. Hard gates: direction, touchedVwap, reclaimed, rsOk, rvolOk, rrOk.');
+  return signal('vwap15m_pullback', selfInput, checklist, tradePlan, 'S11 15m VWAP pullback: self-determined from 15m EMA9 slope. Hard gates: selfDir (slope ≥0.05%), touchedVwap, reclaimed, RS≥0.5%, RVOL≥1.0, R:R≥2.0.');
 }
 
 // ─── S12: 15m EMA20 Bounce ───────────────────────────────────────────────────
