@@ -290,9 +290,7 @@ function signal(
   };
 }
 
-function directionOk(input: StrategyInput) {
-  return input.direction === 'BULL' || input.direction === 'BEAR';
-}
+
 
 function htfTrendContext(input: StrategyInput) {
   return pass('15m trend (informational)', input.trend15mAligned
@@ -1234,10 +1232,6 @@ export function evaluateVwap15mPullback(input: StrategyInput): StrategySignal {
 // Slope lookback 4 bars = 1h on 15m (was 3 bars = 15m on 5m) — genuine trend.
 // Hard gates: direction, emaRising, touchedEma, reclaimed, rvolOk, rrOk.
 export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
-  if (!directionOk(input)) {
-    return signal('ema20_bounce_15m', input, [fail('Directional bias', 'No BULL/BEAR bias')], null, 'No directional bias.');
-  }
-  const dir = input.direction as 'BULL' | 'BEAR';
   const fifteen = input.candles.fifteen;
   const trigger = last(fifteen);
   if (fifteen.length < 12 || !trigger) {
@@ -1249,7 +1243,17 @@ export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
   if (!Number.isFinite(ema20Now) || !Number.isFinite(ema20Prev)) {
     return signal('ema20_bounce_15m', input, [fail('Data', 'EMA20 unavailable')], null, 'EMA20 computation failed.');
   }
-  const emaRising = dir === 'BULL' ? ema20Now > ema20Prev * 1.001 : ema20Now < ema20Prev * 0.999; // 0.1% slope per 1h — filters flat EMAs
+  // S12 self-determines direction from 15m EMA20 slope — mirrors S8's approach one timeframe up.
+  const selfDir: 'BULL' | 'BEAR' | null =
+    ema20Now > ema20Prev * 1.001 ? 'BULL' :
+    ema20Now < ema20Prev * 0.999 ? 'BEAR' : null;
+  const selfInput = selfDir
+    ? { ...input, direction: selfDir,
+        vwapAligned: selfDir === 'BULL' ? input.price > input.vwap : input.price < input.vwap,
+        trendAligned: selfDir === 'BULL' ? input.trend15m === 'UP' : input.trend15m === 'DOWN' }
+    : input;
+  const dir: 'BULL' | 'BEAR' = selfDir ?? 'BULL';
+  const emaRising = selfDir !== null; // true by construction when slope threshold is met
   const recent3 = fifteen.slice(-3); // last 45 min
   const emaTolerance = input.atr20 * 0.3; // 0.3×ATR — 15m bars have more range per bar
   const touchedEma = recent3.some(c => dir === 'BULL'
@@ -1266,16 +1270,18 @@ export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
   const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
-  const t2 = structuralT2(input, entry, risk, t1);
+  const t2 = structuralT2(selfInput, entry, risk, t1);
   const rrOk = rr(entry, stop, t2, dir) >= MIN_RR_15M;
   const tradePlan = emaRising && touchedEma && reclaimed && rvolOk && rrOk
-    ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger)
+    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
     : null;
   const checklist = [
-    directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
+    selfDir
+      ? pass('Directional bias', `${selfDir} — self-determined from 15m EMA20 slope`)
+      : fail('Directional bias', 'EMA20 flat — no slope to define bounce direction'),
     emaRising
       ? pass('15m EMA20 slope', `${dir === 'BULL' ? 'Rising' : 'Falling'} over 1h ✓`)
-      : fail('15m EMA20 slope', `Flat/${dir === 'BULL' ? 'falling' : 'rising'} — mean-reversion risk`),
+      : fail('15m EMA20 slope', 'Flat — no directional bias'),
     touchedEma
       ? pass('15m EMA20 touch', `Tested EMA20 (${round(ema20Now, 2)}) within 45m`)
       : fail('15m EMA20 touch', `No 15m touch of EMA20 (${round(ema20Now, 2)}) in last 45m`),
@@ -1285,10 +1291,10 @@ export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
     rvolOk ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — 15m bounce needs volume`),
     adrOk ? pass('ADR ≥3%', `${round(input.atrPct, 1)}% ✓`) : fail('ADR ≥3%', `${round(input.atrPct, 1)}% — 15m needs ≥3% range`),
     rrOk ? pass('R:R ≥2.0', '✓') : fail('R:R ≥2.0', 'Reward insufficient vs 1×ATR stop'),
-    htfTrendContext(input),
-    pass('VWAP', `${input.vwapAligned ? (dir === 'BULL' ? 'Above ✓' : 'Below ✓') : 'misaligned'} — informational`),
+    htfTrendContext(selfInput),
+    pass('VWAP', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above ✓' : 'Below ✓') : 'misaligned'} — informational`),
   ];
-  return signal('ema20_bounce_15m', input, checklist, tradePlan, 'S12 15m EMA20 bounce: 1h rising slope + 45m touch + reclaim + RVOL≥1.0 + R:R≥2.0. Hard gates: direction, emaRising, touchedEma, reclaimed, rvolOk, rrOk.');
+  return signal('ema20_bounce_15m', selfInput, checklist, tradePlan, 'S12 15m EMA20 bounce: self-determined direction from 15m EMA20 slope + 45m touch + reclaim + RVOL≥1.0 + R:R≥2.0. Hard gates: selfDir (slope ≥0.1% per 1h), touchedEma, reclaimed, rvolOk, rrOk.');
 }
 
 // ─── S13: Range-Bound Mean Reversion ─────────────────────────────────────────
@@ -1296,12 +1302,8 @@ export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
 // shows a 30%+ rejection wick, and the R:R to VWAP (mean-reversion target) is ≥1.5.
 // Direction is driven by WHERE price is — BULL at range low, BEAR at range high.
 // SPY FLAT context is informational; the geometry itself self-selects SIDEWAYS days.
-// Hard gates: directionOk, rangeOk, atExtreme, wickOk, rvolOk, rrOk.
+// Hard gates: selfDir (range extreme), rangeOk, atExtreme, wickOk, rvolOk, rrOk.
 export function evaluateRangeBoundReversion(input: StrategyInput): StrategySignal {
-  if (!directionOk(input)) {
-    return signal('range_reversion', input, [fail('Directional bias', 'No BULL/BEAR bias')], null, 'No directional bias.');
-  }
-  const dir = input.direction as 'BULL' | 'BEAR';
   const five = input.candles.five;
   const trigger = last(five);
   const session = sessionCandles(five);
@@ -1316,11 +1318,18 @@ export function evaluateRangeBoundReversion(input: StrategyInput): StrategySigna
   const rangeSize = rangeHigh - rangeLow;
   const rangeOk = rangeSize >= input.atr20 * 0.5; // range must be meaningful, not noise
 
-  // BULL: price at/near range LOW (buy support); BEAR: at/near range HIGH (sell resistance)
+  // S13 self-determines direction from range extreme — price at low → BULL, at high → BEAR, mid-range → no trade.
   const proximity = input.atr20 * 0.15;
-  const atExtreme = dir === 'BULL'
-    ? input.price <= rangeLow + proximity
-    : input.price >= rangeHigh - proximity;
+  const selfDir: 'BULL' | 'BEAR' | null =
+    input.price <= rangeLow + proximity ? 'BULL' :
+    input.price >= rangeHigh - proximity ? 'BEAR' : null;
+  const selfInput = selfDir
+    ? { ...input, direction: selfDir,
+        vwapAligned: selfDir === 'BULL' ? input.price > input.vwap : input.price < input.vwap,
+        trendAligned: selfDir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN' }
+    : input;
+  const dir: 'BULL' | 'BEAR' = selfDir ?? 'BULL';
+  const atExtreme = selfDir !== null; // true by construction when price is at a range extreme
 
   // Rejection wick ≥30% — physical evidence of institutional defence of the level
   const cRange = trigger.high - trigger.low;
@@ -1345,11 +1354,13 @@ export function evaluateRangeBoundReversion(input: StrategyInput): StrategySigna
   const rrOk = rrToVwap >= MIN_RR; // need ≥1.5R to VWAP — validates the mean-reversion gap exists
 
   const tradePlan = rangeOk && atExtreme && wickOk && rvolOk && rrOk
-    ? planFromLevelsT1T2(input, entry, stop, t1, t2, trigger)
+    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
     : null;
 
   const checklist = [
-    directionOk(input) ? pass('Directional bias', dir) : fail('Directional bias', 'No BULL/BEAR bias'),
+    selfDir
+      ? pass('Directional bias', `${selfDir} — self-determined from range extreme (${selfDir === 'BULL' ? 'near range low' : 'near range high'})`)
+      : fail('Directional bias', 'Price mid-range — at neither extreme, no mean-reversion edge'),
     rangeOk
       ? pass('Session range', `H ${round(rangeHigh, 2)} / L ${round(rangeLow, 2)} (≥0.5×ATR ✓)`)
       : fail('Session range', `Range ${round(rangeSize, 2)} < 0.5×ATR — too thin for mean-reversion`),
@@ -1371,8 +1382,8 @@ export function evaluateRangeBoundReversion(input: StrategyInput): StrategySigna
     pass('VWAP target', `${round(input.vwap, 2)} — T1 scale-out; hold 50% to 2R if trend continues`),
   ];
 
-  return signal('range_reversion', input, checklist, tradePlan,
-    'S13 Range Reversion: 30m session range extreme + 30% rejection wick + R:R≥1.5 to VWAP. SIDEWAYS-optimised — self-selects via range geometry.',
+  return signal('range_reversion', selfInput, checklist, tradePlan,
+    'S13 Range Reversion: self-determined direction from range extreme + 30% rejection wick + R:R≥1.5 to VWAP. SIDEWAYS-optimised — self-selects via range geometry.',
     false, rangeOk ? [{
       label: 'Session Range',
       startTime: rangeBars[0].time,
