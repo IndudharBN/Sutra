@@ -1168,7 +1168,9 @@ function PaperTradeMonitor({
                           ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
                           : trade.outcome === 'Stop'
                             ? 'border-rose-500/30 bg-rose-500/10 text-rose-300'
-                            : 'border-slate-600/40 bg-slate-800/30 text-slate-400'
+                            : trade.outcome === 'EOD'
+                              ? 'border-amber-500/40 bg-amber-500/10 text-amber-400'
+                              : 'border-slate-600/40 bg-slate-800/30 text-slate-400'
                       }`}>
                       {trade.status === 'Open' ? (trade.t1HitAt ? 'T1 Hit' : 'Open') : (trade.outcome === 'T1 Profit' ? 'T1 HIT / TRAILED' : trade.outcome)}
                     </span>
