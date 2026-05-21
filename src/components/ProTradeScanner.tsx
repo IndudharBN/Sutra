@@ -1811,7 +1811,34 @@ export function ProTradeScannerScreen() {
         } else {
           // Server has trades — normal merge (picks up any LS-only drafts)
           const merged = await loadAllTrades<PaperTrade>();
-          setPaperTrades(merged);
+          // Startup auto-close: EOD only fires when the browser is running at 3:57 PM ET.
+          // On refresh/reopen, close any stale open trades: prior-day trades always,
+          // today's trades if it's now past 4:00 PM ET.
+          const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+          const pastEod = etMinutesNow() >= 16 * 60;
+          const S15M_IDS = new Set(['orb15m_retest', 'vwap15m_pullback', 'ema20_bounce_15m']);
+          const closedAt = new Date().toISOString();
+          let staleCount = 0;
+          const autoClosedMsg = (() => {
+            const cleaned = merged.map((t) => {
+              if (t.status !== 'Open') return t;
+              if (S15M_IDS.has(t.strategyId ?? '')) return t;
+              const tradeDay = tradeDateET(t);
+              const isStale = tradeDay < today || (tradeDay === today && pastEod);
+              if (!isStale) return t;
+              staleCount++;
+              return closePaperTrade(t, t.entry, 'EOD', closedAt);
+            });
+            return { trades: cleaned, count: staleCount };
+          })();
+          setPaperTrades(autoClosedMsg.trades);
+          if (autoClosedMsg.count > 0) {
+            const msg = `EOD auto-close on startup: ${autoClosedMsg.count} stale position(s) closed at last known price.`;
+            localStorage.setItem('sutra.eodFiredDate', today);
+            localStorage.setItem('sutra.eodMessage', msg);
+            setEodMessage(msg);
+            eodFiredRef.current = today;
+          }
         }
       })
       .catch(() => {
