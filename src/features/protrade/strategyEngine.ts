@@ -671,6 +671,16 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
       ? (sweepCandle.close - sweepCandle.low) / cRange >= 0.35 // 35% wick — genuine stop-run rejection
       : (sweepCandle.high - sweepCandle.close) / cRange >= 0.35;
   })() : false;
+
+  // Reclaim candle conviction: the 5m bar that closes back through the swept level must show
+  // at least 0.8× its own 5-bar average volume. A thin reclaim = price drifting back in a
+  // vacuum (false reversal). A real stop-run reversal attracts buyers/sellers on that specific bar.
+  const prior5Vol = recent.slice(-6, -1); // 5 bars immediately before the trigger (reclaim) candle
+  const avg5Vol = prior5Vol.length >= 3
+    ? prior5Vol.reduce((s, c) => s + c.volume, 0) / prior5Vol.length
+    : 0;
+  const reclaimVolOk = avg5Vol > 0 && trigger.volume >= avg5Vol * 0.8;
+
   const selfInput = selfDir
     ? {
         ...input,
@@ -679,7 +689,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
         trendAligned: selfDir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN',
       }
     : input;
-  const tradePlan = swept && reclaimed && nearLevel && sweepWickOk
+  const tradePlan = swept && reclaimed && nearLevel && sweepWickOk && reclaimVolOk
     ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
     : null;
   const sweepDetail = sweptLevel !== null
@@ -696,7 +706,9 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     sweepWickOk ? pass('Sweep rejection wick', 'Candle closed back inside level') : fail('Sweep rejection wick', 'No rejection — likely continuation'),
     reclaimed ? pass('Level reclaimed', `Close back ${dir === 'BULL' ? 'above' : 'below'} ${sweptLevel ? round(sweptLevel, 2) : '--'}`) : fail('Level reclaimed', 'Waiting for close back through swept level'),
     nearLevel ? pass('Entry proximity', 'Price within 1.5×ATR of level ✓') : fail('Entry proximity', 'Price too far from swept level — do not chase'),
-    pass('Volume confirmation', `${round(input.rvol, 2)}x${input.rvol >= 0.8 ? ' — confirmed' : ' — low, sweep structure is primary signal'}`),
+    reclaimVolOk
+      ? pass('Reclaim conviction', `Reclaim bar vol ${round(trigger.volume, 0)} vs 5-bar avg ${round(avg5Vol, 0)} (${round(trigger.volume / (avg5Vol || 1), 2)}×) — reversal has participation`)
+      : fail('Reclaim conviction', `Reclaim bar vol ${round(trigger.volume / (avg5Vol || 1), 2)}× prior avg — thin reversal, likely drift not real stop-run`),
     ema1mCheck(input),
     spySessionCheck(selfInput),
   ];
