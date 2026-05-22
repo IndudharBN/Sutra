@@ -1680,14 +1680,16 @@ export function ProTradeScannerScreen() {
   const [pendingConfirmCount, setPendingConfirmCount] = React.useState(0);
 
   const rows = React.useMemo(() => withOrderedStage(snapshot?.rows || [], paperTrades), [snapshot?.rows, paperTrades]);
-  // Symbols blocked from re-entry today because they stopped out. Key = "SYMBOL|DIRECTION".
-  // T1 Profit, Target, EOD, Manual exits do NOT block — only a stop invalidates the direction thesis.
+  // Symbols blocked from re-entry today because they stopped out.
+  // Key = "SYMBOL|STRATEGY|DIRECTION" — only the exact same strategy+direction is blocked.
+  // Opposite direction is allowed (failed BULL sweep → BEAR sweep may be the correct read).
+  // Persists across refresh because it is derived from paperTrades (already persisted to server).
   const stoppedTodaySet = React.useMemo(() => {
     const today = todayET();
     return new Set(
       paperTrades
-        .filter((t) => tradeDateET(t) === today && t.status === 'Closed' && t.outcome === 'Stop')
-        .map((t) => `${baseSymbol(t.symbol)}|${t.direction}`)
+        .filter((t) => tradeDateET(t) === today && t.status === 'Closed' && t.outcome === 'Stop' && t.strategyId)
+        .map((t) => `${baseSymbol(t.symbol)}|${t.strategyId}|${t.direction}`)
     );
   }, [paperTrades]);
   const rawRows = snapshot?.rawRows || [];
@@ -1977,7 +1979,9 @@ export function ProTradeScannerScreen() {
       if (row.earningsDays !== null && Math.abs(row.earningsDays) <= 1) return;
       if (!checkStrategyCircuitBreaker(row.primaryStrategy?.strategyId || row.symbol).ok) return;
       if (isTideBlocked(row, snapshot.spyTrend5m, row.primaryStrategy ?? undefined)) return;
-      if (stoppedTodaySet.has(`${sym}|${row.direction}`)) return;
+      const stoppedStratId = row.primaryStrategy?.strategyId ?? '';
+      const stoppedStratDir = row.primaryStrategy?.direction ?? row.direction;
+      if (stoppedTodaySet.has(`${sym}|${stoppedStratId}|${stoppedStratDir}`)) return;
 
       const level = row.tradePlan?.entry;
       if (!level) return;
@@ -2214,6 +2218,12 @@ export function ProTradeScannerScreen() {
     const symbolKey = baseSymbol(row.symbol);
     if (paperTrades.some((item) => item.status === 'Open' && baseSymbol(item.symbol) === symbolKey)) {
       setApprovalMessage(`Paper trade already open for ${row.symbol}.`);
+      return;
+    }
+    const manualStratId = row.primaryStrategy?.strategyId ?? '';
+    const manualStratDir = row.primaryStrategy?.direction ?? row.direction;
+    if (manualStratId && stoppedTodaySet.has(`${symbolKey}|${manualStratId}|${manualStratDir}`)) {
+      setApprovalMessage(`${row.symbol} ${manualStratId.toUpperCase()} ${manualStratDir} stopped out today — same strategy re-entry blocked till EOD.`);
       return;
     }
     const earningsNote = row.earningsDays !== null && Math.abs(row.earningsDays) <= 1
