@@ -1593,7 +1593,6 @@ export function ProTradeScannerScreen() {
   // Full universe scan every 60s
   React.useEffect(() => {
     const id = window.setInterval(() => {
-      if (document.hidden) return;
       void load();
     }, 60_000);
     return () => window.clearInterval(id);
@@ -1602,7 +1601,6 @@ export function ProTradeScannerScreen() {
   // Hot-set refresh every 20s — only re-evaluates forming/confirmed/locked stocks
   React.useEffect(() => {
     const id = window.setInterval(() => {
-      if (document.hidden) return;
       const cur = snapshotRef.current;
       if (!cur) return;
       const hotFromStage = cur.rows
@@ -1655,7 +1653,6 @@ export function ProTradeScannerScreen() {
   // Refresh account equity every 15s for live HUD updates
   React.useEffect(() => {
     const id = window.setInterval(async () => {
-      if (document.hidden) return;
       try {
         const acct = await getPaperAccount();
         const bal = parseFloat(acct.equity);
