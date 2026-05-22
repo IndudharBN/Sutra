@@ -675,9 +675,12 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   // Reclaim candle conviction: the 5m bar that closes back through the swept level must show
   // at least 0.8× its own 5-bar average volume. A thin reclaim = price drifting back in a
   // vacuum (false reversal). A real stop-run reversal attracts buyers/sellers on that specific bar.
-  const prior5Vol = recent.slice(-6, -1); // 5 bars immediately before the trigger (reclaim) candle
-  const avg5Vol = prior5Vol.length >= 3
-    ? prior5Vol.reduce((s, c) => s + c.volume, 0) / prior5Vol.length
+  // 3 bars (not 5): S4 is a fast reversal — the 3 bars immediately before the reclaim are the
+  // relevant post-sweep context. 5 bars risks including the sweep candle's high-volume spike,
+  // which inflates the average and makes the threshold artificially hard to clear.
+  const prior3Vol = recent.slice(-4, -1); // 3 bars immediately before the trigger (reclaim) candle
+  const avg5Vol = prior3Vol.length >= 2
+    ? prior3Vol.reduce((s, c) => s + c.volume, 0) / prior3Vol.length
     : 0;
   const reclaimVolOk = avg5Vol > 0 && trigger.volume >= avg5Vol * 0.8;
 
