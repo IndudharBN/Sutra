@@ -1476,14 +1476,29 @@ export function evaluateSniper1m(input: StrategyInput): StrategySignal {
   // are smaller; a genuine 1m impulse is still institutional context at this resolution.
   const ob1m = findOrderBlockZone(one, dir, 1.0, 30);
 
-  const tol1m = input.atr20 * 0.10; // tight proximity — 1m OB is precise
+  // 0.20×ATR (was 0.10×): 0.10 was razor-thin (~$0.40 on a $200 stock) and failed on
+  // normal 1m oscillations. 0.20× gives a workable entry window while keeping precision.
+  const tol1m = input.atr20 * 0.20;
   const atOb1m = ob1m
     ? (dir === 'BULL'
         ? input.price <= ob1m.high + tol1m && input.price >= ob1m.low - tol1m
         : input.price >= ob1m.low - tol1m && input.price <= ob1m.high + tol1m)
     : false;
 
-  const obReject1m = ob1m && atOb1m ? rejectionCandle(one, dir, ob1m) : false;
+  // Check last 3 1m bars for rejection (not just the final bar). The 60s scan cycle can
+  // miss a 1-bar rejection by a single tick; 3 bars (~3 min) gives enough visibility
+  // without letting stale setups through. Same logic as rejectionCandle() in smc.ts.
+  const obReject1m = ob1m && atOb1m ? one.slice(-3).some((c) => {
+    const r = c.high - c.low;
+    if (r <= 0) return false;
+    const touches = dir === 'BULL'
+      ? c.low <= ob1m.high && c.high >= ob1m.low
+      : c.high >= ob1m.low && c.low <= ob1m.high;
+    const bodyOk = dir === 'BULL'
+      ? (c.close - c.low) / r >= 0.4
+      : (c.high - c.close) / r >= 0.4;
+    return touches && bodyOk;
+  }) : false;
   const rvolOk = input.rvol >= 1.0;
 
   const entry = input.price;
