@@ -682,7 +682,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   const avg5Vol = prior3Vol.length >= 2
     ? prior3Vol.reduce((s, c) => s + c.volume, 0) / prior3Vol.length
     : 0;
-  const reclaimVolOk = avg5Vol > 0 && trigger.volume >= avg5Vol * 0.8;
+  const reclaimVolOk = avg5Vol > 0 && trigger != null && trigger.volume >= avg5Vol * 0.8;
 
   const selfInput = selfDir
     ? {
@@ -710,8 +710,8 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     reclaimed ? pass('Level reclaimed', `Close back ${dir === 'BULL' ? 'above' : 'below'} ${sweptLevel ? round(sweptLevel, 2) : '--'}`) : fail('Level reclaimed', 'Waiting for close back through swept level'),
     nearLevel ? pass('Entry proximity', 'Price within 1.5×ATR of level ✓') : fail('Entry proximity', 'Price too far from swept level — do not chase'),
     reclaimVolOk
-      ? pass('Reclaim conviction', `Reclaim bar vol ${round(trigger.volume, 0)} vs 5-bar avg ${round(avg5Vol, 0)} (${round(trigger.volume / (avg5Vol || 1), 2)}×) — reversal has participation`)
-      : fail('Reclaim conviction', `Reclaim bar vol ${round(trigger.volume / (avg5Vol || 1), 2)}× prior avg — thin reversal, likely drift not real stop-run`),
+      ? pass('Reclaim conviction', `Reclaim bar vol ${round(trigger?.volume ?? 0, 0)} vs 3-bar avg ${round(avg5Vol, 0)} (${round((trigger?.volume ?? 0) / (avg5Vol || 1), 2)}×) — reversal has participation`)
+      : fail('Reclaim conviction', avg5Vol > 0 ? `Reclaim bar vol ${round((trigger?.volume ?? 0) / (avg5Vol || 1), 2)}× prior avg — thin reversal, likely drift not real stop-run` : 'Insufficient candle data for volume check'),
     ema1mCheck(input),
     spySessionCheck(selfInput),
   ];
