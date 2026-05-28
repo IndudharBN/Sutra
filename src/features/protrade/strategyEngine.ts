@@ -568,9 +568,13 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
   // Guard: stop must be on the correct side of entry. Bad price data (wrong API tick) can invert this.
   const stopSide = dir === 'BULL' ? stop < entry : stop > entry;
   const risk = Math.abs(entry - stop);
+  // S3 is a micro-range breakout — wide stops mean the "micro range" was actually a macro swing.
+  // Cap at 1.5% of entry price; anything wider is structurally unsound for a breakout entry.
+  const stopWidthPct = entry > 0 ? risk / entry : 1;
+  const stopWidthOk = stopWidthPct <= 0.015;
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
-  const tradePlan = recent.length >= 6 && rsEdge && breakout && stopSide && input.rvol >= 1.0 ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = recent.length >= 6 && rsEdge && breakout && stopSide && stopWidthOk && input.rvol >= 1.0 ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const fifteen = input.candles.fifteen;
   const trend1h: 'UP' | 'DOWN' | 'FLAT' = fifteen.length >= 5
     ? (fifteen[fifteen.length - 1].close > fifteen[fifteen.length - 5].close * 1.001 ? 'UP'
@@ -585,11 +589,12 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
     breakout ? pass('Micro range break', 'Latest candle broke the local range') : fail('Micro range break', 'Waiting for micro breakout'),
     input.rvol >= 1.0 ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — breakout needs ≥1.0×`),
     stopSide ? pass('Stop geometry', `Stop ${round(stop, 2)} ${dir === 'BULL' ? 'below' : 'above'} entry ✓`) : fail('Stop geometry', `Stop ${round(stop, 2)} on wrong side of entry ${round(entry, 2)} — bad price data, skip`),
+    stopWidthOk ? pass('Stop width ≤1.5%', `${round(stopWidthPct * 100, 2)}% ✓ micro-range tight`) : fail('Stop width ≤1.5%', `${round(stopWidthPct * 100, 2)}% — macro swing, not a micro range; skip`),
     pass('VWAP context', `${selfInput.vwapAligned ? 'VWAP ✓' : 'VWAP (below — watch for reclaim)'} — informational`),
     ema1mCheck(input),
     spyTapeCheck(selfInput),
   ];
-  return signal('rs_continuation', selfInput, checklist, tradePlan, 'S3 RS continuation: micro range break + RS≥0.5% + RVOL≥1.0. Hard gates: breakout (self-determines direction), rsEdge, rvol, stopSide.');
+  return signal('rs_continuation', selfInput, checklist, tradePlan, 'S3 RS continuation: micro range break + RS≥0.5% + RVOL≥1.0 + stop ≤1.5%. Hard gates: breakout (self-determines direction), rsEdge, rvol, stopSide, stopWidthOk.');
 }
 
 export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
