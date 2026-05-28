@@ -56,12 +56,41 @@ export function getHtfContextFromCandles(candles: CandleSet): HtfContext {
   const h1Vwap = vwapLatest(h1);
   const direction = h1Ema9 > h1Ema21 ? 'BULL' : h1Ema9 < h1Ema21 ? 'BEAR' : 'NEUTRAL';
 
+  // Restrict zone detection to today's ET session only.
+  // Splits into premarket (last 4 bars, 8:30-9:30 AM ET) + session bars that grow through the day.
+  // This prevents inheriting unfilled FVGs / OBs from the prior session.
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const MARKET_OPEN_MIN = 9 * 60 + 30; // 9:30 AM ET in minutes
+
+  function etMinOfDay(isoTime: string): number {
+    const parts = new Date(isoTime)
+      .toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false })
+      .split(':');
+    return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+  }
+
+  const m15Today = m15.filter(
+    (c) => new Date(c.time).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === todayET,
+  );
+  const m15Premarket = m15Today.filter((c) => etMinOfDay(c.time) < MARKET_OPEN_MIN);
+  const m15Session   = m15Today.filter((c) => etMinOfDay(c.time) >= MARKET_OPEN_MIN);
+
+  // Last 4 premarket bars set the opening tide (8:30-9:30 AM ET, highest-volume premarket hour).
+  // Session bars accumulate as the day progresses: at 10 AM = 4+2, at noon = 4+10, at 3 PM = 4+22.
+  const premTide = m15Premarket.slice(-4);
+  const m15ForZones =
+    premTide.length >= 1
+      ? [...premTide, ...m15Session]   // opening tide + today's session (grows through the day)
+      : m15Session.length >= 4
+        ? m15Session                   // session-only if no premarket data available
+        : m15.slice(-26);              // early premarket fallback: last ~one session
+
   let m15Type: 'FVG' | 'OB' | null = null;
   let m15High: number | null = null;
   let m15Low: number | null = null;
   let m15InZone = false;
   if (direction !== 'NEUTRAL' && m15.length >= 20) {
-    const fvg = detectFvg(m15, 10);
+    const fvg = detectFvg(m15ForZones, 10);
     const key = direction === 'BULL' ? 'bullish' : 'bearish';
     const active = fvg[key].find((gap) => !gap.filled);
     if (active) {
@@ -69,7 +98,7 @@ export function getHtfContextFromCandles(candles: CandleSet): HtfContext {
       m15High = active.gapHigh;
       m15Low = active.gapLow;
     } else {
-      const ob = findOrderBlockZone(m15, direction, 1.3, 130);
+      const ob = findOrderBlockZone(m15ForZones, direction, 1.3, m15ForZones.length);
       if (ob) {
         m15Type = 'OB';
         m15High = ob.high;
