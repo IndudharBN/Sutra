@@ -421,26 +421,44 @@ function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT
   return Boolean(plan && plan.rr >= 1.5 && availablePaperNotional(settings, trades, accountBalance) > 0);
 }
 
-function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, spyTrend5m?: 'UP' | 'DOWN' | 'FLAT', cbSizeMult = 1.0): PaperTrade | null {
+function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, spyTrend5m?: 'UP' | 'DOWN' | 'FLAT', spyTrend15m?: 'UP' | 'DOWN' | 'FLAT', cbSizeMult = 1.0): PaperTrade | null {
   const plan = effectiveTradePlan(row, settings);
   if (!plan || plan.rr < 1.5) return null;
 
-  // Tide-based sizing: aligned=1.0×, counter=0.75×, FLAT=1.0× (S1/S2 already blocked upstream)
-  // Reversal strategies (S4/S5/S6) are exempt — counter-tide IS their setup.
+  // Tide-based sizing — two-tide model:
+  //   Both aligned        → 1.0× (max conviction)
+  //   5m counter, 15m ok  → S2/S3: 1.0× (5m divergence = RS proof); others: 0.75×
+  //   15m counter, 5m ok  → 0.75× (session structure is the dominant force)
+  //   Both counter        → 0.75× (S2/S3 already blocked upstream by isTideBlocked)
+  // Reversal strategies (S4/S5/S6) are fully exempt — counter-tide is their setup.
   const strategyId = row.primaryStrategy?.strategyId ?? null;
   const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
-  const tide = spyTrend5m;
   let tideMult = 1.0;
   let heatNote = '';
 
-  if (!isReversal && tide && tide !== 'FLAT') {
-    // Use Direction D (strategy self-determined) as primary — it is the actual trade direction.
-    // Fall back to row.direction (Option C) only when no strategy signal exists.
+  if (!isReversal) {
     const tradeDir = row.primaryStrategy?.direction ?? row.direction;
-    const aligned = (tradeDir === 'BULL' && tide === 'UP') || (tradeDir === 'BEAR' && tide === 'DOWN');
-    if (!aligned) {
+    const t5 = spyTrend5m;
+    const t15 = spyTrend15m;
+    const ok5m  = !t5  || t5  === 'FLAT' || (tradeDir === 'BULL' && t5  === 'UP') || (tradeDir === 'BEAR' && t5  === 'DOWN');
+    const ok15m = !t15 || t15 === 'FLAT' || (tradeDir === 'BULL' && t15 === 'UP') || (tradeDir === 'BEAR' && t15 === 'DOWN');
+
+    if (ok5m && ok15m) {
+      tideMult = 1.0; // both tides aligned — full size
+    } else if (!ok5m && ok15m) {
+      // 5m counter, 15m aligned: for S2/S3 the 5m divergence IS the RS confirmation
+      const rsStrats = new Set(['vwap_pullback', 'rs_continuation']);
+      if (rsStrats.has(strategyId ?? '')) {
+        tideMult = 1.0;
+        heatNote = ` [5m counter + 15m aligned → RS entry, full size]`;
+      } else {
+        tideMult = 0.75;
+        heatNote = ` [5m counter-tide → 75% size]`;
+      }
+    } else {
+      // 15m counter (with or without 5m counter): session structure opposes — reduce
       tideMult = 0.75;
-      heatNote = ` [Counter-tide (${tide}) → 75% size]`;
+      heatNote = ` [${!ok5m ? '5m+15m' : '15m'} counter-tide → 75% size]`;
     }
   }
 
@@ -1990,7 +2008,7 @@ export function ProTradeScannerScreen() {
       if (tradedSymbols.has(sym) || pending.has(sym) || firedInstantRef.current.has(sym)) return;
       if (row.earningsDays !== null && Math.abs(row.earningsDays) <= 1) return;
       if (!checkStrategyCircuitBreaker(row.primaryStrategy?.strategyId || row.symbol).ok) return;
-      if (isTideBlocked(row, snapshot.spyTrend5m, row.primaryStrategy ?? undefined)) return;
+      if (isTideBlocked(row, snapshot.spyTrend5m, snapshot.spyTrend15m, row.primaryStrategy ?? undefined)) return;
       const stoppedStratId = row.primaryStrategy?.strategyId ?? '';
       const stoppedStratDir = row.primaryStrategy?.direction ?? row.direction;
       if (stoppedTodaySet.has(`${sym}|${stoppedStratId}|${stoppedStratDir}`)) return;
@@ -2073,7 +2091,7 @@ export function ProTradeScannerScreen() {
         const row = snap.rows.find((r) => baseSymbol(r.symbol) === sym);
         if (!row || row.workflowStage !== 'trade_ready') { pending.delete(sym); continue; }
 
-        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance, snap.spyTrend5m);
+        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance, snap.spyTrend5m, snap.spyTrend15m);
         if (!trade) { pending.delete(sym); continue; }
 
         confirmedTrades.push(trade);
@@ -2216,7 +2234,7 @@ export function ProTradeScannerScreen() {
       const betaPortCheck = checkPortfolioBeta(paperTrades, row.beta ?? 1.0, approxNotional, accountBalance);
       if (!betaPortCheck.ok) { setApprovalMessage(betaPortCheck.reason!); return; }
     }
-    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.spyTrend5m, groupCbCheck.sizeMult);
+    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.spyTrend5m, snapshot?.spyTrend15m, groupCbCheck.sizeMult);
     if (!trade) {
       const plan = effectiveTradePlan(row, settings);
       if (!plan) {
@@ -2675,18 +2693,34 @@ export function ProTradeScannerScreen() {
     </div>
   );
 }
-function isTideBlocked(row: ProTradeRow, spyTrend: 'UP' | 'DOWN' | 'FLAT' | undefined, sig?: ProTradeRow['primaryStrategy']): boolean {
-  if (!sig || !spyTrend) return false;
+function isTideBlocked(
+  row: ProTradeRow,
+  spyTrend5m: 'UP' | 'DOWN' | 'FLAT' | undefined,
+  spyTrend15m: 'UP' | 'DOWN' | 'FLAT' | undefined,
+  sig?: ProTradeRow['primaryStrategy'],
+): boolean {
+  if (!sig) return false;
 
   const strategyId = sig.strategyId;
   const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
   if (isReversal) return false;
 
-  // FLAT tide: S1 (ORB) needs directional SPY — contested range without trend context.
-  // S2 (VWAP pullback) runs its own slope gate (≥0.1%) and fires best when stock shows RS vs flat tape.
-  if (spyTrend === 'FLAT' && strategyId === 'orb_retest') return true;
+  // S1 ORB: flat 5m tape → no directional context for a breakout
+  if (spyTrend5m === 'FLAT' && strategyId === 'orb_retest') return true;
 
-  // Counter-tide signals are NOT blocked — 0.75× tideMult in buildPaperTrade is the penalty.
-  // Blocking AND sizing-penalising was double punishment; sizing alone is sufficient.
+  // S2/S3: block only when BOTH tides oppose self-direction.
+  // One tide opposing → reduce size (handled in buildPaperTrade).
+  // 5m counter + 15m aligned for S2/S3 is an RS signal → full size, never blocked.
+  const BOTH_TIDE_BLOCK = new Set(['vwap_pullback', 'rs_continuation']);
+  if (BOTH_TIDE_BLOCK.has(strategyId)) {
+    const tradeDir = sig.direction;
+    if (tradeDir === 'NEUTRAL') return false;
+    // If either tide is absent or flat, one-tide rule applies — don't block
+    if (!spyTrend5m || spyTrend5m === 'FLAT' || !spyTrend15m || spyTrend15m === 'FLAT') return false;
+    const counter5m = (tradeDir === 'BULL' && spyTrend5m === 'DOWN') || (tradeDir === 'BEAR' && spyTrend5m === 'UP');
+    const counter15m = (tradeDir === 'BULL' && spyTrend15m === 'DOWN') || (tradeDir === 'BEAR' && spyTrend15m === 'UP');
+    return counter5m && counter15m;
+  }
+
   return false;
 }
