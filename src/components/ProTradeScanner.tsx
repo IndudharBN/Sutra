@@ -2707,7 +2707,7 @@ function isTideBlocked(
   // S2/S3: block only when BOTH tides oppose self-direction.
   // One tide opposing → reduce size (handled in buildPaperTrade).
   // 5m counter + 15m aligned for S2/S3 is an RS signal → full size, never blocked.
-  const BOTH_TIDE_BLOCK = new Set(['vwap_pullback', 'rs_continuation']);
+  const BOTH_TIDE_BLOCK = new Set(['vwap_pullback', 'rs_continuation', 'flag_break', 'vwap15m_pullback']);
   if (BOTH_TIDE_BLOCK.has(strategyId)) {
     const tradeDir = sig.direction;
     if (tradeDir === 'NEUTRAL') return false;
