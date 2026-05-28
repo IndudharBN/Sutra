@@ -444,12 +444,16 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
     const ok15m = !t15 || t15 === 'FLAT' || (tradeDir === 'BULL' && t15 === 'UP') || (tradeDir === 'BEAR' && t15 === 'DOWN');
 
     if (ok5m && ok15m) {
-      tideMult = 1.0; // both tides aligned — full size
+      tideMult = 1.0; // both aligned — full size
+    } else if (!ok5m && ok15m) {
+      // 5m counter, 15m aligned: immediate tape fights entry — steeper cut than session headwind
+      tideMult = 0.5;
+      heatNote = ` [5m counter-tide → 50% size]`;
     } else {
-      // Any tide opposing → reduce. One tide against = active pressure at entry regardless of direction.
-      // Full size requires both tides confirmed. Block (upstream) is reserved for both tides opposing on S2/S3.
+      // 15m counter (5m aligned), or both counter (S2/S3 already blocked upstream):
+      // tape supports the entry moment but session structure is the headwind
       tideMult = 0.75;
-      const which = !ok5m && !ok15m ? '5m+15m' : !ok5m ? '5m' : '15m';
+      const which = !ok5m ? '5m+15m' : '15m';
       heatNote = ` [${which} counter-tide → 75% size]`;
     }
   }
