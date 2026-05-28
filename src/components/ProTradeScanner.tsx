@@ -274,10 +274,14 @@ function paperPnl(trade: PaperTrade, exitPrice: number) {
 
 function closePaperTrade(trade: PaperTrade, exitPrice: number, outcome: PaperTrade['outcome'], closedAt = new Date().toISOString()): PaperTrade {
   const result = paperPnl(trade, exitPrice);
+  // 'Stop' implies a losing exit. If the exit is profitable (e.g. VWAP re-cross structural
+  // exit while price is still above entry), relabel as 'Manual' — a discretionary/structural
+  // close rather than a hard stop hit. Prevents Stop + pnl>0 mismatch in analytics.
+  const correctedOutcome: PaperTrade['outcome'] = outcome === 'Stop' && result.pnl > 0 ? 'Manual' : outcome;
   return {
     ...trade,
     status: 'Closed',
-    outcome,
+    outcome: correctedOutcome,
     exitPrice: Number(exitPrice.toFixed(2)),
     pnl: result.pnl,
     pnlPercent: result.pnlPercent,
