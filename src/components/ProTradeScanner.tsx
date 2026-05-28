@@ -17,7 +17,7 @@ import {
 } from '../features/protrade/workflowTypes';
 import { stampGroupClassification } from '../features/protrade/confluenceClassifier';
 import { baseSymbol } from '../lib/symbols';
-import { clearAllTrades, loadAllTrades, persistTrade, todayET, tradeDateET } from '../lib/tradeStore';
+import { clearAllTrades, loadAllTrades, persistTrade, syncPendingTrades, todayET, tradeDateET } from '../lib/tradeStore';
 import { fetchBars } from '../lib/alpacaClient';
 import { ProTradeCandlePreview } from './ProTradeCandlePreview';
 import { TradingViewChartModal, type TradingViewInterval } from './TradingViewChart';
@@ -1786,13 +1786,17 @@ export function ProTradeScannerScreen() {
   }, [rows, watchlist, paperTrades]);
 
   // Auto-advance Monitor date when the page is left open overnight.
-  // Checks every 5 minutes; resets to today if the date has rolled over.
+  // Only advances if the user was already on today's date and the day rolls over.
+  // Does NOT reset a past date the user manually selected.
   React.useEffect(() => {
-    const tick = () => { const d = todayET(); if (monitorDate !== d) setMonitorDate(d); };
-    tick(); // immediate check on mount
-    const id = setInterval(tick, 5 * 60_000);
+    const id = setInterval(() => {
+      setMonitorDate((current) => {
+        const today = todayET();
+        return current === today ? today : current;
+      });
+    }, 5 * 60_000);
     return () => clearInterval(id);
-  }, [monitorDate]);
+  }, []);
 
   // Load all trades from server on mount (server is source of truth).
   const serverLoadDone = React.useRef(false);
@@ -1844,6 +1848,12 @@ export function ProTradeScannerScreen() {
         // Server unreachable — fall back to whatever LS has
         serverLoadDone.current = true;
       });
+  }, []);
+
+  // Periodic sync: push any LS-only trades to server every 2 minutes (recovers from server-down sessions).
+  React.useEffect(() => {
+    const id = setInterval(() => { void syncPendingTrades(); }, 2 * 60_000);
+    return () => clearInterval(id);
   }, []);
 
   // Persist to localStorage + server on every change (skip very first render to avoid writing stale localStorage to server)
@@ -2063,6 +2073,7 @@ export function ProTradeScannerScreen() {
 
         confirmedTrades.push(trade);
         pending.delete(sym);
+        firedInstantRef.current.add(sym); // block re-entry until trade closes (guards stale-state race)
       }
 
       setPendingConfirmCount(pending.size);
