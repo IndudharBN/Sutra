@@ -445,20 +445,12 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
 
     if (ok5m && ok15m) {
       tideMult = 1.0; // both tides aligned — full size
-    } else if (!ok5m && ok15m) {
-      // 5m counter, 15m aligned: for S2/S3 the 5m divergence IS the RS confirmation
-      const rsStrats = new Set(['vwap_pullback', 'rs_continuation']);
-      if (rsStrats.has(strategyId ?? '')) {
-        tideMult = 1.0;
-        heatNote = ` [5m counter + 15m aligned → RS entry, full size]`;
-      } else {
-        tideMult = 0.75;
-        heatNote = ` [5m counter-tide → 75% size]`;
-      }
     } else {
-      // 15m counter (with or without 5m counter): session structure opposes — reduce
+      // Any tide opposing → reduce. One tide against = active pressure at entry regardless of direction.
+      // Full size requires both tides confirmed. Block (upstream) is reserved for both tides opposing on S2/S3.
       tideMult = 0.75;
-      heatNote = ` [${!ok5m ? '5m+15m' : '15m'} counter-tide → 75% size]`;
+      const which = !ok5m && !ok15m ? '5m+15m' : !ok5m ? '5m' : '15m';
+      heatNote = ` [${which} counter-tide → 75% size]`;
     }
   }
 
