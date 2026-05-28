@@ -453,6 +453,7 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
   if (notional <= 0) return null;
   // Fractional shares — 4 decimal places, no floor to 1
   const quantity = Math.round((notional / plan.entry) * 10000) / 10000;
+  if (quantity <= 0) return null; // fp epsilon: budgetCap near-zero passes notional guard but rounds qty to 0
   return {
     id: `paper-${row.symbol}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     symbol: row.symbol,
