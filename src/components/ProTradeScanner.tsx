@@ -432,7 +432,7 @@ function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTr
   //   Both counter        → 0.75× (S2/S3 already blocked upstream by isTideBlocked)
   // Reversal strategies (S4/S5/S6) are fully exempt — counter-tide is their setup.
   const strategyId = row.primaryStrategy?.strategyId ?? null;
-  const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
+  const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest';
   let tideMult = 1.0;
   let heatNote = '';
 
@@ -2698,7 +2698,7 @@ function isTideBlocked(
   if (!sig) return false;
 
   const strategyId = sig.strategyId;
-  const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest' || strategyId === 'mss_breakout';
+  const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest';
   if (isReversal) return false;
 
   // S1 ORB: flat 5m tape → no directional context for a breakout
