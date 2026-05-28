@@ -413,10 +413,12 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
     ? (range?.high ?? entry) - input.atr20 * 1.0
     : (range?.low ?? entry) + input.atr20 * 1.0;
   const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel), input.atr20);
-  // 9:45–10:00 AM ET: first 15 min after blackout — ORB barely formed, higher noise; require stronger RVOL
+  // Hard gate: no S1 entries before 10:15 AM ET — ORB structure unreliable, H1 bar not closed,
+  // institutional opening flow not absorbed. earlySession (9:45–10:15) still requires higher RVOL.
   const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
   const etMins = etNow.getHours() * 60 + etNow.getMinutes();
-  const earlySession = etMins >= 9 * 60 + 45 && etMins < 10 * 60;
+  const timeGateOk = etMins >= 10 * 60 + 15;
+  const earlySession = etMins >= 9 * 60 + 45 && etMins < 10 * 60 + 15;
   const rvolMin = earlySession ? 1.5 : 1.0;
   const risk = Math.abs(entry - stop);
   const orRange = range ? range.high - range.low : 0;
@@ -430,7 +432,7 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const preferredTarget = dir === 'BULL' ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
   const t2 = dir === 'BULL' ? Math.max(measuredMove, preferredTarget) : Math.min(measuredMove, preferredTarget);
-  const tradePlan = selfDir && range && confirmedBreak && retest && orbWidthOk && input.rvol >= rvolMin ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
+  const tradePlan = selfDir && range && confirmedBreak && retest && orbWidthOk && input.rvol >= rvolMin && timeGateOk ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from ORB break`) : fail('Directional bias', 'Price inside ORB — no breakout yet'),
     htfTrendContext(selfInput),
@@ -438,7 +440,8 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
     orbWidthOk ? pass('ORB width ≥0.5%', `${round(orbWidthPct * 100, 2)}% ✓`) : fail('ORB width ≥0.5%', `${round(orbWidthPct * 100, 2)}% — degenerate range: no institutional positioning`),
     confirmedBreak ? pass('ORB Breakout', `Clear of noise (+${round(breakoutDistance, 2)})`) : fail('ORB Breakout', `Inside noise floor (${round(minBreakout, 2)})`),
     retest ? pass('Retest hold', 'Breakout level retested and held') : fail('Retest hold', 'Waiting for controlled retest'),
-    input.rvol >= rvolMin ? pass(`RVOL ≥${rvolMin}×`, `${round(input.rvol, 2)}× ✓`) : fail(`RVOL ≥${rvolMin}×`, `${round(input.rvol, 2)}× — ${earlySession ? 'early session (9:45–10:00) requires ≥1.5×' : 'ORB breakout requires RTH volume confirmation'}`),
+    timeGateOk ? pass('Time gate ≥10:15 AM', 'ORB structure settled ✓') : fail('Time gate ≥10:15 AM', `${etNow.getHours()}:${String(etNow.getMinutes()).padStart(2, '0')} ET — wait for 10:15 AM (H1 close, opening flow absorbed)`),
+    input.rvol >= rvolMin ? pass(`RVOL ≥${rvolMin}×`, `${round(input.rvol, 2)}× ✓`) : fail(`RVOL ≥${rvolMin}×`, `${round(input.rvol, 2)}× — ${earlySession ? 'early session (9:45–10:15) requires ≥1.5×' : 'ORB breakout requires RTH volume confirmation'}`),
     pass('ADR room', `${adrExhausted(input.candles.five, input.atr20) ? '>80% ATR used — watch' : '< 80% ATR used ✓'} — informational`),
     pass('VWAP context', `${selfInput.vwapAligned ? 'VWAP ✓' : 'early session'} — informational`),
     ema1mCheck(input),
