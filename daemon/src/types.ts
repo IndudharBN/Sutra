@@ -14,7 +14,7 @@ export type StrategyId =
   | 'range_reversion'
   | 'sniper_1m';
 
-export type SignalGroup = 'GOLD' | 'BLUE' | 'TREND' | 'FVG' | 'UNCLASSIFIED';
+export type SignalGroup = 'GOLD' | 'BLUE' | 'TREND' | 'FVG' | 'BREAKOUT' | 'PULLBACK' | 'MOMENTUM' | 'SIDEWAYS' | 'UNCLASSIFIED';
 
 export interface PaperTrade {
   id: string;
