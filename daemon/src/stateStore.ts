@@ -26,7 +26,7 @@ function defaultState(): DaemonState {
   };
 }
 
-function applyDayRoll(state: DaemonState): DaemonState {
+export function applyDayRoll(state: DaemonState): DaemonState {
   const today = toETDate();
   if (state.riskState.dailyDate === today) return state;
 
