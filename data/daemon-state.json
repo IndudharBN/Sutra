@@ -1,0 +1,23 @@
+{
+  "riskState": {
+    "dailyDate": "2026-05-29",
+    "dailyStartBalance": 0,
+    "dailyRealizedPnl": 0,
+    "strategyCb": {},
+    "groupCb": {}
+  },
+  "riskSettings": {
+    "riskPerTradePct": 0.03,
+    "dailyLossLimitPct": 0.08,
+    "maxPositions": 5,
+    "cbLossThreshold": 3,
+    "disabledStrategies": []
+  },
+  "firedToday": [],
+  "dayWatchlist": {
+    "date": "",
+    "symbols": []
+  },
+  "eodFiredDate": "",
+  "universeBuiltAt": ""
+}

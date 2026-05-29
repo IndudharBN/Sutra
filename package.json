@@ -11,11 +11,14 @@
     "test": "vitest run",
     "t212:bridge": "node scripts/trading212-local-bridge.mjs",
     "db:apply": "node scripts/apply-supabase-schema.mjs",
-    "trade-server": "node trade-server.mjs"
+    "trade-server": "node trade-server.mjs",
+    "build:daemon": "tsc -p daemon/tsconfig.daemon.json",
+    "daemon": "node daemon/dist/index.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.4",
     "@vitejs/plugin-react": "^4.3.4",
+    "dotenv": "^17.4.2",
     "lightweight-charts": "^5.1.0",
     "lucide-react": "^0.468.0",
     "motion": "^11.15.0",
