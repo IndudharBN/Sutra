@@ -2,6 +2,7 @@ import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot } from './engine/proT
 import type { ProTradeSnapshot, ProTradeRow } from './engine/proTradeScannerApi';
 import { alpacaBarStream } from './alpacaBarStream';
 import { getState } from './stateStore';
+import { emit } from './httpServer';
 
 let currentSnapshot: ProTradeSnapshot | null = null;
 
@@ -34,7 +35,14 @@ export async function runFullScan(): Promise<void> {
   hotSetSymbols = newHotSet;
 
   const qualified = snapshot.rows.filter((r) => r.qualified).length;
-  console.log(`[scan] Full done — ${snapshot.rows.length} rows, ${qualified} qualified, hot-set ${newHotSet.length}, SPY 5m=${snapshot.spyTrend5m} 15m=${snapshot.spyTrend15m} regime=${snapshot.regime}`);
+  console.log(`[scan] Full done — ${snapshot.rows.length} rows, ${qualified} qualified, hot-set ${newHotSet.length}, SPY 5m=${snapshot.spyTrend5m} 15m=${snapshot.spyTrend15m}`);
+  emit('snapshot_update', {
+    rows: snapshot.rows,
+    spyTrend5m: snapshot.spyTrend5m,
+    spyTrend15m: snapshot.spyTrend15m,
+    regime: snapshot.regime,
+    fetchedAt: snapshot.fetchedAt,
+  });
 }
 
 export async function runHotSetScan(): Promise<void> {

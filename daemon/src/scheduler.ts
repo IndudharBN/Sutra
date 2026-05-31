@@ -8,6 +8,7 @@ import { checkGroupCircuitBreaker, checkStrategyCircuitBreaker, checkDailyLossLi
 import { checkSectorConcentration, checkPortfolioBeta } from './portfolioRisk';
 import { getPaperAccount, getPaperPositions } from './alpacaBroker';
 import { env } from './env';
+import { emit } from './httpServer';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -83,6 +84,8 @@ async function monitorLoop(): Promise<void> {
       if (before.status === 'Open' && after.status === 'Closed' && after.pnl !== undefined) {
         recordGroupTradeResult((after.signalGroup ?? 'UNCLASSIFIED') as import('./types').SignalGroup, after.pnl);
         recordTradeResult(after.strategyId ?? 'unknown', after.pnl, accountBalance);
+        emit('trade_closed', after);
+        emit('risk_update', { dailyPnl: getState().riskState.dailyRealizedPnl });
         console.log(`[monitor] ${after.symbol} closed — ${after.outcome} pnl=$${after.pnl?.toFixed(2)}`);
       }
     }
@@ -159,6 +162,7 @@ function tryFireTrades(): void {
 
     trades.push(newTrade);
     tradesFired = true;
+    emit('trade_opened', newTrade);
     console.log(`[executor] FIRE ${row.symbol} ${sig.strategyId} ${row.direction} entry=${newTrade.entry} stop=${newTrade.stop} target=${newTrade.target} qty=${newTrade.quantity} notional=$${newTrade.notional.toFixed(0)}`);
 
     // Mark fired so we don't double-fire this session
