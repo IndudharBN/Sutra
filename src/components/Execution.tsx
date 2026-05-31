@@ -1,7 +1,8 @@
 import React from 'react';
 import { TrendingDown, TrendingUp, RefreshCcw } from 'lucide-react';
 import { getPaperAccount, getPaperPositions, type AlpacaPosition, type AlpacaAccount } from '../lib/alpacaBroker';
-import { loadTrades, todayET } from '../lib/tradeStore';
+import { todayET } from '../lib/tradeStore';
+import { daemonClient } from '../lib/daemonClient';
 import type { Order, Position } from '../types';
 
 interface PaperTrade {
@@ -168,7 +169,7 @@ function AlpacaOrdersScreen() {
 
   React.useEffect(() => {
     setLoadingTrades(true);
-    void loadTrades<PaperTrade>(date).then((result) => { setTrades(result); setLoadingTrades(false); })
+    void daemonClient.getTrades(date).then((result) => { setTrades(result as PaperTrade[]); setLoadingTrades(false); })
       .catch(() => setLoadingTrades(false));
   }, [date]);
 

@@ -11,7 +11,6 @@
     "test": "vitest run",
     "t212:bridge": "node scripts/trading212-local-bridge.mjs",
     "db:apply": "node scripts/apply-supabase-schema.mjs",
-    "trade-server": "node trade-server.mjs",
     "build:daemon": "tsc -p daemon/tsconfig.daemon.json",
     "daemon": "node daemon/dist/index.js",
     "daemon:start": "mkdir -p logs && pm2 start ecosystem.config.cjs",

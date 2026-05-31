@@ -1,7 +1,7 @@
 import React from 'react';
 import { Activity, AlertTriangle, BarChart, CheckCircle2, Shield, Wallet, TrendingUp, Clock, Zap, RefreshCcw, Lock } from 'lucide-react';
 import { getRiskSettings, saveRiskSettings, getRiskSummary, type RiskSettings } from '../lib/riskManager';
-import { loadAllTrades } from '../lib/tradeStore';
+import { daemonClient } from '../lib/daemonClient';
 import { getPaperAccount } from '../lib/alpacaBroker';
 import { STRATEGY_LABELS, STRATEGY_CODES, type StrategyId } from '../features/protrade/workflowTypes';
 import { env, hasAlpacaConfig } from '../lib/env';
@@ -57,8 +57,8 @@ function toETDate(iso: string): string {
 function usePaperStats() {
   const [trades, setTrades] = React.useState<PaperTradeRecord[]>([]);
   React.useEffect(() => {
-    loadAllTrades<PaperTradeRecord>()
-      .then((merged) => setTrades(Array.isArray(merged) ? merged : []))
+    daemonClient.getTrades()
+      .then((merged) => setTrades(Array.isArray(merged) ? merged as PaperTradeRecord[] : []))
       .catch(() => setTrades([]));
   }, []);
 
