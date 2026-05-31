@@ -9,42 +9,84 @@ An intraday day-trading terminal built in React + TypeScript. Combines a live mu
 | Layer | Technology |
 |---|---|
 | Frontend | React 18, TypeScript, Tailwind CSS 3.4, Vite 6 |
+| Daemon | Node.js process — scanner engine, risk manager, trade execution, REST + WebSocket |
 | Market Data | Alpaca IEX feed (bars, snapshots, news, WebSocket stream) |
 | Paper Execution | Alpaca Paper Trading API (bracket orders) |
-| Trade Persistence | Local Node.js JSON file server (`trade-server.mjs`) |
+| Trade Persistence | `data/trades.json` — written by daemon, survives browser refreshes and reboots |
+| Process Manager | pm2 — auto-restarts on crash, auto-starts on Windows login |
 | Charting | TradingView widget + lightweight-charts (equity curve) |
 
 ---
 
 ## Running Locally
 
+### First-time setup
+
 ```bash
 npm install
-cp .env.example .env.local   # fill in Alpaca keys
-npm run dev                   # starts Vite (port 3006) + trade server (port 3009) together
-```
+npm install -g pm2 pm2-windows-startup
 
-The Vite dev server starts `trade-server.mjs` automatically as a child process. No second terminal needed.
+# Daemon env vars — copy and fill in your Alpaca paper keys
+copy daemon\.env.daemon.example daemon\.env.daemon
+
+# Build the daemon
+npm run build:daemon
+
+# Register pm2 to auto-start on Windows login (run once)
+pm2-startup install
+
+# Start both the daemon and the UI
+npm run daemon:start
+```
 
 Open: `http://localhost:3006`
 
-### Running the trade server standalone (optional)
+### Day-to-day
+
+Nothing. Both processes start automatically when Windows starts. If you need to manually interact:
 
 ```bash
-npm run trade-server
+npm run daemon:status    # check daemon is running
+npm run daemon:logs      # tail live logs
+npm run daemon:restart   # rebuild daemon + restart (after code changes)
+pm2 restart sutra-ui     # restart Vite UI (after UI code changes)
 ```
 
-Trade history is written to `data/trades.json` and survives browser refreshes.
+### One-time migration from localStorage (existing installs only)
+
+If you have existing trades in the browser, export them before the first daemon start:
+
+1. Open the Sutra tab in Chrome, open DevTools Console, run:
+   ```js
+   copy(JSON.stringify({
+     trades:    JSON.parse(localStorage.getItem('sutra.protrade.paperTrades.v1') || '[]'),
+     riskState: JSON.parse(localStorage.getItem('sutra.riskManager.v2')           || '{}'),
+     settings:  JSON.parse(localStorage.getItem('sutra.riskSettings.v1')          || '{}'),
+     watchlist: JSON.parse(localStorage.getItem('sutra.dayWatchlist.v1')           || '{}'),
+   }, null, 2))
+   ```
+2. Paste the clipboard contents into `scripts/ls-export.json`
+3. Run: `npm run migrate`
 
 ---
 
 ## Environment Variables
 
-Copy `.env.example` to `.env.local`:
+Two env files — one for the React UI, one for the daemon.
 
+**`daemon/.env.daemon`** (required — daemon won't start without it):
 ```text
-VITE_ALPACA_KEY          # Alpaca API key ID  (paper account)
-VITE_ALPACA_SECRET       # Alpaca API secret key
+ALPACA_KEY=            # Alpaca paper API key ID
+ALPACA_SECRET=         # Alpaca paper API secret
+ALPACA_BASE_URL=https://paper-api.alpaca.markets
+DAEMON_PORT=3001
+DAEMON_AUTO_EXECUTE=false   # set to true to enable auto-trade firing
+```
+
+**`.env.local`** (optional — only needed if React components call Alpaca directly):
+```text
+VITE_ALPACA_KEY          # same paper key
+VITE_ALPACA_SECRET       # same paper secret
 VITE_ALPACA_DATA_URL     # optional — defaults to https://data.alpaca.markets
 VITE_APP_NAME            # display name (default: Sutra)
 ```
@@ -187,11 +229,30 @@ Stocks at `forming`, `confirmed`, `locked`, or `trade_ready` stage are subscribe
 
 ---
 
+## Daemon Architecture
+
+The daemon (`daemon/src/`) is a persistent Node.js process (pm2) that runs independently of the browser:
+
+```
+daemon/src/
+  index.ts            # entry point — loads state, starts HTTP + scheduler
+  httpServer.ts       # Express REST API (port 3001) + WebSocket push (/ws)
+  scanLoop.ts         # full scan (60s) + hot-set scan (20s)
+  scheduler.ts        # trade firing, EOD close, day-roll, circuit breakers
+  alpacaBarStream.ts  # Alpaca real-time WebSocket bar stream
+  engine/             # strategy evaluations, trade building, monitoring
+  riskManager.ts      # daily loss limit, circuit breakers, position sizing
+  stateStore.ts       # in-memory state with JSON persistence
+```
+
+The React UI connects via:
+- `GET /api/state` — initial snapshot on load
+- `ws://localhost:3001/ws` — push events (`snapshot_update`, `trade_opened`, `trade_closed`, etc.)
+- REST calls for manual actions (paper trade, close, watchlist, unpause)
+
 ## Trade Persistence
 
-Trades are stored in `data/trades.json` via the local trade server. On every state change, changed trades are POSTed to the server. localStorage is kept in sync as an immediate fallback.
-
-On browser startup, the app loads all server trades and merges them with any localStorage-only trades.
+Trades are written to `data/trades.json` by the daemon on every state change. The file survives browser refreshes, browser close, and system reboots. localStorage is no longer used for trade storage.
 
 ---
 
@@ -222,33 +283,49 @@ The Performance tab tracks:
 ## Key Files
 
 ```
+daemon/src/
+  index.ts                   # Daemon entry point
+  httpServer.ts              # REST API + WebSocket server (port 3001)
+  scanLoop.ts                # Full + hot-set scan orchestration
+  scheduler.ts               # Trade firing, EOD, day-roll, circuit breakers
+  alpacaBarStream.ts         # Alpaca real-time WebSocket bar stream (Node.js)
+  engine/
+    proTradeScannerApi.ts    # Universe fetch, strategy evaluation, snapshot build
+    buildTrade.ts            # Position sizing, tide/beta multipliers
+    monitorTrades.ts         # Stop/target monitoring, trailing stop logic
+  riskManager.ts             # Daily loss limit, circuit breakers
+  stateStore.ts              # In-memory state + JSON persistence
+
 src/
   components/
-    ProTradeScanner.tsx      # Main scanner UI, auto-execute, paper trade monitor
+    ProTradeScanner.tsx      # Main scanner UI + paper trade monitor (display only)
     Execution.tsx            # Orders tab (Alpaca positions, filled orders)
     Configuration.tsx        # Performance analytics, risk settings
   features/protrade/
-    strategyEngine.ts        # All 7 strategy evaluations, stop/target logic
-    proTradeScannerApi.ts    # Scanner snapshot fetch, direction logic, workflow stages
-    workflowTypes.ts         # Shared types: WorkflowStage, StrategyId, TradePlan
+    strategyEngine.ts        # Strategy type definitions and signal types
+    proTradeScannerApi.ts    # Browser-side types (ProTradeRow, ProTradeSnapshot)
+    workflowTypes.ts         # WorkflowStage, StrategyId, TradePlan
   features/marketRegime/
     marketRegimeLogic.ts     # SPY EMA200 + VIX regime classification
   lib/
+    daemonClient.ts          # REST client for daemon (http://localhost:3001)
+    daemonWs.ts              # WebSocket singleton for daemon push events
     alpacaBroker.ts          # Paper bracket orders, positions, fills
-    alpacaClient.ts          # Market data: bars, snapshots, news, WebSocket
-    alpacaBarStream.ts       # WebSocket real-time bar subscriptions
-    riskManager.ts           # Daily loss limit, circuit breaker, position sizing
-    tradeStore.ts            # Server-side trade persistence client
-trade-server.mjs             # Local Node.js HTTP server — reads/writes data/trades.json
-data/trades.json             # Trade history (auto-created, gitignored)
+    alpacaClient.ts          # Market data: bars, snapshots, news
+    tradeStore.ts            # Date utilities (todayET, tradeDateET)
+
+ecosystem.config.cjs         # pm2 process config (daemon + UI)
+data/trades.json             # Trade history — written by daemon
+data/daemon-state.json       # Risk state, watchlist, circuit breakers — written by daemon
 ```
 
 ---
 
 ## API Rate Limit Notes (Alpaca IEX Free Tier)
 
+- All market data calls are made by the daemon — the browser makes zero API requests
 - Snapshot endpoint (`/v2/stocks/snapshots`) has the strictest rate limit
 - Snapshot TTL is 30s — hot-set (20s cycle) reuses cached data on alternate cycles
 - Bar cache is evicted on WebSocket bar close; snapshot cache is preserved
-- Run only **one browser tab** at a time — each tab runs an independent scan cycle
-- Stop any running `bt_run.mjs` or `diag_run.mjs` processes during live scanning
+- Multiple browser tabs are now safe — they all read from the daemon, no duplicate scan cycles
+- Stop any running `bt_run.mjs` or `diag_run.mjs` processes during live scanning (they hit the same rate limits)
