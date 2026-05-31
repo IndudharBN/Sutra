@@ -1,11 +1,8 @@
 import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
-import { placePaperBracketOrder, closeAllPaperPositions, closePaperPosition, getPaperAccount, getPaperPositions, getRecentFilledOrders } from '../lib/alpacaBroker';
-import { computeNotional, computePositionSize, checkDailyLossLimit, checkStrategyCircuitBreaker, checkGroupCircuitBreaker, recordTradeResult, recordGroupTradeResult, initDailyBalance, getRiskSummary, getPausedStrategies, getGroupCbSummary, migrateCbKeys, unpauseCbStrategy, unpauseGroupCb } from '../lib/riskManager';
-import { betaAdjustedSizingMult, checkSectorConcentration, checkPortfolioBeta } from '../lib/portfolioRisk';
-import { alpacaBarStream } from '../lib/alpacaBarStream';
-import { clearBarCache } from '../lib/alpacaClient';
-import { fetchProTradeScannerSnapshot, fetchHotSetSnapshot, clearUniverseCache, type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
+import { placePaperBracketOrder, closePaperPosition, getPaperAccount } from '../lib/alpacaBroker';
+import { computeNotional } from '../lib/riskManager';
+import { type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
 import {
   STRATEGY_CODES,
   STRATEGY_LABELS,
@@ -15,13 +12,14 @@ import {
   type StrategyId,
   type WorkflowStage,
 } from '../features/protrade/workflowTypes';
-import { stampGroupClassification } from '../features/protrade/confluenceClassifier';
 import { baseSymbol } from '../lib/symbols';
-import { clearAllTrades, loadAllTrades, persistTrade, syncPendingTrades, todayET, tradeDateET } from '../lib/tradeStore';
-import { fetchBars } from '../lib/alpacaClient';
+import { todayET, tradeDateET } from '../lib/tradeStore';
 import { ProTradeCandlePreview } from './ProTradeCandlePreview';
 import { TradingViewChartModal, type TradingViewInterval } from './TradingViewChart';
 import type { Signal } from '../types';
+import { daemonClient } from '../lib/daemonClient';
+import { daemonWs } from '../lib/daemonWs';
+import type { DaemonRisk } from '../lib/daemonClient';
 
 type StageFilter = WorkflowStage;
 
@@ -421,83 +419,6 @@ function canPaperTradeRow(row: ProTradeRow, settings: ProTradeSettings = DEFAULT
   return Boolean(plan && plan.rr >= 1.5 && availablePaperNotional(settings, trades, accountBalance) > 0);
 }
 
-function buildPaperTrade(row: ProTradeRow, settings: ProTradeSettings, currentTrades: PaperTrade[] = [], openedAt = new Date().toISOString(), accountBalance = 100_000, spyTrend5m?: 'UP' | 'DOWN' | 'FLAT', spyTrend15m?: 'UP' | 'DOWN' | 'FLAT', cbSizeMult = 1.0): PaperTrade | null {
-  const plan = effectiveTradePlan(row, settings);
-  if (!plan || plan.rr < 1.5) return null;
-
-  // Tide-based sizing — two-tide model:
-  //   Both aligned        → 1.0× (max conviction)
-  //   5m counter, 15m ok  → S2/S3: 1.0× (5m divergence = RS proof); others: 0.75×
-  //   15m counter, 5m ok  → 0.75× (session structure is the dominant force)
-  //   Both counter        → 0.75× (S2/S3 already blocked upstream by isTideBlocked)
-  // Reversal strategies (S4/S5/S6) are fully exempt — counter-tide is their setup.
-  const strategyId = row.primaryStrategy?.strategyId ?? null;
-  const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest';
-  let tideMult = 1.0;
-  let heatNote = '';
-
-  if (!isReversal) {
-    const tradeDir = row.primaryStrategy?.direction ?? row.direction;
-    const t5 = spyTrend5m;
-    const t15 = spyTrend15m;
-    const ok5m  = !t5  || t5  === 'FLAT' || (tradeDir === 'BULL' && t5  === 'UP') || (tradeDir === 'BEAR' && t5  === 'DOWN');
-    const ok15m = !t15 || t15 === 'FLAT' || (tradeDir === 'BULL' && t15 === 'UP') || (tradeDir === 'BEAR' && t15 === 'DOWN');
-
-    if (ok5m && ok15m) {
-      tideMult = 1.0; // both aligned — full size
-    } else if (!ok5m && ok15m) {
-      // 5m counter, 15m aligned: immediate tape fights entry — steeper cut than session headwind
-      tideMult = 0.5;
-      heatNote = ` [5m counter-tide → 50% size]`;
-    } else {
-      // 15m counter (5m aligned), or both counter (S2/S3 already blocked upstream):
-      // tape supports the entry moment but session structure is the headwind
-      tideMult = 0.75;
-      const which = !ok5m ? '5m+15m' : '15m';
-      heatNote = ` [${which} counter-tide → 75% size]`;
-    }
-  }
-
-  const betaMult = betaAdjustedSizingMult(row.beta);
-  if (betaMult < 0.99) heatNote += ` [β${row.beta.toFixed(1)} → ${(betaMult * 100).toFixed(0)}% size]`;
-  const effectiveMult = tideMult * betaMult;
-  const signalGroup = row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED';
-  const sigGroupSizeMult = row.primaryStrategy?.groupSizeMult ?? 1.0;
-  // Notional-first: min(risk-proportional $, group cap $), then tide/beta/CB adjustments
-  const baseNotional = computeNotional(accountBalance, plan.entry, plan.stop, signalGroup, sigGroupSizeMult);
-  const adjustedNotional = baseNotional * effectiveMult * cbSizeMult;
-  const budgetCap = availablePaperNotional(settings, currentTrades, accountBalance);
-  const notional = Math.min(budgetCap, adjustedNotional);
-  if (notional <= 0) return null;
-  // Fractional shares — 4 decimal places, no floor to 1
-  const quantity = Math.round((notional / plan.entry) * 10000) / 10000;
-  if (quantity <= 0) return null; // fp epsilon: budgetCap near-zero passes notional guard but rounds qty to 0
-  return {
-    id: `paper-${row.symbol}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    symbol: row.symbol,
-    company: row.company,
-    strategyId,
-    strategyCode: strategyId ? STRATEGY_CODES[strategyId] : 'NA',
-    strategyName: row.primaryStrategy?.strategyName || 'Manual Paper',
-    direction: (row.primaryStrategy?.direction ?? row.direction) as 'BULL' | 'BEAR' | 'NEUTRAL',
-    status: 'Open',
-    outcome: 'Open',
-    entry: plan.entry,
-    stop: plan.stop,
-    target: plan.target,
-    target1: plan.target1,
-    target2: plan.target2,
-    trailingStop: plan.stop,
-    rr: plan.rr,
-    rr1: plan.rr1,
-    quantity,
-    notional,
-    openedAt,
-    reason: (row.primaryStrategy?.reason || row.reason) + heatNote,
-    signalGroup: row.primaryStrategy?.signalGroup,
-    beta: row.beta,
-  };
-}
 
 function StageTile({
   stage,
@@ -1558,15 +1479,10 @@ export function ProTradeScannerScreen() {
   const [approvalMessage, setApprovalMessage] = React.useState('');
   const [chartRow, setChartRow] = React.useState<ProTradeRow | null>(null);
   const [chartInterval, setChartInterval] = React.useState<TradingViewInterval>('5');
-  const [paperTrades, setPaperTrades] = React.useState<PaperTrade[]>(() => loadPaperTrades());
+  const [paperTrades, setPaperTrades] = React.useState<PaperTrade[]>([]);
   const paperTradesRef = React.useRef<PaperTrade[]>(paperTrades);
   React.useEffect(() => { paperTradesRef.current = paperTrades; }, [paperTrades]);
-  const eodFiredRef = React.useRef<string>(localStorage.getItem('sutra.eodFiredDate') ?? '');
-  const [eodMessage, setEodMessage] = React.useState<string>(() => {
-    const storedDate = localStorage.getItem('sutra.eodFiredDate') ?? '';
-    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-    return storedDate === today ? (localStorage.getItem('sutra.eodMessage') ?? '') : '';
-  });
+  const [eodMessage, setEodMessage] = React.useState('');
   const [monitorDate, setMonitorDate] = React.useState<string>(() => todayET());
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [settings, setSettings] = React.useState<ProTradeSettings>(() => loadProTradeSettings());
@@ -1574,126 +1490,85 @@ export function ProTradeScannerScreen() {
   const [watchlist, setWatchlist] = React.useState<DayWatchlist>(() => loadWatchlist());
   const [watchlistOnly, setWatchlistOnly] = React.useState(false);
   const [viewMode, setViewMode] = React.useState<'premarket' | 'workflow'>(() => isPremarketWindow() ? 'premarket' : 'workflow');
-  const [cbTick, setCbTick] = React.useState(0);
+  const [riskData, setRiskData] = React.useState<DaemonRisk | null>(null);
+  const [daemonOnline, setDaemonOnline] = React.useState(false);
 
-  async function load(forceRefresh = false) {
-    try {
-      if (forceRefresh) {
-        setManualLoading(true);
-        clearUniverseCache();
-      } else {
-        setLoading(true);
-      }
-      setError('');
-      const [nextSnapshot, acct] = await Promise.all([
-        fetchProTradeScannerSnapshot(watchlist.symbols),
-        getPaperAccount().catch(() => null),
-      ]);
-      setSnapshot(nextSnapshot);
-      if (acct) {
-        const bal = parseFloat(acct.equity);
-        if (bal > 0) { setAccountBalance(bal); initDailyBalance(bal); }
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-      setManualLoading(false);
-    }
-  }
-
+  // ── Daemon: initial state load ────────────────────────────────────────────
   React.useEffect(() => {
-    migrateCbKeys();
-    alpacaBarStream.connect();
-    void load();
-    return () => alpacaBarStream.destroy();
-  }, []);
+    daemonWs.connect();
 
-  // Full universe scan every 60s
-  React.useEffect(() => {
-    const id = window.setInterval(() => {
-      void load();
-    }, 60_000);
-    return () => window.clearInterval(id);
-  }, []);
+    // Load initial state from daemon REST
+    daemonClient.getState()
+      .then((state: Record<string, unknown>) => {
+        if (state['rows']) setSnapshot({ rows: state['rows'], rawRows: state['rawRows'] ?? [], filteredRows: state['filteredRows'] ?? [], qualifiedCount: 0, scannedCount: 0, rawCount: 0, filteredOut: 0, fetchedAt: (state['fetchedAt'] as string) ?? new Date().toISOString(), universeBuiltAt: null, providerStatus: 'daemon', spyTrend5m: (state['spyTrend5m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', spyTrend15m: (state['spyTrend15m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', regime: state['regime'] as ProTradeSnapshot['regime'] } as ProTradeSnapshot);
+        if (state['trades']) setPaperTrades(state['trades'] as PaperTrade[]);
+        setDaemonOnline(true);
+        setLoading(false);
+      })
+      .catch(() => {
+        setError('Daemon offline — start with: npm run daemon');
+        setLoading(false);
+      });
 
-  // Hot-set refresh every 20s — only re-evaluates forming/confirmed/locked stocks
-  React.useEffect(() => {
-    const id = window.setInterval(() => {
-      const cur = snapshotRef.current;
-      if (!cur) return;
-      const hotFromStage = cur.rows
-        .filter((r) => r.workflowStage === 'forming' || r.workflowStage === 'confirmed' || r.workflowStage === 'locked' || r.workflowStage === 'trade_ready')
-        .map((r) => r.symbol);
-      // Always keep watchlist symbols in the hot set so they're never dropped from monitoring
-      const hotSymbols = [...new Set([...hotFromStage, ...watchlist.symbols])];
-      if (!hotSymbols.length) return;
-      void fetchHotSetSnapshot(hotSymbols).then((fresh) => {
-        if (!fresh.length) return;
-        setSnapshot((prev) => {
-          if (!prev) return prev;
-          const freshMap = new Map(fresh.map((r) => [r.symbol, r]));
-          return { ...prev, rows: prev.rows.map((r) => freshMap.get(r.symbol) ?? r), fetchedAt: new Date().toISOString() };
-        });
-      }).catch(() => { /* best-effort */ });
-    }, 20_000);
-    return () => window.clearInterval(id);
-  }, []);
+    // Account balance
+    daemonClient.getAccount()
+      .then((a) => { if (a.equity > 0) setAccountBalance(a.equity); })
+      .catch(() => {/* best-effort */});
 
-  // WebSocket: subscribe ALL hot-set symbols so every 5m bar close fires instantly for all 9 strategies.
-  // Previously limited to S3/S4/S6/S7 — now covers forming/confirmed/locked/trade_ready regardless of strategy.
-  React.useEffect(() => {
-    const wsSymbols = (snapshot?.rows ?? [])
-      .filter((r) =>
-        r.workflowStage === 'forming' ||
-        r.workflowStage === 'confirmed' ||
-        r.workflowStage === 'locked' ||
-        r.workflowStage === 'trade_ready'
-      )
-      .map((r) => r.symbol);
-    if (wsSymbols.length) alpacaBarStream.subscribe(wsSymbols);
-  }, [snapshot?.rows]);
+    // Risk data
+    daemonClient.getRisk()
+      .then(setRiskData)
+      .catch(() => {/* best-effort */});
 
-  // WebSocket 5m bar close → evict cache + re-evaluate that symbol immediately
-  React.useEffect(() => {
-    return alpacaBarStream.onFiveMinClose((symbol) => {
-      clearBarCache(symbol);
-      void fetchHotSetSnapshot([symbol]).then((fresh) => {
-        if (!fresh.length) return;
-        setSnapshot((prev) => {
-          if (!prev) return prev;
-          const freshMap = new Map(fresh.map((r) => [r.symbol, r]));
-          return { ...prev, rows: prev.rows.map((r) => freshMap.get(r.symbol) ?? r), fetchedAt: new Date().toISOString() };
-        });
-      }).catch(() => { /* best-effort */ });
-    });
-  }, []);
-
-  // Refresh account equity every 15s for live HUD updates
-  React.useEffect(() => {
-    const id = window.setInterval(async () => {
-      try {
-        const acct = await getPaperAccount();
-        const bal = parseFloat(acct.equity);
-        if (bal > 0) { setAccountBalance(bal); initDailyBalance(bal); }
-      } catch { /* best-effort */ }
+    // Account + risk poll every 15s
+    const acctId = window.setInterval(() => {
+      daemonClient.getAccount().then((a) => { if (a.equity > 0) setAccountBalance(a.equity); }).catch(() => {});
+      daemonClient.getRisk().then(setRiskData).catch(() => {});
     }, 15_000);
-    return () => window.clearInterval(id);
+
+    return () => {
+      window.clearInterval(acctId);
+      daemonWs.destroy();
+    };
+  }, []);
+
+  // ── Daemon WebSocket push ─────────────────────────────────────────────────
+  React.useEffect(() => {
+    const unsubs = [
+      daemonWs.on('connected', () => setDaemonOnline(true)),
+      daemonWs.on('disconnected', () => setDaemonOnline(false)),
+      daemonWs.on('snapshot_update', (payload) => {
+        const p = payload as { rows: ProTradeRow[]; spyTrend5m: 'UP'|'DOWN'|'FLAT'; spyTrend15m: 'UP'|'DOWN'|'FLAT'; regime: ProTradeSnapshot['regime']; fetchedAt: string };
+        setSnapshot((prev) => prev ? { ...prev, ...p } : { rows: p.rows, rawRows: p.rows, filteredRows: [], qualifiedCount: 0, scannedCount: p.rows.length, rawCount: p.rows.length, filteredOut: 0, fetchedAt: p.fetchedAt, universeBuiltAt: null, providerStatus: 'daemon', spyTrend5m: p.spyTrend5m, spyTrend15m: p.spyTrend15m, regime: p.regime });
+        setLoading(false);
+        setError('');
+      }),
+      daemonWs.on('trade_opened', (payload) => {
+        setPaperTrades((prev) => [payload as PaperTrade, ...prev]);
+        setMonitorDate(todayET());
+      }),
+      daemonWs.on('trade_closed', (payload) => {
+        const t = payload as PaperTrade;
+        setPaperTrades((prev) => prev.map((x) => x.id === t.id ? t : x));
+      }),
+      daemonWs.on('trade_updated', (payload) => {
+        const t = payload as PaperTrade;
+        setPaperTrades((prev) => prev.map((x) => x.id === t.id ? t : x));
+      }),
+      daemonWs.on('eod_fired', (payload) => {
+        const p = payload as { message: string };
+        setEodMessage(p.message);
+        daemonClient.getTrades().then((t) => setPaperTrades(t as PaperTrade[])).catch(() => {});
+      }),
+      daemonWs.on('risk_update', () => {
+        daemonClient.getRisk().then(setRiskData).catch(() => {});
+      }),
+    ];
+    return () => unsubs.forEach((fn) => fn());
   }, []);
 
   const alertedTradeReadyRef = React.useRef<Set<string>>(new Set());
-  const firedInstantRef = React.useRef<Set<string>>(new Set());
-
-  // Confirmation queue: symbols that hit trade_ready but haven't fired yet.
-  // Keyed by base symbol; value holds context needed to fire after confirmation.
-  interface ConfirmationEntry {
-    row: ProTradeRow;
-    level: number;           // structural breakout price to confirm above/below
-    direction: 'BULL' | 'BEAR';
-    addedAt: number;
-  }
-  const awaitingConfirmRef = React.useRef<Map<string, ConfirmationEntry>>(new Map());
-  const [pendingConfirmCount, setPendingConfirmCount] = React.useState(0);
+  const pendingConfirmCount = 0; // daemon handles confirmation queue
 
   const rows = React.useMemo(() => withOrderedStage(snapshot?.rows || [], paperTrades), [snapshot?.rows, paperTrades]);
   // Symbols blocked from re-entry today because they stopped out.
@@ -1746,24 +1621,6 @@ export function ProTradeScannerScreen() {
     setViewMode('workflow');
   }
 
-  // 8:30 AM ET universe refresh — clears the 6h screener cache once per day at pre-market open
-  // so the universe reflects current RVOL/gap data before the watchlist locks at 8:30 AM.
-  // firedDate is persisted in sessionStorage so remounting the component (navigation, HMR)
-  // does not re-trigger the cache clear and re-scan after 8:30 AM.
-  React.useEffect(() => {
-    const FIRED_KEY = 'sutra.universe830FiredDate';
-    const id = setInterval(() => {
-      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-      if (sessionStorage.getItem(FIRED_KEY) === today) return;
-      const mins = etMinutesNow();
-      if (mins < 8 * 60 + 30) return;
-      sessionStorage.setItem(FIRED_KEY, today);
-      clearUniverseCache();
-      void load();
-    }, 60_000);
-    return () => clearInterval(id);
-  }, []);
-
   // P5: Auto-lock Day Watchlist at 8:30 AM ET on first scan of the day
   React.useEffect(() => {
     if (!rows.length) return;
@@ -1779,6 +1636,7 @@ export function ProTradeScannerScreen() {
     const next: DayWatchlist = { date: today, symbols: merged };
     setWatchlist(next);
     saveWatchlist(next);
+    daemonClient.setWatchlist(merged).catch(() => {});
   }, [rows, watchlist.date]);
 
   // P9: EOD archive — record watchlist outcome after 4 PM ET
@@ -1817,352 +1675,14 @@ export function ProTradeScannerScreen() {
     return () => clearInterval(id);
   }, []);
 
-  // Load all trades from server on mount (server is source of truth).
-  const serverLoadDone = React.useRef(false);
-  React.useEffect(() => {
-    // Fetch the raw server response first so we know if it was intentionally cleared.
-    // loadAllTrades() merges LS data in, hiding a server [] behind stale LS trades.
-    fetch('/api/trades', { signal: AbortSignal.timeout(3000) })
-      .then((r) => (r.ok ? r.json() : Promise.reject()))
-      .then(async (raw: PaperTrade[]) => {
-        serverLoadDone.current = true;
-        if (raw.length === 0) {
-          // Server is empty — atomically wipe LS too so the merge loop can't repopulate it
-          await clearAllTrades();
-          setPaperTrades([]);
-        } else {
-          // Server has trades — normal merge (picks up any LS-only drafts)
-          const merged = await loadAllTrades<PaperTrade>();
-          // Startup auto-close: EOD only fires when the browser is running at 3:57 PM ET.
-          // On refresh/reopen, close any stale open trades: prior-day trades always,
-          // today's trades if it's now past 4:00 PM ET.
-          const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-          const pastEod = etMinutesNow() >= 16 * 60;
-          const S15M_IDS = new Set(['orb15m_retest', 'vwap15m_pullback', 'ema20_bounce_15m']);
-          const closedAt = new Date().toISOString();
-          let staleCount = 0;
-          const autoClosedMsg = (() => {
-            const cleaned = merged.map((t) => {
-              if (t.status !== 'Open') return t;
-              if (S15M_IDS.has(t.strategyId ?? '')) return t;
-              const tradeDay = tradeDateET(t);
-              const isStale = tradeDay < today || (tradeDay === today && pastEod);
-              if (!isStale) return t;
-              staleCount++;
-              return closePaperTrade(t, t.entry, 'EOD', closedAt);
-            });
-            return { trades: cleaned, count: staleCount };
-          })();
-          setPaperTrades(autoClosedMsg.trades);
-          if (autoClosedMsg.count > 0) {
-            const msg = `EOD auto-close on startup: ${autoClosedMsg.count} stale position(s) closed at last known price.`;
-            localStorage.setItem('sutra.eodFiredDate', today);
-            localStorage.setItem('sutra.eodMessage', msg);
-            setEodMessage(msg);
-            eodFiredRef.current = today;
-          }
-        }
-      })
-      .catch(() => {
-        // Server unreachable — fall back to whatever LS has
-        serverLoadDone.current = true;
-      });
-  }, []);
-
-  // Periodic sync: push any LS-only trades to server every 2 minutes (recovers from server-down sessions).
-  React.useEffect(() => {
-    const id = setInterval(() => { void syncPendingTrades(); }, 2 * 60_000);
-    return () => clearInterval(id);
-  }, []);
-
-  // Persist to localStorage + server on every change (skip very first render to avoid writing stale localStorage to server)
-  const isFirstRender = React.useRef(true);
-  const prevTradesRef = React.useRef<PaperTrade[]>(paperTrades);
-  React.useEffect(() => {
-    if (isFirstRender.current) { isFirstRender.current = false; prevTradesRef.current = paperTrades; return; }
-    savePaperTrades(paperTrades);
-    const prev = prevTradesRef.current;
-    paperTrades.forEach((t) => {
-      const old = prev.find((p) => p.id === t.id);
-      if (!old || old.status !== t.status || old.outcome !== t.outcome || old.pnl !== t.pnl || old.exitPrice !== t.exitPrice) {
-        persistTrade(t);
-      }
-      // S7 fires instantly and locks the symbol in firedInstantRef for the session.
-      // Clear it on trade close so a genuine second setup can execute.
-      if (old?.status === 'Open' && t.status === 'Closed') {
-        firedInstantRef.current.delete(baseSymbol(t.symbol));
-      }
-    });
-    prevTradesRef.current = paperTrades;
-  }, [paperTrades]);
-
-  React.useEffect(() => {
-    saveProTradeSettings(settings);
-  }, [settings]);
-
-  React.useEffect(() => {
-    if (!rows.length || !paperTrades.some((trade) => trade.status === 'Open')) return;
-    const monitored = monitorPaperTrades(paperTrades, rows);
-    if (monitored.changed) setPaperTrades(monitored.trades);
-  }, [rows, paperTrades]);
-
-  // Sync open localStorage trades with Alpaca paper positions.
-  // If a trade is no longer in Alpaca (bracket leg filled), close it with the real fill price.
-  React.useEffect(() => {
-    const openTrades = paperTrades.filter((t) => t.status === 'Open');
-    if (!openTrades.length) return;
-
-    void (async () => {
-      try {
-        const alpacaPositions = await getPaperPositions();
-        const alpacaSymbols = new Set(alpacaPositions.map((p) => p.symbol.toUpperCase()));
-
-        // Grace: ignore trades opened in the last 2 minutes — Alpaca position may not be registered yet
-        const SYNC_GRACE_MS = 120_000;
-        const closedInAlpaca = openTrades.filter((t) =>
-          !alpacaSymbols.has(t.symbol.toUpperCase()) &&
-          Date.now() - new Date(t.openedAt).getTime() >= SYNC_GRACE_MS
-        );
-        if (!closedInAlpaca.length) return;
-
-        const closedUpdates = await Promise.all(
-          closedInAlpaca.map(async (trade): Promise<PaperTrade | null> => {
-            // Try to get the real Alpaca fill price from closed orders
-            let exitPrice: number | null = null;
-            let closedAt: string | undefined;
-            try {
-              const filled = (await getRecentFilledOrders(trade.symbol))
-                // Only fills that happened AFTER this trade opened — avoids stale fills from prior sessions
-                .filter((o) => o.filled_at && o.filled_at > trade.openedAt);
-              // Pick the most recent exit leg (stop_loss or take_profit — skip the entry fill)
-              const leg = filled.find((o) => o.side !== (trade.direction === 'BULL' ? 'buy' : 'sell')) ?? filled[0];
-              if (leg?.filled_avg_price) {
-                exitPrice = parseFloat(leg.filled_avg_price);
-                closedAt = leg.filled_at ?? undefined;
-              }
-            } catch {
-              // fall through to row price fallback
-            }
-
-            // No real Alpaca fill found — don't fabricate a price; keep trade Open
-            // The price-based monitor will close it when it detects stop/target breach
-            if (!exitPrice) return null;
-
-            // Determine outcome from exit vs stop/target
-            const toStop = Math.abs(exitPrice - trade.stop);
-            const toTarget = Math.abs(exitPrice - trade.target);
-            const outcome: PaperTrade['outcome'] = toStop <= toTarget
-              ? (trade.t1HitAt ? 'T1 Profit' : 'Stop')
-              : 'Target';
-            // T1 Profit: floor exit at trailing stop — Alpaca fill slippage can't produce negative P&L on protected trade
-            const ts = trade.trailingStop ?? trade.stop;
-            const safeExit = outcome === 'T1 Profit'
-              ? (trade.direction === 'BULL' ? Math.max(exitPrice, ts) : Math.min(exitPrice, ts))
-              : exitPrice;
-            return closePaperTrade(trade, safeExit, outcome, closedAt);
-          })
-        );
-
-        const validUpdates = closedUpdates.filter(Boolean) as PaperTrade[];
-        if (!validUpdates.length) return;
-
-        const updateMap = new Map(validUpdates.map((t) => [t.id, t]));
-        setPaperTrades((current) => current.map((t) => updateMap.get(t.id) ?? t));
-
-        // Record results in risk manager (circuit breaker + daily loss)
-        // Use strategyId (not strategyName) — must match the key used in checkStrategyCircuitBreaker
-        validUpdates.forEach((t) => {
-          if (t.pnl !== undefined) {
-            recordTradeResult(t.strategyId ?? t.strategyName, t.pnl, accountBalance);
-            recordGroupTradeResult(t.signalGroup ?? 'UNCLASSIFIED', t.pnl);
-          }
-        });
-      } catch {
-        // Sync is best-effort — never block the UI
-      }
-    })();
-  }, [snapshot?.rows]); // scan data only — must NOT depend on rows/paperTrades or sync fires on every trade open
-
-  // Auto-execute with 1m confirmation bar gate.
-  // Phase 1 (sync): enqueue newly trade_ready rows; prune stale entries.
-  // Phase 2 (async): fetch 1m bars, check last closed bar for price + volume confirmation, then fire.
-  React.useEffect(() => {
-    if (!snapshot?.rows.length) return;
-    if (etMinutesNow() >= 15 * 60 + 50) return;
-    if (!checkDailyLossLimit(accountBalance).ok) return;
-
-    const pending = awaitingConfirmRef.current;
-    const tradedSymbols = new Set(paperTrades.filter((t) => t.status === 'Open').map((t) => baseSymbol(t.symbol)));
-    const CONFIRM_WINDOW_MS = 5 * 60_000; // abandon if no confirmation within 5 minutes
-    const now = Date.now();
-
-    // Phase 1a — enqueue eligible rows not yet queued or traded
-    snapshot.rows.forEach((row) => {
-      const sym = baseSymbol(row.symbol);
-      if (row.workflowStage !== 'trade_ready') return;
-      if (!canPaperTradeRow(row, settings, paperTrades, accountBalance)) return;
-      if (tradedSymbols.has(sym) || pending.has(sym) || firedInstantRef.current.has(sym)) return;
-      if (row.earningsDays !== null && Math.abs(row.earningsDays) <= 1) return;
-      if (!checkStrategyCircuitBreaker(row.primaryStrategy?.strategyId || row.symbol).ok) return;
-      if (isTideBlocked(row, snapshot.spyTrend5m, snapshot.spyTrend15m, row.primaryStrategy ?? undefined)) return;
-      const stoppedStratId = row.primaryStrategy?.strategyId ?? '';
-      const stoppedStratDir = row.primaryStrategy?.direction ?? row.direction;
-      if (stoppedTodaySet.has(`${sym}|${stoppedStratId}|${stoppedStratDir}`)) return;
-
-      const level = row.tradePlan?.entry;
-      if (!level) return;
-
-      // All strategies use 1m bar confirmation — S7 alone is blocked at forming (capScoutSignals),
-      // S7+S8 together uses S8 structural entry which doesn't expire like a raw volume spike.
-      pending.set(sym, { row, level, direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL', addedAt: now });
-    });
-
-    // Phase 1b — prune: window expired, symbol gone, or setup fundamentally failed.
-    // Keep 'locked' (transient: stale data / blackout) and 'confirmed' (minor R:R dip) — they recover.
-    // Only drop 'screened_universe' or 'forming' — those mean the setup checklist regressed.
-    for (const [sym, entry] of pending) {
-      const currentRow = snapshot.rows.find((r) => baseSymbol(r.symbol) === sym);
-      const stage = currentRow?.workflowStage;
-      const setupRegressed = !currentRow || stage === 'screened_universe' || stage === 'forming';
-      if (now - entry.addedAt > CONFIRM_WINDOW_MS || setupRegressed) {
-        pending.delete(sym);
-      }
-    }
-
-    setPendingConfirmCount(pending.size);
-    if (!pending.size) return;
-
-    // Phase 2 — async: 1m bar confirmation check
-    const snap = snapshot; // capture before async
-    void (async () => {
-      let barMap: Record<string, { time: string; open: number; high: number; low: number; close: number; volume: number }[]>;
-      try {
-        barMap = await fetchBars([...pending.keys()], '1m');
-      } catch {
-        return; // data unavailable — wait for next cycle
-      }
-
-      const confirmedTrades: PaperTrade[] = [];
-      const openedAt = new Date().toISOString();
-
-      for (const [sym, entry] of pending) {
-        const allOpen = [...paperTrades, ...confirmedTrades];
-        const usedNotional = allOpen.filter(t => t.status === 'Open').reduce((s, t) => s + (t.t1HitAt ? t.notional * 0.5 : t.notional), 0);
-        if (usedNotional >= accountBalance * 0.65) break;
-
-        const candles = barMap[sym];
-        if (!candles || candles.length < 5) continue;
-
-        // candles[length-1] = current in-progress bar (not closed yet)
-        // candles[length-2] = last CONFIRMED closed 1m bar
-        const closedBar = candles[candles.length - 2];
-        const priorBars = candles.slice(-22, -2); // 20 bars before the closed bar
-        const avgVol = priorBars.length > 0
-          ? priorBars.reduce((s, b) => s + b.volume, 0) / priorBars.length
-          : 0;
-
-        // 0.5% tolerance: current price at detection is typically 0.3–0.7% above the
-        // structural level (ORB high, OB zone, micro-range). The last CLOSED 1m bar sits
-        // at that structural level, not at the extended current price. 0.2% wasn't enough.
-        const priceConfirmed = entry.direction === 'BULL'
-          ? closedBar.close >= entry.level * 0.995
-          : closedBar.close <= entry.level * 1.005;
-
-        // Retest strategies (S1, S5) expect quiet absorption on the retest bar — low volume
-        // is correct. Only breakout strategies (S3, S6) need an elevated-volume confirmation.
-        const retestStrats = new Set(['orb_retest', 'ob_fvg_retest', 'vwap_pullback', 'ema20_bounce']);
-        const needsVolSpike = !retestStrats.has(entry.row.primaryStrategy?.strategyId ?? '');
-        const volConfirmed = !needsVolSpike || avgVol <= 0 || closedBar.volume >= avgVol * 1.1;
-
-        if (!priceConfirmed || !volConfirmed) {
-          // Wait zone: 0.5–1.5% below detection price → keep pending, check next bar.
-          // Hard fail: >1.5% below detection price → genuine reversal, delete.
-          const setupFailed = entry.direction === 'BULL'
-            ? closedBar.close < entry.level * 0.985
-            : closedBar.close > entry.level * 1.015;
-          if (setupFailed) pending.delete(sym);
-          continue;
-        }
-
-        const row = snap.rows.find((r) => baseSymbol(r.symbol) === sym);
-        if (!row || row.workflowStage !== 'trade_ready') { pending.delete(sym); continue; }
-
-        const trade = buildPaperTrade(row, settings, [...paperTrades, ...confirmedTrades], openedAt, accountBalance, snap.spyTrend5m, snap.spyTrend15m);
-        if (!trade) { pending.delete(sym); continue; }
-
-        confirmedTrades.push(trade);
-        pending.delete(sym);
-        firedInstantRef.current.add(sym); // block re-entry until trade closes (guards stale-state race)
-      }
-
-      setPendingConfirmCount(pending.size);
-      if (!confirmedTrades.length) return;
-
-      setPaperTrades((current) => [...confirmedTrades, ...current]);
-      setMonitorDate(todayET()); // snap Monitor to today — page may have been open since a previous session
-      setApprovalMessage(`1m confirmed: ${confirmedTrades.map((t) => t.symbol).join(', ')} — entry after close above level.`);
-
-      confirmedTrades.forEach((trade) => {
-        placePaperBracketOrder({
-          symbol: trade.symbol,
-          direction: trade.direction === 'BEAR' ? 'BEAR' : 'BULL',
-          entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional,
-        }).catch((err: unknown) => console.warn(`Alpaca order skipped for ${trade.symbol}:`, err instanceof Error ? err.message : err));
-      });
-    })();
-  }, [snapshot?.rows, paperTrades, settings, stoppedTodaySet]);
-
-  // EOD flat: at 3:57 PM ET close all open positions before 4:00 PM market close.
-  // Stable deps [] so the interval is never reset by hot-set refreshes or paperTrades changes.
-  // Uses refs to read latest state; eodFiredRef prevents double-fire within the window.
-  React.useEffect(() => {
-    const interval = setInterval(() => {
-      const mins = etMinutesNow();
-      if (mins < 15 * 60 + 57 || mins > 16 * 60) return;
-      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-      if (eodFiredRef.current === today) return;
-      // 15m strategies (S10/S11/S12) are exempt from EOD force-close — their wider
-      // stops and R:R≥2.0 mean cutting at 3:57 PM systematically kills the T2 leg.
-      // They run to their natural exit (T2 hit or trailing stop) before 4:00 PM.
-      const S15M_IDS = new Set(['orb15m_retest', 'vwap15m_pullback', 'ema20_bounce_15m']);
-      const openTrades = paperTradesRef.current.filter((t) => t.status === 'Open' && !S15M_IDS.has(t.strategyId ?? ''));
-      eodFiredRef.current = today;
-      localStorage.setItem('sutra.eodFiredDate', today);
-      if (!openTrades.length) return;
-      const closedAt = new Date().toISOString();
-      setPaperTrades((current) => current.map((t) => {
-        if (t.status !== 'Open') return t;
-        if (S15M_IDS.has(t.strategyId ?? '')) return t;
-        const row = snapshotRef.current?.rows.find((r) => baseSymbol(r.symbol) === baseSymbol(t.symbol));
-        const exitPrice = row?.price ?? t.entry;
-        return closePaperTrade(t, exitPrice, 'EOD', closedAt);
-      }));
-      closeAllPaperPositions().catch(() => { });
-      const msg = `EOD 3:57 PM — closed ${openTrades.length} position(s) flat. 15m strategies (S10/S11/S12) run to natural exit.`;
-      localStorage.setItem('sutra.eodMessage', msg);
-      setEodMessage(msg);
-      setApprovalMessage(msg);
-    }, 30_000);
-    return () => clearInterval(interval);
-  }, []);
+  // Daemon handles: trade persistence, monitoring, EOD close, auto-execute, Alpaca sync.
+  // UI role: display + manual paper trade + manual close + watchlist management.
 
   async function approve(row: ProTradeRow) {
     const plan = effectiveTradePlan(row, settings);
     if (!plan) return;
-    const strategyName = row.primaryStrategy?.strategyId || row.symbol;
-    const lossCheck = checkDailyLossLimit(accountBalance);
-    if (!lossCheck.ok) { setApprovalMessage(lossCheck.reason!); return; }
-    // Legacy per-strategy CB (kept for backward compat) + new group-level CB
-    const cbCheck = checkStrategyCircuitBreaker(strategyName);
-    if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
-    const groupCbCheck = checkGroupCircuitBreaker(row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED');
-    if (!groupCbCheck.ok) { setApprovalMessage(groupCbCheck.reason!); return; }
-    const sectorCheck = checkSectorConcentration(paperTrades, row.symbol);
-    if (!sectorCheck.ok) { setApprovalMessage(sectorCheck.reason!); return; }
-    const approxNotional = computeNotional(accountBalance, plan.entry, plan.stop, row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED', row.primaryStrategy?.groupSizeMult ?? 1.0);
-    const betaPortCheck = checkPortfolioBeta(paperTrades, row.beta ?? 1.0, approxNotional, accountBalance);
-    if (!betaPortCheck.ok) { setApprovalMessage(betaPortCheck.reason!); return; }
-    // Stale entry filter: skip if price drifted >50% of risk past entry — no chasing
+    if (riskData?.lossLimitHit) { setApprovalMessage(riskData.lossLimitReason ?? 'Daily loss limit hit'); return; }
+    // Stale entry filter
     const tradeDir = row.primaryStrategy?.direction ?? row.direction;
     const risk = Math.abs(plan.entry - plan.stop);
     const currentPrice = row.price;
@@ -2184,7 +1704,7 @@ export function ProTradeScannerScreen() {
       setApprovalBusy(true);
       setApprovalMessage('');
       const approveGroup = row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED';
-      const approveGroupMult = (row.primaryStrategy?.groupSizeMult ?? 1.0) * groupCbCheck.sizeMult;
+      const approveGroupMult = row.primaryStrategy?.groupSizeMult ?? 1.0;
       const orderNotional = computeNotional(accountBalance, plan.entry, plan.stop, approveGroup, approveGroupMult);
       const order = await placePaperBracketOrder({
         symbol: row.symbol,
@@ -2195,7 +1715,8 @@ export function ProTradeScannerScreen() {
         notional: orderNotional,
       });
       setApprovalMessage(`Alpaca paper bracket submitted: ${order.id.slice(0, 8)} · ${row.symbol} ${order.side.toUpperCase()} ${order.qty} shares`);
-      await load(true);
+      // Refresh snapshot from daemon after manual approve
+      daemonClient.getState().then((s: Record<string, unknown>) => { if (s['trades']) setPaperTrades(s['trades'] as PaperTrade[]); }).catch(() => {});
     } catch (err) {
       setApprovalMessage(err instanceof Error ? err.message : String(err));
     } finally {
@@ -2203,67 +1724,42 @@ export function ProTradeScannerScreen() {
     }
   }
 
+  async function manualRefresh() {
+    setManualLoading(true);
+    try {
+      const s = await daemonClient.getState() as Record<string, unknown>;
+      if (s['rows']) setSnapshot({ rows: s['rows'], rawRows: s['rawRows'] ?? [], filteredRows: s['filteredRows'] ?? [], qualifiedCount: 0, scannedCount: 0, rawCount: 0, filteredOut: 0, fetchedAt: (s['fetchedAt'] as string) ?? new Date().toISOString(), universeBuiltAt: null, providerStatus: 'daemon', spyTrend5m: (s['spyTrend5m'] as 'UP'|'DOWN'|'FLAT') ?? 'FLAT', spyTrend15m: (s['spyTrend15m'] as 'UP'|'DOWN'|'FLAT') ?? 'FLAT', regime: s['regime'] as ProTradeSnapshot['regime'] } as ProTradeSnapshot);
+      if (s['trades']) setPaperTrades(s['trades'] as PaperTrade[]);
+    } catch { /* daemon offline — ignore */ }
+    finally { setManualLoading(false); }
+  }
+
   function createPaperTrade(row: ProTradeRow) {
-    const strategyName = row.primaryStrategy?.strategyId || row.symbol;
-    const lossCheck = checkDailyLossLimit(accountBalance);
-    if (!lossCheck.ok) { setApprovalMessage(lossCheck.reason!); return; }
-    const cbCheck = checkStrategyCircuitBreaker(strategyName);
-    if (!cbCheck.ok) { setApprovalMessage(cbCheck.reason!); return; }
-    const groupCbCheck = checkGroupCircuitBreaker(row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED');
-    if (!groupCbCheck.ok) { setApprovalMessage(groupCbCheck.reason!); return; }
-    const sectorCheck = checkSectorConcentration(paperTrades, row.symbol);
-    if (!sectorCheck.ok) { setApprovalMessage(sectorCheck.reason!); return; }
-    // Stale entry filter
-    const plan = effectiveTradePlan(row, settings);
-    if (plan) {
-      const tradeDir = row.primaryStrategy?.direction ?? row.direction;
-      const risk = Math.abs(plan.entry - plan.stop);
-      if (tradeDir === 'BULL' && row.price > plan.entry + risk * 0.5) {
-        setApprovalMessage(`Stale entry: price moved $${(row.price - plan.entry).toFixed(2)} past entry — skipped.`);
-        return;
-      }
-      if (tradeDir === 'BEAR' && row.price < plan.entry - risk * 0.5) {
-        setApprovalMessage(`Stale entry: price moved $${(plan.entry - row.price).toFixed(2)} past entry — skipped.`);
-        return;
-      }
-      const approxNotional = computeNotional(accountBalance, plan.entry, plan.stop, row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED', row.primaryStrategy?.groupSizeMult ?? 1.0);
-      const betaPortCheck = checkPortfolioBeta(paperTrades, row.beta ?? 1.0, approxNotional, accountBalance);
-      if (!betaPortCheck.ok) { setApprovalMessage(betaPortCheck.reason!); return; }
-    }
-    const trade = buildPaperTrade(row, settings, paperTrades, new Date().toISOString(), accountBalance, snapshot?.spyTrend5m, snapshot?.spyTrend15m, groupCbCheck.sizeMult);
-    if (!trade) {
-      const plan = effectiveTradePlan(row, settings);
-      if (!plan) {
-        setApprovalMessage('Paper trade blocked: entry, stop, or target is not valid.');
-      } else if (plan.rr < 1.5) {
-        setApprovalMessage(`Paper trade blocked: R:R is ${plan.rr.toFixed(2)}, minimum is 1.50.`);
-      } else {
-        setApprovalMessage('Paper trade blocked: trading amount limit has been reached.');
-      }
-      return;
-    }
+    if (riskData?.lossLimitHit) { setApprovalMessage(riskData.lossLimitReason ?? 'Daily loss limit hit'); return; }
     const symbolKey = baseSymbol(row.symbol);
-    if (paperTrades.some((item) => item.status === 'Open' && baseSymbol(item.symbol) === symbolKey)) {
+    if (paperTrades.some((t) => t.status === 'Open' && baseSymbol(t.symbol) === symbolKey)) {
       setApprovalMessage(`Paper trade already open for ${row.symbol}.`);
       return;
     }
-    const manualStratId = row.primaryStrategy?.strategyId ?? '';
-    const manualStratDir = row.primaryStrategy?.direction ?? row.direction;
-    if (manualStratId && stoppedTodaySet.has(`${symbolKey}|${manualStratId}|${manualStratDir}`)) {
-      setApprovalMessage(`${row.symbol} ${manualStratId.toUpperCase()} ${manualStratDir} stopped out today — same strategy re-entry blocked till EOD.`);
-      return;
-    }
-    const earningsNote = row.earningsDays !== null && Math.abs(row.earningsDays) <= 1
-      ? ` ⚠ ${row.earningsStatus}` : '';
-    setPaperTrades((current) => [trade, ...current]);
-    setApprovalMessage(`Paper trade opened for ${row.symbol}: entry ${fmtMoney(trade.entry)}, stop ${fmtMoney(trade.stop)}, T1 ${fmtMoney(trade.target1)}, T2 ${fmtMoney(trade.target2)}.${earningsNote}`);
-    // Mirror to Alpaca paper account for realistic fill tracking (fire-and-forget)
-    placePaperBracketOrder({ symbol: row.symbol, direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL', entry: trade.entry, stop: trade.stop, target: trade.target, notional: trade.notional })
-      .catch((err: unknown) => console.warn('Alpaca paper order skipped:', err instanceof Error ? err.message : err));
+    setApprovalMessage(`Sending paper trade for ${row.symbol}…`);
+    daemonClient.paperTrade(row.symbol)
+      .then((trade) => {
+        const t = trade as PaperTrade;
+        setPaperTrades((current) => [t, ...current]);
+        setMonitorDate(todayET());
+        const earningsNote = row.earningsDays !== null && Math.abs(row.earningsDays) <= 1 ? ` ⚠ ${row.earningsStatus}` : '';
+        setApprovalMessage(`Paper trade opened for ${row.symbol}: entry ${fmtMoney(t.entry)}, stop ${fmtMoney(t.stop)}, T1 ${fmtMoney(t.target1)}, T2 ${fmtMoney(t.target2)}.${earningsNote}`);
+        // Mirror to Alpaca
+        placePaperBracketOrder({ symbol: t.symbol, direction: t.direction === 'BEAR' ? 'BEAR' : 'BULL', entry: t.entry, stop: t.stop, target: t.target, notional: t.notional })
+          .catch((err: unknown) => console.warn('Alpaca paper order skipped:', err instanceof Error ? err.message : err));
+      })
+      .catch((err: unknown) => setApprovalMessage(`Paper trade failed: ${err instanceof Error ? err.message : String(err)}`));
   }
 
   function clearClosedTrades() {
+    // Keep open trades locally; daemon clears all — refetch after
     setPaperTrades((current) => current.filter((t) => t.status === 'Open'));
+    daemonClient.clearTrades().then(() => daemonClient.getOpenTrades().then((t) => setPaperTrades(t as PaperTrade[]))).catch(() => {});
   }
 
   function fixZeroPnlTrades() {
@@ -2289,16 +1785,14 @@ export function ProTradeScannerScreen() {
   }
 
   function manualClosePaperTrade(trade: PaperTrade, price: number) {
-    const closed = closePaperTrade(trade, price, 'Manual');
-    setPaperTrades((current) => current.map((item) => item.id === trade.id ? closed : item));
-    if (closed.pnl !== undefined) {
-      recordTradeResult(trade.strategyName, closed.pnl, accountBalance);
-      recordGroupTradeResult(trade.signalGroup ?? 'UNCLASSIFIED', closed.pnl);
-    }
-    closePaperPosition(trade.symbol).catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      setApprovalMessage(`Alpaca close failed for ${trade.symbol}: ${msg}`);
-    });
+    daemonClient.closeTrade(trade.id, price)
+      .then((closed) => {
+        const t = closed as PaperTrade;
+        setPaperTrades((current) => current.map((item) => item.id === t.id ? t : item));
+      })
+      .catch((err: unknown) => setApprovalMessage(`Close failed: ${err instanceof Error ? err.message : String(err)}`));
+    // Mirror to Alpaca
+    closePaperPosition(trade.symbol).catch(() => {});
   }
 
   return (
@@ -2325,10 +1819,11 @@ export function ProTradeScannerScreen() {
         const hudPnl = closedPnl + openPnl;
         const totalClosed = todayWins + todayLosses;
         const wr = totalClosed > 0 ? Math.round((todayWins / totalClosed) * 100) : 0;
-        const riskSummary = getRiskSummary();
-        const usedRisk = Math.max(0, -riskSummary.dailyPnl);
-        const riskPct = riskSummary.dailyLossLimit > 0 ? Math.min(100, (usedRisk / riskSummary.dailyLossLimit) * 100) : 0;
-        const pausedStrats = cbTick >= 0 ? getPausedStrategies() : [];
+        const usedRisk = Math.max(0, -(riskData?.dailyRealizedPnl ?? 0));
+        const dailyLossLimit = riskData ? riskData.dailyStartBalance * riskData.riskSettings.dailyLossLimitPct : accountBalance * 0.08;
+        const riskPct = dailyLossLimit > 0 ? Math.min(100, (usedRisk / dailyLossLimit) * 100) : 0;
+        const pausedStrats: { name: string; minsLeft: number }[] = [];
+        const groupCbList = riskData?.groupCbSummary ?? [];
         const etMins = etMinutesNow();
         const cutoffMins = 15 * 60 + 50;
         const minsLeft = cutoffMins - etMins;
@@ -2337,7 +1832,6 @@ export function ProTradeScannerScreen() {
         const formingCount = rows.filter((r) => r.workflowStage === 'forming').length;
         const openNotional = openTrades.reduce((s, t) => s + (t.t1HitAt ? t.notional * 0.5 : t.notional), 0);
         const deployedPct = accountBalance > 0 ? Math.min(100, (openNotional / (accountBalance * 0.65)) * 100) : 0;
-        const groupCbList = cbTick >= 0 ? getGroupCbSummary() : [];
         const vixLevel = snapshot?.regime?.vixLevel;
         return (
           <div className="shrink-0 rounded-xl border border-white/5 bg-white/[0.025] px-4 py-3 space-y-3">
@@ -2403,7 +1897,7 @@ export function ProTradeScannerScreen() {
                 <div className="flex justify-between text-[9px] uppercase tracking-widest font-black mb-1">
                   <span className="text-slate-500">Daily Risk</span>
                   <span className={riskPct > 80 ? 'text-rose-400' : riskPct > 50 ? 'text-amber-400' : 'text-slate-400'}>
-                    ${usedRisk.toFixed(0)} / ${riskSummary.dailyLossLimit.toFixed(0)}
+                    ${usedRisk.toFixed(0)} / ${dailyLossLimit.toFixed(0)}
                   </span>
                 </div>
                 <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
@@ -2429,7 +1923,7 @@ export function ProTradeScannerScreen() {
                       <span key={g.group} className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[9px] font-black uppercase ${g.layer === 1 ? 'border-rose-500/40 bg-rose-500/10 text-rose-300' : g.layer === 2 ? 'border-rose-500/30 bg-rose-500/10 text-rose-300' : 'border-amber-500/30 bg-amber-500/10 text-amber-300'}`}>
                         {g.group} L{g.layer} · {g.detail}
                         {(g.layer === 1 || g.layer === 2) && (
-                          <button onClick={() => { unpauseGroupCb(g.group); setCbTick((t) => t + 1); }} className="ml-0.5 hover:text-white leading-none" title="Reset group CB">✕</button>
+                          <button onClick={() => { daemonClient.unpauseGroup(g.group).then(() => daemonClient.getRisk().then(setRiskData)).catch(() => {}); }} className="ml-0.5 hover:text-white leading-none" title="Reset group CB">✕</button>
                         )}
                       </span>
                     ))}
@@ -2440,7 +1934,7 @@ export function ProTradeScannerScreen() {
                     {pausedStrats.map((s) => (
                       <span key={s.name} className="flex items-center gap-1 px-2 py-0.5 rounded border border-rose-500/30 bg-rose-500/10 text-rose-300 text-[9px] font-black uppercase">
                         {STRATEGY_LABELS[s.name as StrategyId] ?? s.name} {s.minsLeft}m
-                        <button onClick={() => { unpauseCbStrategy(s.name); setCbTick((t) => t + 1); }} className="ml-0.5 hover:text-white leading-none">✕</button>
+                        <button onClick={() => { daemonClient.unpauseStrategy(s.name).then(() => daemonClient.getRisk().then(setRiskData)).catch(() => {}); }} className="ml-0.5 hover:text-white leading-none">✕</button>
                       </span>
                     ))}
                   </>
@@ -2521,10 +2015,13 @@ export function ProTradeScannerScreen() {
                 {snapshot.regime.vixLevel ? ` · VIX ${snapshot.regime.vixLevel.toFixed(1)}` : ''}
               </span>
             )}
+            <span className={`px-3 py-1 rounded-full border text-xs font-semibold ${daemonOnline ? 'border-emerald-500/30 bg-emerald-500/8 text-emerald-400' : 'border-rose-500/30 bg-rose-500/8 text-rose-400'}`}>
+              {daemonOnline ? '● Daemon' : '○ Daemon offline'}
+            </span>
             {(() => {
               const mins = etMinutesNow();
               const cutoff = mins >= 15 * 60 + 50;
-              const lossLimitHit = !checkDailyLossLimit(accountBalance).ok;
+              const lossLimitHit = riskData?.lossLimitHit ?? false;
               if (stale) return <span className="px-3 py-1 rounded-full border border-slate-600/40 text-slate-400 bg-slate-800/30">Auto-order: Market Closed</span>;
               if (lossLimitHit) return <span className="px-3 py-1 rounded-full border border-rose-500/30 text-rose-300 bg-rose-500/10">Auto-order: Daily Limit Hit</span>;
               if (cutoff) return <span className="px-3 py-1 rounded-full border border-amber-500/30 text-amber-300 bg-amber-500/10">Auto-order: Entry Cutoff 3:50 PM</span>;
@@ -2561,7 +2058,7 @@ export function ProTradeScannerScreen() {
             <span className="text-[10px] font-black uppercase tracking-widest">Settings</span>
           </button>
           <button
-            onClick={() => void load(true)}
+            onClick={() => void manualRefresh()}
             disabled={manualLoading || loading}
             className="h-9 px-4 rounded-full border border-white/10 bg-white/5 text-slate-300 hover:text-white hover:bg-white/10 disabled:opacity-50 disabled:cursor-wait flex items-center gap-2 transition-colors"
           >
