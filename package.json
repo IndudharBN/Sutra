@@ -13,7 +13,13 @@
     "db:apply": "node scripts/apply-supabase-schema.mjs",
     "trade-server": "node trade-server.mjs",
     "build:daemon": "tsc -p daemon/tsconfig.daemon.json",
-    "daemon": "node daemon/dist/index.js"
+    "daemon": "node daemon/dist/index.js",
+    "daemon:start": "mkdir -p logs && pm2 start ecosystem.config.cjs",
+    "daemon:stop": "pm2 stop sutra-daemon",
+    "daemon:restart": "npm run build:daemon && pm2 restart sutra-daemon",
+    "daemon:logs": "pm2 logs sutra-daemon",
+    "daemon:status": "pm2 status sutra-daemon",
+    "migrate": "node scripts/migrate-ls-to-daemon.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.4",

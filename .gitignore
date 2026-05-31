@@ -1,9 +1,12 @@
 node_modules/
 build/
 dist/
+daemon/dist/
 coverage/
 .DS_Store
 *.log
+logs/*.log
 .env*
 !.env.example
 supabase/.temp/
+scripts/ls-export.json
