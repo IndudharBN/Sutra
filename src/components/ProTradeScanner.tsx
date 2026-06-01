@@ -1500,7 +1500,7 @@ export function ProTradeScannerScreen() {
     // Load initial state from daemon REST
     daemonClient.getState()
       .then((state: Record<string, unknown>) => {
-        if (state['rows']) setSnapshot({ rows: state['rows'], rawRows: state['rawRows'] ?? [], filteredRows: state['filteredRows'] ?? [], qualifiedCount: 0, scannedCount: 0, rawCount: 0, filteredOut: 0, fetchedAt: (state['fetchedAt'] as string) ?? new Date().toISOString(), universeBuiltAt: null, providerStatus: 'daemon', spyTrend5m: (state['spyTrend5m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', spyTrend15m: (state['spyTrend15m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', regime: state['regime'] as ProTradeSnapshot['regime'] } as ProTradeSnapshot);
+        if (state['rows']) setSnapshot({ rows: state['rows'], rawRows: state['rawRows'] ?? [], filteredRows: state['filteredRows'] ?? [], qualifiedCount: 0, scannedCount: 0, rawCount: 0, filteredOut: 0, fetchedAt: (state['fetchedAt'] as string) ?? new Date().toISOString(), universeBuiltAt: (state['universeBuiltAt'] as string | null) ?? null, providerStatus: 'daemon', spyTrend5m: (state['spyTrend5m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', spyTrend15m: (state['spyTrend15m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', regime: state['regime'] as ProTradeSnapshot['regime'] } as ProTradeSnapshot);
         if (state['trades']) setPaperTrades(state['trades'] as PaperTrade[]);
         setDaemonOnline(true);
         setLoading(false);
@@ -1538,8 +1538,8 @@ export function ProTradeScannerScreen() {
       daemonWs.on('connected', () => setDaemonOnline(true)),
       daemonWs.on('disconnected', () => setDaemonOnline(false)),
       daemonWs.on('snapshot_update', (payload) => {
-        const p = payload as { rows: ProTradeRow[]; spyTrend5m: 'UP'|'DOWN'|'FLAT'; spyTrend15m: 'UP'|'DOWN'|'FLAT'; regime: ProTradeSnapshot['regime']; fetchedAt: string };
-        setSnapshot((prev) => prev ? { ...prev, ...p } : { rows: p.rows, rawRows: p.rows, filteredRows: [], qualifiedCount: 0, scannedCount: p.rows.length, rawCount: p.rows.length, filteredOut: 0, fetchedAt: p.fetchedAt, universeBuiltAt: null, providerStatus: 'daemon', spyTrend5m: p.spyTrend5m, spyTrend15m: p.spyTrend15m, regime: p.regime });
+        const p = payload as { rows: ProTradeRow[]; spyTrend5m: 'UP'|'DOWN'|'FLAT'; spyTrend15m: 'UP'|'DOWN'|'FLAT'; regime: ProTradeSnapshot['regime']; fetchedAt: string; universeBuiltAt?: string | null };
+        setSnapshot((prev) => prev ? { ...prev, ...p, universeBuiltAt: p.universeBuiltAt ?? prev.universeBuiltAt } : { rows: p.rows, rawRows: p.rows, filteredRows: [], qualifiedCount: 0, scannedCount: p.rows.length, rawCount: p.rows.length, filteredOut: 0, fetchedAt: p.fetchedAt, universeBuiltAt: p.universeBuiltAt ?? null, providerStatus: 'daemon', spyTrend5m: p.spyTrend5m, spyTrend15m: p.spyTrend15m, regime: p.regime });
         setLoading(false);
         setError('');
       }),

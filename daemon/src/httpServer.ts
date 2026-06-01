@@ -12,6 +12,7 @@ import {
   getGroupCbSummary,
   unpauseGroupCb,
 } from './riskManager';
+import { getUniverseBuiltAt } from './alpacaClient';
 import { closePaperTrade } from './engine/monitorTrades';
 import type { PaperTrade } from './types';
 import type { SignalGroup } from './types';
@@ -103,6 +104,7 @@ app.get('/api/state', (_req, res) => {
     spyTrend15m: snapshot?.spyTrend15m ?? 'FLAT',
     regime: snapshot?.regime ?? null,
     fetchedAt: snapshot?.fetchedAt ?? null,
+    universeBuiltAt: getUniverseBuiltAt(),
     trades: loadTrades(),
     riskState: state.riskState,
     riskSettings: state.riskSettings,

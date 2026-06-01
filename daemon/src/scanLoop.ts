@@ -3,6 +3,7 @@ import type { ProTradeSnapshot, ProTradeRow } from './engine/proTradeScannerApi'
 import { alpacaBarStream } from './alpacaBarStream';
 import { getState } from './stateStore';
 import { emit } from './httpServer';
+import { getUniverseBuiltAt } from './alpacaClient';
 
 let currentSnapshot: ProTradeSnapshot | null = null;
 
@@ -42,6 +43,7 @@ export async function runFullScan(): Promise<void> {
     spyTrend15m: snapshot.spyTrend15m,
     regime: snapshot.regime,
     fetchedAt: snapshot.fetchedAt,
+    universeBuiltAt: getUniverseBuiltAt(),
   });
 }
 
