@@ -45,10 +45,15 @@ async function alpacaGet<T>(urlPath: string, params: Record<string, string> = {}
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
   const res = await fetch(url.toString(), {
     headers: { 'APCA-API-KEY-ID': env.ALPACA_KEY, 'APCA-API-SECRET-KEY': env.ALPACA_SECRET },
+    signal: AbortSignal.timeout(15_000),
   });
-  if (!res.ok) throw new Error(`Alpaca ${urlPath} → ${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Alpaca ${urlPath} → ${res.status} ${res.statusText} ${body.slice(0, 200)}`);
+  }
   return res.json() as Promise<T>;
 }
+
 
 function toCandle(bar: AlpacaBar): Candle {
   return { time: bar.t, open: bar.o, high: bar.h, low: bar.l, close: bar.c, volume: bar.v };
@@ -116,25 +121,56 @@ export async function fetchSpyDailyBars(): Promise<{ spyBars: Candle[]; vixLevel
   return result;
 }
 
-export async function fetchBars(symbols: string[], interval: Interval): Promise<Record<string, Candle[]>> {
-  if (!symbols.length) return {};
-  const cacheKey = `bars:${interval}:${symbols.slice().sort().join(',')}`;
-  const hit = cacheGet<Record<string, Candle[]>>(cacheKey);
-  if (hit) return hit;
+const BARS_CHUNK_SIZE = 50;
+
+async function fetchBarsChunk(symbols: string[], interval: Interval): Promise<Record<string, AlpacaBar[]>> {
   const params: Record<string, string> = {
     symbols: symbols.join(','),
     timeframe: ALPACA_TF[interval],
     limit: String(BAR_LIMIT[interval]),
     sort: 'asc',
+    feed: 'iex',
   };
-  if (interval !== '1d') params['feed'] = 'iex';
-  const data = await alpacaGet<{ bars: Record<string, AlpacaBar[]> }>('/v2/stocks/bars', params);
-  const result: Record<string, Candle[]> = {};
-  for (const [sym, bars] of Object.entries(data.bars || {})) {
-    result[sym] = bars.map(toCandle);
-  }
-  cacheSet(cacheKey, result, TTL_MS[interval]);
+  const result: Record<string, AlpacaBar[]> = {};
+  let pageToken: string | undefined;
+  do {
+    if (pageToken) params['page_token'] = pageToken;
+    const data = await alpacaGet<{ bars: Record<string, AlpacaBar[]>; next_page_token?: string }>(
+      '/v2/stocks/bars', params,
+    );
+    for (const [sym, bars] of Object.entries(data.bars || {})) {
+      if (!result[sym]) result[sym] = [];
+      result[sym].push(...bars);
+    }
+    pageToken = data.next_page_token ?? undefined;
+  } while (pageToken);
   return result;
+}
+
+export async function fetchBars(symbols: string[], interval: Interval): Promise<Record<string, Candle[]>> {
+  if (!symbols.length) return {};
+  const cacheKey = `bars:${interval}:${symbols.slice().sort().join(',')}`;
+  const hit = cacheGet<Record<string, Candle[]>>(cacheKey);
+  if (hit) return hit;
+  const chunks: string[][] = [];
+  for (let i = 0; i < symbols.length; i += BARS_CHUNK_SIZE) {
+    chunks.push(symbols.slice(i, i + BARS_CHUNK_SIZE));
+  }
+  const chunkResults = await Promise.all(chunks.map((chunk) => fetchBarsChunk(chunk, interval)));
+  const merged: Record<string, AlpacaBar[]> = Object.assign({}, ...chunkResults);
+  const candles: Record<string, Candle[]> = {};
+  for (const [sym, bars] of Object.entries(merged)) {
+    candles[sym] = bars.map(toCandle);
+  }
+  cacheSet(cacheKey, candles, TTL_MS[interval]);
+  return candles;
+}
+
+async function fetchSnapshotsChunk(symbols: string[]): Promise<Record<string, AlpacaSnapshot>> {
+  return alpacaGet<Record<string, AlpacaSnapshot>>('/v2/stocks/snapshots', {
+    symbols: symbols.join(','),
+    feed: 'iex',
+  });
 }
 
 export async function fetchSnapshots(symbols: string[]): Promise<Record<string, AlpacaSnapshot>> {
@@ -142,10 +178,10 @@ export async function fetchSnapshots(symbols: string[]): Promise<Record<string, 
   const cacheKey = `snap:${symbols.slice().sort().join(',')}`;
   const hit = cacheGet<Record<string, AlpacaSnapshot>>(cacheKey);
   if (hit) return hit;
-  const data = await alpacaGet<Record<string, AlpacaSnapshot>>('/v2/stocks/snapshots', {
-    symbols: symbols.join(','),
-    feed: 'iex',
-  });
+  const chunks: string[][] = [];
+  for (let i = 0; i < symbols.length; i += 100) chunks.push(symbols.slice(i, i + 100));
+  const results = await Promise.all(chunks.map((c) => fetchSnapshotsChunk(c)));
+  const data = Object.assign({}, ...results) as Record<string, AlpacaSnapshot>;
   cacheSet(cacheKey, data, 30_000);
   return data;
 }
@@ -351,29 +387,29 @@ export async function buildDynamicUniverse(
   try {
     const screenerSyms = await fetchScreenerCandidates();
     if (screenerSyms.length < 10) throw new Error('screener returned too few results');
-    const dailyMap = await fetchBars([...new Set([...screenerSyms, 'SPY'])], '1d');
-    const spyBars = dailyMap['SPY'] ?? [];
-    const qualified = screenerSyms.filter((sym) => {
-      const bars = dailyMap[sym];
-      if (!bars || bars.length < 20) return false;
-      const price = bars[bars.length - 1].close;
-      if (price < 1 || price > 1500) return false;
-      if (computeAdrPct(bars) < ADR_PCT_MIN) return false;
-      if (computeAvgDvolM(bars) < DVOL_MIN_M) return false;
-      if (spyBars.length >= 20) {
-        const beta = computeBetaLocal(bars.slice(-20), spyBars.slice(-20));
-        if (beta < BETA_MIN || beta > BETA_MAX) return false;
-      }
-      return true;
-    });
-    if (qualified.length < 20) throw new Error(`only ${qualified.length} symbols passed gates`);
-    const snaps = await fetchSnapshots(qualified);
+    console.log(`[Universe] screener: ${screenerSyms.length} symbols — ${screenerSyms.slice(0, 10).join(',')}...`);
+    // IEX free tier has no historical daily bars — use snapshots for gate filtering instead.
+    // prevDailyBar gives yesterday's OHLCV; dailyBar gives today's intraday accumulation.
+    const snaps = await fetchSnapshots(screenerSyms);
+    const snapCount = Object.keys(snaps).length;
+    console.log(`[Universe] snapshots: ${snapCount} of ${screenerSyms.length}`);
+    let gNoSnap = 0, gPrice = 0, gAdr = 0, gDvol = 0;
     const factor = sessionProgressFactor();
-    const ranked = qualified
+    const ranked = screenerSyms
       .flatMap((sym) => {
         const snap = snaps[sym];
-        if (!snap) return [];
-        const price = snap.latestTrade?.p || snap.dailyBar?.c || 0;
+        if (!snap) { gNoSnap++; return []; }
+        const price = snap.latestTrade?.p || snap.dailyBar?.c || snap.prevDailyBar?.c || 0;
+        if (price < 1 || price > 1500) { gPrice++; return []; }
+        const prev = snap.prevDailyBar;
+        if (prev) {
+          // 1-day ADR% gate (slightly relaxed vs 20-day avg — calm day is lower)
+          const adr1d = prev.c > 0 ? (prev.h - prev.l) / prev.c * 100 : 0;
+          if (adr1d < 1.5) { gAdr++; return []; }
+          // 1-day DVOL gate
+          const dvol1d = (prev.v * prev.c) / 1_000_000;
+          if (dvol1d < DVOL_MIN_M) { gDvol++; return []; }
+        }
         const prevClose = snap.prevDailyBar?.c || 0;
         const gapAbs = prevClose > 0 ? Math.abs((price - prevClose) / prevClose * 100) : 0;
         const todayVol = snap.dailyBar?.v || 0;
@@ -384,6 +420,8 @@ export async function buildDynamicUniverse(
       .sort((a, b) => b.score - a.score)
       .slice(0, UNIVERSE_TARGET)
       .map((x) => x.sym);
+    console.log(`[Universe] gates — noSnap:${gNoSnap} price:${gPrice} adr:${gAdr} dvol:${gDvol} → ranked:${ranked.length}`);
+    if (ranked.length < 20) throw new Error(`only ${ranked.length} symbols passed gates`);
     cacheSet('universe', ranked, UNIVERSE_TTL_MS);
     writeUniverseFile(ranked);
     return [...new Set([...ranked, ...pinnedSymbols])];
