@@ -104,17 +104,81 @@ async function fetchVixLevel(): Promise<number | null> {
   }
 }
 
+// ── Yahoo Finance daily OHLCV (IEX has no historical daily bars) ──────────────
+
+const YAHOO_DAILY_CONCURRENCY = 10;
+const YAHOO_DAILY_TTL_MS = 4 * 60 * 60 * 1000;
+
+async function fetchYahooDailyBarsForSymbol(symbol: string, range = '3mo'): Promise<Candle[]> {
+  try {
+    const encoded = encodeURIComponent(symbol);
+    const res = await fetch(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encoded}?interval=1d&range=${range}`,
+      { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }, signal: AbortSignal.timeout(8_000) },
+    );
+    if (!res.ok) return [];
+    const json = await res.json() as {
+      chart?: { result?: Array<{
+        timestamp?: number[];
+        indicators?: { quote?: Array<{ open?: (number|null)[]; high?: (number|null)[]; low?: (number|null)[]; close?: (number|null)[]; volume?: (number|null)[] }> };
+      }> };
+    };
+    const r = json.chart?.result?.[0];
+    if (!r?.timestamp) return [];
+    const q = r.indicators?.quote?.[0];
+    if (!q) return [];
+    const candles: Candle[] = [];
+    for (let i = 0; i < r.timestamp.length; i++) {
+      const c = q.close?.[i];
+      if (!c) continue;
+      candles.push({
+        time: new Date(r.timestamp[i] * 1000).toISOString(),
+        open: q.open?.[i] ?? c,
+        high: q.high?.[i] ?? c,
+        low: q.low?.[i] ?? c,
+        close: c,
+        volume: q.volume?.[i] ?? 0,
+      });
+    }
+    return candles;
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchYahooDailyBars(symbols: string[], range = '3mo'): Promise<Record<string, Candle[]>> {
+  if (!symbols.length) return {};
+  const result: Record<string, Candle[]> = {};
+  const missing: string[] = [];
+  for (const sym of symbols) {
+    const hit = cacheGet<Candle[]>(`ydaily:${sym}:${range}`);
+    if (hit) { result[sym] = hit; } else { missing.push(sym); }
+  }
+  if (!missing.length) return result;
+  for (let i = 0; i < missing.length; i += YAHOO_DAILY_CONCURRENCY) {
+    const batch = missing.slice(i, i + YAHOO_DAILY_CONCURRENCY);
+    const settled = await Promise.allSettled(
+      batch.map((sym) => fetchYahooDailyBarsForSymbol(sym, range).then((candles) => ({ sym, candles }))),
+    );
+    for (const r of settled) {
+      if (r.status === 'fulfilled' && r.value.candles.length > 0) {
+        result[r.value.sym] = r.value.candles;
+        cacheSet(`ydaily:${r.value.sym}:${range}`, r.value.candles, YAHOO_DAILY_TTL_MS);
+      }
+    }
+  }
+  return result;
+}
+
 export async function fetchSpyDailyBars(): Promise<{ spyBars: Candle[]; vixLevel: number | null }> {
   const cacheKey = 'spy_regime_daily';
   const hit = cacheGet<{ spyBars: Candle[]; vixLevel: number | null }>(cacheKey);
   if (hit) return hit;
   const [spyRes, vixRes] = await Promise.allSettled([
-    alpacaGet<{ bars: Record<string, AlpacaBar[]> }>('/v2/stocks/bars', {
-      symbols: 'SPY', timeframe: '1Day', limit: '250', sort: 'asc', feed: 'iex',
-    }),
+    fetchYahooDailyBarsForSymbol('SPY', '1y'),
     fetchVixLevel(),
   ]);
-  const spyBars = spyRes.status === 'fulfilled' ? (spyRes.value.bars?.['SPY'] ?? []).map(toCandle) : [];
+  const spyBars = spyRes.status === 'fulfilled' ? spyRes.value : [];
   const vixLevel = vixRes.status === 'fulfilled' ? vixRes.value : null;
   const result = { spyBars, vixLevel };
   cacheSet(cacheKey, result, 3_600_000);
@@ -393,12 +457,16 @@ export async function buildDynamicUniverse(
     const screenerSyms = await fetchScreenerCandidates();
     if (screenerSyms.length < 10) throw new Error('screener returned too few results');
     console.log(`[Universe] screener: ${screenerSyms.length} symbols — ${screenerSyms.slice(0, 10).join(',')}...`);
-    // IEX free tier has no historical daily bars — use snapshots for gate filtering instead.
-    // prevDailyBar gives yesterday's OHLCV; dailyBar gives today's intraday accumulation.
-    const snaps = await fetchSnapshots(screenerSyms);
+    // Fetch Yahoo daily bars (3mo) for historical gates + Alpaca snapshots for real-time scoring.
+    // Alpaca IEX only returns today's bar — Yahoo is the only free source for multi-day history.
+    const [snaps, yahooDaily] = await Promise.all([
+      fetchSnapshots(screenerSyms),
+      fetchYahooDailyBars([...screenerSyms, 'SPY']),
+    ]);
+    const spyBarsForBeta = yahooDaily['SPY'] ?? [];
     const snapCount = Object.keys(snaps).length;
-    console.log(`[Universe] snapshots: ${snapCount} of ${screenerSyms.length}`);
-    let gNoSnap = 0, gPrice = 0, gAdr = 0, gDvol = 0;
+    console.log(`[Universe] snapshots: ${snapCount}, yahoo daily: ${Object.keys(yahooDaily).length}`);
+    let gNoSnap = 0, gPrice = 0, gAdr = 0, gDvol = 0, gBeta = 0;
     const factor = sessionProgressFactor();
     const ranked = screenerSyms
       .flatMap((sym) => {
@@ -406,14 +474,23 @@ export async function buildDynamicUniverse(
         if (!snap) { gNoSnap++; return []; }
         const price = snap.latestTrade?.p || snap.dailyBar?.c || snap.prevDailyBar?.c || 0;
         if (price < 1 || price > 1500) { gPrice++; return []; }
-        const prev = snap.prevDailyBar;
-        if (prev) {
-          // 1-day ADR% gate (slightly relaxed vs 20-day avg — calm day is lower)
-          const adr1d = prev.c > 0 ? (prev.h - prev.l) / prev.c * 100 : 0;
-          if (adr1d < 1.5) { gAdr++; return []; }
-          // 1-day DVOL gate
-          const dvol1d = (prev.v * prev.c) / 1_000_000;
-          if (dvol1d < DVOL_MIN_M) { gDvol++; return []; }
+        const bars = yahooDaily[sym];
+        if (bars && bars.length >= 5) {
+          // Proper multi-day gates (same as Friday's Alpaca daily bar approach)
+          if (computeAdrPct(bars) < ADR_PCT_MIN) { gAdr++; return []; }
+          if (computeAvgDvolM(bars) < DVOL_MIN_M) { gDvol++; return []; }
+          if (spyBarsForBeta.length >= 20) {
+            const beta = computeBetaLocal(bars.slice(-20), spyBarsForBeta.slice(-20));
+            if (beta < BETA_MIN || beta > BETA_MAX) { gBeta++; return []; }
+          }
+        } else {
+          // Fallback: newly listed symbol — use prevDailyBar from snapshot
+          const prev = snap.prevDailyBar;
+          if (prev) {
+            const adr1d = prev.c > 0 ? (prev.h - prev.l) / prev.c * 100 : 0;
+            if (adr1d < 1.5) { gAdr++; return []; }
+            if ((prev.v * prev.c) / 1_000_000 < DVOL_MIN_M) { gDvol++; return []; }
+          }
         }
         const prevClose = snap.prevDailyBar?.c || 0;
         const gapAbs = prevClose > 0 ? Math.abs((price - prevClose) / prevClose * 100) : 0;
@@ -425,7 +502,7 @@ export async function buildDynamicUniverse(
       .sort((a, b) => b.score - a.score)
       .slice(0, UNIVERSE_TARGET)
       .map((x) => x.sym);
-    console.log(`[Universe] gates — noSnap:${gNoSnap} price:${gPrice} adr:${gAdr} dvol:${gDvol} → ranked:${ranked.length}`);
+    console.log(`[Universe] gates — noSnap:${gNoSnap} price:${gPrice} adr:${gAdr} dvol:${gDvol} beta:${gBeta} → ranked:${ranked.length}`);
     if (ranked.length < 20) throw new Error(`only ${ranked.length} symbols passed gates`);
     cacheSet('universe', ranked, UNIVERSE_TTL_MS);
     writeUniverseFile(ranked);

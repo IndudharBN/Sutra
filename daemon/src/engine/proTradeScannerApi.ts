@@ -1,4 +1,4 @@
-import { fetchBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNewsFlags, fetchSectorTrends, fetchSpyDailyBars, buildDynamicUniverse, clearUniverseCache, getUniverseBuiltAt, SYMBOL_SECTOR, UNIVERSE_TARGET, type CatalystTier } from '../alpacaClient';
+import { fetchBars, fetchYahooDailyBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNewsFlags, fetchSectorTrends, fetchSpyDailyBars, buildDynamicUniverse, clearUniverseCache, getUniverseBuiltAt, SYMBOL_SECTOR, UNIVERSE_TARGET, type CatalystTier } from '../alpacaClient';
 import { classifyMarketRegime } from './marketRegimeLogic';
 import type { MarketRegime } from './marketRegimeTypes';
 import type { SymbolMeta } from '../alpacaClient';
@@ -478,7 +478,7 @@ export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRo
     fetchBars(symbols, '5m'),
     fetchBars(symbols, '15m'),
     fetchBars(symbols, '1h'),
-    fetchBars(symbols, '1d'),
+    fetchYahooDailyBars(symbols),
     fetchSectorTrends(),
     fetchNewsFlags(symbols),
     fetchBars(['SPY'], '5m'),
@@ -532,7 +532,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
     fetchBars(top, '5m'),
     fetchBars(top, '15m'),
     fetchBars(top, '1h'),
-    fetchBars(top, '1d'),
+    fetchYahooDailyBars(top),
     fetchNewsFlags(top),
     fetchSectorTrends(),
     fetchBars(['SPY'], '1h'),
