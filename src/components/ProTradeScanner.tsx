@@ -1491,7 +1491,7 @@ export function ProTradeScannerScreen() {
   const [watchlistOnly, setWatchlistOnly] = React.useState(false);
   const [viewMode, setViewMode] = React.useState<'premarket' | 'workflow'>(() => isPremarketWindow() ? 'premarket' : 'workflow');
   const [riskData, setRiskData] = React.useState<DaemonRisk | null>(null);
-  const [daemonOnline, setDaemonOnline] = React.useState(false);
+  const [daemonOnline, setDaemonOnline] = React.useState<boolean | null>(null);
 
   // ── Daemon: initial state load ────────────────────────────────────────────
   React.useEffect(() => {
@@ -1506,6 +1506,7 @@ export function ProTradeScannerScreen() {
         setLoading(false);
       })
       .catch(() => {
+        setDaemonOnline(false);
         setError('Daemon offline — start with: npm run daemon');
         setLoading(false);
       });
@@ -2018,8 +2019,8 @@ export function ProTradeScannerScreen() {
                 {snapshot.regime.vixLevel ? ` · VIX ${snapshot.regime.vixLevel.toFixed(1)}` : ''}
               </span>
             )}
-            <span className={`px-3 py-1 rounded-full border text-xs font-semibold ${daemonOnline ? 'border-emerald-500/30 bg-emerald-500/8 text-emerald-400' : 'border-rose-500/30 bg-rose-500/8 text-rose-400'}`}>
-              {daemonOnline ? '● Daemon' : '○ Daemon offline'}
+            <span className={`px-3 py-1 rounded-full border text-xs font-semibold ${daemonOnline === true ? 'border-emerald-500/30 bg-emerald-500/8 text-emerald-400' : daemonOnline === false ? 'border-rose-500/30 bg-rose-500/8 text-rose-400' : 'border-yellow-500/30 bg-yellow-500/8 text-yellow-400'}`}>
+              {daemonOnline === true ? '● Daemon' : daemonOnline === false ? '○ Daemon offline' : '◌ Connecting…'}
             </span>
             {(() => {
               const mins = etMinutesNow();
