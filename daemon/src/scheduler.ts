@@ -7,7 +7,7 @@ import { buildPaperTrade, canPaperTradeRow } from './engine/buildPaperTrade';
 import { isTideBlocked } from './engine/isTideBlocked';
 import { checkGroupCircuitBreaker, checkStrategyCircuitBreaker, checkDailyLossLimit, recordGroupTradeResult, recordTradeResult } from './riskManager';
 import { checkSectorConcentration, checkPortfolioBeta } from './portfolioRisk';
-import { getPaperAccount, getPaperPositions } from './alpacaBroker';
+import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperPosition, closeAllPaperPositions } from './alpacaBroker';
 import { env } from './env';
 import { emit } from './httpServer';
 import * as fs from 'fs';
@@ -100,6 +100,9 @@ async function monitorLoop(): Promise<void> {
         emit('trade_closed', after);
         emit('risk_update', { dailyPnl: getState().riskState.dailyRealizedPnl });
         console.log(`[monitor] ${after.symbol} closed — ${after.outcome} pnl=$${after.pnl?.toFixed(2)}`);
+        closePaperPosition(after.symbol).catch((err: Error) =>
+          console.warn(`[alpaca] position close failed ${after.symbol}:`, err.message),
+        );
       }
     }
 
@@ -178,6 +181,25 @@ function tryFireTrades(): void {
     emit('trade_opened', newTrade);
     console.log(`[executor] FIRE ${row.symbol} ${sig.strategyId} ${row.direction} entry=${newTrade.entry} stop=${newTrade.stop} target=${newTrade.target} qty=${newTrade.quantity} notional=$${newTrade.notional.toFixed(0)}`);
 
+    // Submit bracket order to Alpaca paper account — async, does not block executor
+    if (newTrade.direction !== 'NEUTRAL') {
+      placePaperBracketOrder({
+        symbol: newTrade.symbol,
+        direction: newTrade.direction as 'BULL' | 'BEAR',
+        entry: newTrade.entry,
+        stop: newTrade.stop,
+        target: newTrade.target2 || newTrade.target,
+        notional: newTrade.notional,
+      }).then((order) => {
+        const ts = loadTrades();
+        const idx = ts.findIndex((t: { id: string }) => t.id === newTrade.id);
+        if (idx !== -1) { ts[idx] = { ...ts[idx], alpacaOrderId: order.id }; saveTrades(ts); }
+        console.log(`[alpaca] order placed ${newTrade.symbol} id=${order.id}`);
+      }).catch((err: Error) => {
+        console.warn(`[alpaca] order failed ${newTrade.symbol}:`, err.message);
+      });
+    }
+
     // Mark fired so we don't double-fire this session
     setState((s) => ({ ...s, firedToday: [...s.firedToday, row.symbol] }));
     saveState();
@@ -217,6 +239,9 @@ function eodClose(): void {
   if (changed) {
     saveTrades(updated);
     console.log('[eod] all open trades closed at market');
+    closeAllPaperPositions().catch((err: Error) =>
+      console.warn('[alpaca] EOD closeAll failed:', err.message),
+    );
   }
 
   state.eodFiredDate = today;

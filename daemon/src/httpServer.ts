@@ -6,7 +6,7 @@ import * as path from 'path';
 import { env } from './env';
 import { getState, setState, saveState } from './stateStore';
 import { getCurrentSnapshot, runFullScan } from './scanLoop';
-import { getPaperAccount } from './alpacaBroker';
+import { getPaperAccount, placePaperBracketOrder, closePaperPosition } from './alpacaBroker';
 import {
   checkDailyLossLimit,
   getGroupCbSummary,
@@ -218,6 +218,19 @@ app.post('/api/trades/paper', (req, res) => {
   trades.push(trade);
   saveTrades(trades);
   emit('trade_opened', trade);
+  placePaperBracketOrder({
+    symbol: trade.symbol,
+    direction: trade.direction as 'BULL' | 'BEAR',
+    entry: trade.entry,
+    stop: trade.stop,
+    target: trade.target2 || trade.target,
+    notional: trade.notional,
+  }).then((order) => {
+    const ts = loadTrades();
+    const idx = ts.findIndex((t) => t.id === trade.id);
+    if (idx !== -1) { ts[idx] = { ...ts[idx], alpacaOrderId: order.id }; saveTrades(ts); }
+    console.log(`[alpaca] manual order placed ${trade.symbol} id=${order.id}`);
+  }).catch((err: Error) => console.warn(`[alpaca] manual order failed ${trade.symbol}:`, err.message));
   res.json(trade);
 });
 
@@ -235,6 +248,7 @@ app.post('/api/trades/:id/close', (req, res) => {
   trades[idx] = closed;
   saveTrades(trades);
   emit('trade_closed', closed);
+  closePaperPosition(closed.symbol).catch(() => {});
   res.json(closed);
 });
 

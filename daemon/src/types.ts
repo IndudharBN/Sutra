@@ -45,6 +45,7 @@ export interface PaperTrade {
   reason: string;
   signalGroup?: SignalGroup;
   beta?: number;
+  alpacaOrderId?: string;
 }
 
 export interface RiskSettings {
