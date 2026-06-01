@@ -166,13 +166,20 @@ function candleTrend(candles: Candle[]) {
   const e20 = todayCloses.length >= 2 ? last(ema(todayCloses, 20)) : null;
   const currentPrice = last(closes(candles));
 
-  // Lead signal: session VWAP slope turning — call direction before full EMA20 confirmation
-  if (currentPrice > svwap && sSlope > 0.0001) return 'UP' as const;
-  if (currentPrice < svwap && sSlope < -0.0001) return 'DOWN' as const;
+  // Require price to be ≥0.10% away from VWAP before calling a trend.
+  // Without this gate, SPY hugging VWAP intraday causes flip-flopping every scan.
+  const distFromVwap = svwap > 0 ? (currentPrice - svwap) / svwap : 0;
+  const MIN_VWAP_DIST = 0.0010; // 10 bps — noise floor
 
-  // Standard: session VWAP and EMA20 both agree
-  if (currentPrice > svwap && (e20 === null || currentPrice > e20)) return 'UP' as const;
-  if (currentPrice < svwap && (e20 === null || currentPrice < e20)) return 'DOWN' as const;
+  if (Math.abs(distFromVwap) < MIN_VWAP_DIST) return 'FLAT' as const;
+
+  // Lead signal: distance confirmed + slope agrees
+  if (distFromVwap > 0 && sSlope > 0) return 'UP' as const;
+  if (distFromVwap < 0 && sSlope < 0) return 'DOWN' as const;
+
+  // Standard: VWAP distance + EMA20 both agree
+  if (distFromVwap > 0 && (e20 === null || currentPrice > e20)) return 'UP' as const;
+  if (distFromVwap < 0 && (e20 === null || currentPrice < e20)) return 'DOWN' as const;
 
   return 'FLAT' as const;
 }

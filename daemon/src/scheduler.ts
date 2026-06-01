@@ -229,13 +229,10 @@ export function startScheduler(): void {
   if (schedulerStarted) return;
   schedulerStarted = true;
 
-  // Connect bar stream — hot-set symbols will be subscribed after first full scan
+  // Connect bar stream — hot-set symbols will be subscribed after first full scan.
+  // Note: we do NOT hook onFiveMinClose to runHotSetScan here because it fires
+  // once per symbol (120 calls/5m = Alpaca 429). The 20s timer below is sufficient.
   alpacaBarStream.connect();
-
-  // Bar-stream 5m callback: trigger hot-set scan on any 5m boundary
-  alpacaBarStream.onFiveMinClose((_sym) => {
-    runHotSetScan().catch((err) => console.warn('[barstream] hot scan error:', err));
-  });
 
   // Initial sync + scan (non-blocking)
   syncAccount().then(() => runFullScan()).catch((err) => console.error('[init] startup scan error:', err));

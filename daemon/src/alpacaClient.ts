@@ -156,7 +156,11 @@ export async function fetchBars(symbols: string[], interval: Interval): Promise<
   for (let i = 0; i < symbols.length; i += BARS_CHUNK_SIZE) {
     chunks.push(symbols.slice(i, i + BARS_CHUNK_SIZE));
   }
-  const chunkResults = await Promise.all(chunks.map((chunk) => fetchBarsChunk(chunk, interval)));
+  // Sequential chunks — parallel firing of 3+ chunks at once triggers Alpaca 429
+  const chunkResults: Record<string, AlpacaBar[]>[] = [];
+  for (const chunk of chunks) {
+    chunkResults.push(await fetchBarsChunk(chunk, interval));
+  }
   const merged: Record<string, AlpacaBar[]> = Object.assign({}, ...chunkResults);
   const candles: Record<string, Candle[]> = {};
   for (const [sym, bars] of Object.entries(merged)) {
@@ -180,7 +184,8 @@ export async function fetchSnapshots(symbols: string[]): Promise<Record<string, 
   if (hit) return hit;
   const chunks: string[][] = [];
   for (let i = 0; i < symbols.length; i += 100) chunks.push(symbols.slice(i, i + 100));
-  const results = await Promise.all(chunks.map((c) => fetchSnapshotsChunk(c)));
+  const results: Record<string, AlpacaSnapshot>[] = [];
+  for (const c of chunks) results.push(await fetchSnapshotsChunk(c));
   const data = Object.assign({}, ...results) as Record<string, AlpacaSnapshot>;
   cacheSet(cacheKey, data, 30_000);
   return data;
