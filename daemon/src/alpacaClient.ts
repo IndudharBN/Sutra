@@ -254,21 +254,38 @@ function writeUniverseFile(symbols: string[]): void {
   } catch (err) { console.warn('[Universe] Failed to write cache:', err); }
 }
 
-interface ScreenerStock { symbol: string; }
-interface MostActivesResp { most_actives: ScreenerStock[]; }
-interface MoversResp { gainers: ScreenerStock[]; losers: ScreenerStock[]; }
+// Yahoo Finance screener — free tier, no API key, one call per day at 8:30 AM ET.
+// Replaces Alpaca's /v2/screener endpoints which require a paid Unlimited subscription.
+interface YahooScreenerResp {
+  finance: { result: Array<{ quotes: Array<{ symbol: string }> }> | null };
+}
+
+async function yahooScreener(scrId: string, count: number): Promise<string[]> {
+  const url = `https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=${scrId}&count=${count}&region=US&lang=en-US`;
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return [];
+    const data = await res.json() as YahooScreenerResp;
+    return (data.finance.result?.[0]?.quotes ?? []).map((q) => q.symbol);
+  } catch {
+    return [];
+  }
+}
 
 async function fetchScreenerCandidates(): Promise<string[]> {
-  const [actives, movers] = await Promise.allSettled([
-    alpacaGet<MostActivesResp>('/v2/screener/stocks/most-actives', { by: 'dollar_volume', top: '80' }),
-    alpacaGet<MoversResp>('/v2/screener/stocks/movers', { top: '40' }),
+  const [actives, gainers, losers] = await Promise.allSettled([
+    yahooScreener('most_actives', 100),
+    yahooScreener('day_gainers', 50),
+    yahooScreener('day_losers', 50),
   ]);
   const symbols = new Set<string>();
-  if (actives.status === 'fulfilled') actives.value.most_actives?.forEach((s) => symbols.add(s.symbol));
-  if (movers.status === 'fulfilled') {
-    movers.value.gainers?.forEach((s) => symbols.add(s.symbol));
-    movers.value.losers?.forEach((s) => symbols.add(s.symbol));
-  }
+  if (actives.status === 'fulfilled') actives.value.forEach((s) => symbols.add(s));
+  if (gainers.status === 'fulfilled') gainers.value.forEach((s) => symbols.add(s));
+  if (losers.status === 'fulfilled') losers.value.forEach((s) => symbols.add(s));
+  if (symbols.size < 10) throw new Error(`Yahoo screener returned too few results (${symbols.size})`);
   return [...symbols].filter((s) => !ETF_BLACKLIST.has(s) && /^[A-Z]{1,5}$/.test(s));
 }
 
