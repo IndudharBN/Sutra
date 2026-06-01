@@ -101,6 +101,8 @@ export const daemonClient = {
   unpauseGroup: (group: string) =>
     post<{ ok: boolean }>(`/api/risk/unpause-group/${group}`),
 
+  triggerScan: () => post<{ ok: boolean }>('/api/scan'),
+
   isDaemonReachable: async (): Promise<boolean> => {
     try { await get<DaemonHealth>('/api/health'); return true; } catch { return false; }
   },

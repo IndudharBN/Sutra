@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { env } from './env';
 import { getState, setState, saveState } from './stateStore';
-import { getCurrentSnapshot } from './scanLoop';
+import { getCurrentSnapshot, runFullScan } from './scanLoop';
 import { getPaperAccount } from './alpacaBroker';
 import {
   checkDailyLossLimit,
@@ -234,6 +234,15 @@ app.post('/api/trades/:id/close', (req, res) => {
   saveTrades(trades);
   emit('trade_closed', closed);
   res.json(closed);
+});
+
+// POST /api/scan — trigger an immediate full scan (UI refresh button)
+// Returns immediately; scan runs async and pushes result via snapshot_update WS event.
+app.post('/api/scan', (_req, res) => {
+  res.json({ ok: true, message: 'scan triggered' });
+  setImmediate(() => {
+    runFullScan().catch((err) => console.warn('[httpServer] manual scan error:', err));
+  });
 });
 
 // DELETE /api/trades — clear all trades (dev/reset only)

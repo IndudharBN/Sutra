@@ -1727,6 +1727,9 @@ export function ProTradeScannerScreen() {
   async function manualRefresh() {
     setManualLoading(true);
     try {
+      // Ask daemon to run a fresh full scan — result arrives via snapshot_update WS push
+      await daemonClient.triggerScan();
+      // Also pull current state immediately so UI isn't blank while scan runs
       const s = await daemonClient.getState() as Record<string, unknown>;
       if (s['rows']) setSnapshot({ rows: s['rows'], rawRows: s['rawRows'] ?? [], filteredRows: s['filteredRows'] ?? [], qualifiedCount: 0, scannedCount: 0, rawCount: 0, filteredOut: 0, fetchedAt: (s['fetchedAt'] as string) ?? new Date().toISOString(), universeBuiltAt: null, providerStatus: 'daemon', spyTrend5m: (s['spyTrend5m'] as 'UP'|'DOWN'|'FLAT') ?? 'FLAT', spyTrend15m: (s['spyTrend15m'] as 'UP'|'DOWN'|'FLAT') ?? 'FLAT', regime: s['regime'] as ProTradeSnapshot['regime'] } as ProTradeSnapshot);
       if (s['trades']) setPaperTrades(s['trades'] as PaperTrade[]);
