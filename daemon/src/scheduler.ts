@@ -47,7 +47,7 @@ function isMarketHours(): boolean {
 
 function isEODWindow(): boolean {
   const mins = etMinutes();
-  return mins >= 15 * 60 + 50 && mins < 16 * 60;
+  return mins >= 15 * 60 + 50; // no upper bound — eodFiredDate guard prevents double-fire
 }
 
 // Milliseconds until 8:30 AM ET. Returns 0 if already past 8:30.
@@ -261,6 +261,12 @@ export function startScheduler(): void {
 
   // Initial sync + scan (non-blocking)
   syncAccount().then(() => runFullScan()).catch((err) => console.error('[init] startup scan error:', err));
+
+  // If daemon starts after market close and missed the EOD window, close open trades now
+  if (isEODWindow()) {
+    console.log('[scheduler] post-market startup — running missed EOD close');
+    eodClose();
+  }
 
   // Full scan every 60s during market hours
   setInterval(() => {
