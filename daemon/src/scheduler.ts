@@ -1,4 +1,5 @@
 import { runFullScan, runHotSetScan, getCurrentSnapshot } from './scanLoop';
+import { clearUniverseCache } from './engine/proTradeScannerApi';
 import { alpacaBarStream } from './alpacaBarStream';
 import { getState, setState, saveState, applyDayRoll } from './stateStore';
 import { monitorPaperTrades } from './engine/monitorTrades';
@@ -47,6 +48,18 @@ function isMarketHours(): boolean {
 function isEODWindow(): boolean {
   const mins = etMinutes();
   return mins >= 15 * 60 + 50 && mins < 16 * 60;
+}
+
+// Milliseconds until 8:30 AM ET. Returns 0 if already past 8:30.
+function msUntil830ET(): number {
+  const now = new Date();
+  const h = parseInt(now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
+  const m = parseInt(now.toLocaleString('en-US', { timeZone: 'America/New_York', minute: '2-digit' }), 10);
+  const s = parseInt(now.toLocaleString('en-US', { timeZone: 'America/New_York', second: '2-digit' }), 10);
+  const nowSecs = h * 3600 + m * 60 + s;
+  const targetSecs = 8 * 3600 + 30 * 60;
+  if (nowSecs >= targetSecs) return 0;
+  return (targetSecs - nowSecs) * 1000;
 }
 
 let fullScanRunning = false;
@@ -280,6 +293,21 @@ export function startScheduler(): void {
     }
     saveState();
   }, 60_000);
+
+  // Universe rebuild at 8:30 AM ET — gap and RVOL data is reliable by then.
+  // If daemon started before 8:30: schedule a one-shot clear+rebuild at exactly 8:30.
+  // If daemon started after 8:30: the startup scan already builds today's universe (no action needed).
+  const msToRebuild = msUntil830ET();
+  if (msToRebuild > 0) {
+    console.log(`[scheduler] universe rebuild scheduled in ${Math.round(msToRebuild / 60_000)}m (8:30 ET)`);
+    setTimeout(() => {
+      console.log('[scheduler] 8:30 ET — clearing universe cache and rebuilding');
+      clearUniverseCache();
+      runFullScan().catch((err) => console.error('[universe] 8:30 rebuild error:', err));
+    }, msToRebuild);
+  } else {
+    console.log('[scheduler] past 8:30 ET — universe builds on startup scan');
+  }
 
   console.log('[scheduler] started — intervals armed');
 }
