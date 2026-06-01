@@ -109,7 +109,10 @@ export interface ProTradeSnapshot {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function candleTrend(candles: Candle[]) {
+// minVwapDist: minimum fractional distance from session VWAP before calling UP/DOWN.
+// Use 0.001 (10bps) for SPY to prevent flip-flopping on a choppy tape.
+// Use 0 (default) for individual stocks — they need finer-grained trend calls.
+function candleTrend(candles: Candle[], minVwapDist = 0) {
   if (candles.length < 2) return 'FLAT' as const;
 
   // Current ET time — determines which phase of the session we're in
@@ -166,16 +169,14 @@ function candleTrend(candles: Candle[]) {
   const e20 = todayCloses.length >= 2 ? last(ema(todayCloses, 20)) : null;
   const currentPrice = last(closes(candles));
 
-  // Require price to be ≥0.10% away from VWAP before calling a trend.
-  // Without this gate, SPY hugging VWAP intraday causes flip-flopping every scan.
   const distFromVwap = svwap > 0 ? (currentPrice - svwap) / svwap : 0;
-  const MIN_VWAP_DIST = 0.0010; // 10 bps — noise floor
 
-  if (Math.abs(distFromVwap) < MIN_VWAP_DIST) return 'FLAT' as const;
+  // Noise floor: caller can require minimum VWAP distance (e.g. 10bps for SPY)
+  if (Math.abs(distFromVwap) < minVwapDist) return 'FLAT' as const;
 
   // Lead signal: distance confirmed + slope agrees
-  if (distFromVwap > 0 && sSlope > 0) return 'UP' as const;
-  if (distFromVwap < 0 && sSlope < 0) return 'DOWN' as const;
+  if (distFromVwap > 0 && sSlope > 0.0001) return 'UP' as const;
+  if (distFromVwap < 0 && sSlope < -0.0001) return 'DOWN' as const;
 
   // Standard: VWAP distance + EMA20 both agree
   if (distFromVwap > 0 && (e20 === null || currentPrice > e20)) return 'UP' as const;
@@ -485,8 +486,8 @@ export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRo
     fetchBars(['SPY'], '1h'),
     fetchSpyDailyBars(),
   ]);
-  const spyTrend5m = candleTrend(spy5mBars['SPY'] || []);
-  const spyTrend15m = candleTrend(spy15mBars['SPY'] || []);
+  const spyTrend5m = candleTrend(spy5mBars['SPY'] || [], 0.001);
+  const spyTrend15m = candleTrend(spy15mBars['SPY'] || [], 0.001);
   const vixLevel = spyRegimeData.vixLevel;
   // 3-bar rolling SPY change — matches computeRsVsBenchmark window; was hardcoded 0 in caller
   const spyH1 = (spyH1Bars['SPY'] || []).slice(-5);
@@ -550,8 +551,8 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
   const spyChangePct = spyBase > 0 ? (spyLast - spyBase) / spyBase : 0;
 
   const spy5m = (spy5mBars['SPY'] || []);
-  const spyTrend5m = candleTrend(spy5m);
-  const spyTrend15m = candleTrend(spy15mBars['SPY'] || []);
+  const spyTrend5m = candleTrend(spy5m, 0.001);
+  const spyTrend15m = candleTrend(spy15mBars['SPY'] || [], 0.001);
 
   // Macro regime: SPY EMA200 (daily) + VIX
   const spyDailyCloses = spyRegimeData.spyBars.map((c) => c.close);
