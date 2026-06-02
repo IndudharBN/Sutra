@@ -13,7 +13,7 @@ An intraday day-trading terminal built in React + TypeScript. Combines a live mu
 | Market Data | Alpaca IEX feed (bars, snapshots, news, WebSocket stream) |
 | Paper Execution | Alpaca Paper Trading API (bracket orders) |
 | Trade Persistence | `data/trades.json` — written by daemon, survives browser refreshes and reboots |
-| Process Manager | pm2 — auto-restarts on crash, auto-starts on Windows login |
+| Process Manager | Daemon: direct node (visible cmd window). UI: pm2 (`sutra-ui`). Auto-start: Windows Task Scheduler. |
 | Charting | TradingView widget + lightweight-charts (equity curve) |
 
 ---
@@ -22,34 +22,79 @@ An intraday day-trading terminal built in React + TypeScript. Combines a live mu
 
 ### First-time setup
 
-```bash
+```powershell
 npm install
-npm install -g pm2 pm2-windows-startup
 
 # Daemon env vars — copy and fill in your Alpaca paper keys
 copy daemon\.env.daemon.example daemon\.env.daemon
 
 # Build the daemon
-npm run build:daemon
+cd daemon && npm run build && cd ..
 
-# Register pm2 to auto-start on Windows login (run once)
-pm2-startup install
+# Register Windows Task Scheduler auto-start (run once, no admin needed)
+powershell -ExecutionPolicy Bypass -File .\REGISTER_AUTOSTART.ps1
 
-# Start both the daemon and the UI
-npm run daemon:start
+# Start everything
+.\ENSURE_RUNNING.bat
 ```
 
 Open: `http://localhost:3006`
 
 ### Day-to-day
 
-Nothing. Both processes start automatically when Windows starts. If you need to manually interact:
+**Nothing to do.** The Windows Task Scheduler task `Sutra-EnsureRunning` fires on every
+workstation unlock and logon — Sutra starts itself.
 
-```bash
-npm run daemon:status    # check daemon is running
-npm run daemon:logs      # tail live logs
-npm run daemon:restart   # rebuild daemon + restart (after code changes)
-pm2 restart sutra-ui     # restart Vite UI (after UI code changes)
+Open `http://localhost:3006` and check the **● Daemon** badge is green in the top bar.
+
+### Manual start (if needed)
+
+```bat
+ENSURE_RUNNING.bat
+```
+
+Safe to run anytime. If both processes are already up it exits in under a second.
+
+---
+
+## What happens when the daemon crashes
+
+1. The cmd window titled **"Sutra Daemon [3001]"** stays open showing the full error and a
+   `[DAEMON CRASHED -- check error above]` line, then pauses.
+2. The dashboard **● Daemon** badge switches to **○ Daemon offline** (red).
+3. Scanning, trade monitoring, and EOD close all stop until restart.
+4. The UI stays up — you can still read trade history and the last known risk state.
+
+### Restart after a crash
+
+Close the crashed cmd window (or press any key to dismiss), then run:
+
+```bat
+ENSURE_RUNNING.bat
+```
+
+The bat kills any stale port holder, opens a fresh daemon window, and the UI reconnects
+automatically within a few seconds.
+
+On startup the daemon recovers automatically:
+- Loads risk state from `data/daemon-state.json`
+- Uses today's universe from file cache if already built; re-runs screener if not
+- Runs a full scan immediately
+- If it starts after 3:50 PM ET, fires the missed EOD close automatically
+
+### Restart the UI (rare — pm2 keeps it stable)
+
+```powershell
+pm2 restart sutra-ui
+pm2 logs sutra-ui --lines 30
+```
+
+### After daemon code changes
+
+```powershell
+cd daemon && npm run build && cd ..
+# Close the "Sutra Daemon [3001]" window, then:
+.\ENSURE_RUNNING.bat
 ```
 
 ### One-time migration from localStorage (existing installs only)
@@ -231,7 +276,7 @@ Stocks at `forming`, `confirmed`, `locked`, or `trade_ready` stage are subscribe
 
 ## Daemon Architecture
 
-The daemon (`daemon/src/`) is a persistent Node.js process (pm2) that runs independently of the browser:
+The daemon (`daemon/src/`) is a persistent Node.js process (direct node, visible cmd window) that runs independently of the browser:
 
 ```
 daemon/src/
