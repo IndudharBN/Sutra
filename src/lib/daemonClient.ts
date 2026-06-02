@@ -103,6 +103,8 @@ export const daemonClient = {
 
   triggerScan: () => post<{ ok: boolean }>('/api/scan'),
 
+  rebuildUniverse: () => post<{ ok: boolean }>('/api/universe/rebuild'),
+
   isDaemonReachable: async (): Promise<boolean> => {
     try { await get<DaemonHealth>('/api/health'); return true; } catch { return false; }
   },

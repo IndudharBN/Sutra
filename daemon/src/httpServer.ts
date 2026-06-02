@@ -253,6 +253,16 @@ app.post('/api/trades/:id/close', (req, res) => {
   res.json(closed);
 });
 
+// POST /api/universe/rebuild — clear universe cache and rebuild from screener immediately
+app.post('/api/universe/rebuild', (_req, res) => {
+  clearUniverseCache();
+  console.log('[universe] manual rebuild triggered — cache cleared, rebuilding from screener');
+  res.json({ ok: true, message: 'universe rebuild triggered' });
+  setImmediate(() => {
+    runFullScan().catch((err) => console.warn('[httpServer] universe rebuild error:', err));
+  });
+});
+
 // POST /api/scan — trigger an immediate full scan (UI refresh button)
 // If the current universe is a fallback, clears the cache first so the screener is retried.
 app.post('/api/scan', (_req, res) => {

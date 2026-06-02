@@ -1471,6 +1471,7 @@ export function ProTradeScannerScreen() {
   React.useEffect(() => { snapshotRef.current = snapshot; }, [snapshot]);
   const [loading, setLoading] = React.useState(true);
   const [manualLoading, setManualLoading] = React.useState(false);
+  const [rebuildLoading, setRebuildLoading] = React.useState(false);
   const [error, setError] = React.useState('');
   const [activeStage, setActiveStage] = React.useState<StageFilter>('forming');
   const [activeStrategy, setActiveStrategy] = React.useState<StrategyId | 'all'>('all');
@@ -1740,6 +1741,14 @@ export function ProTradeScannerScreen() {
       if (s['trades']) setPaperTrades(s['trades'] as PaperTrade[]);
     } catch { /* daemon offline — ignore */ }
     finally { setManualLoading(false); }
+  }
+
+  async function rebuildUniverse() {
+    setRebuildLoading(true);
+    try {
+      await daemonClient.rebuildUniverse();
+    } catch { /* daemon offline */ }
+    finally { setRebuildLoading(false); }
   }
 
   function createPaperTrade(row: ProTradeRow) {
@@ -2078,6 +2087,15 @@ export function ProTradeScannerScreen() {
           >
             <RefreshCcw size={14} className={manualLoading || loading ? 'animate-spin' : ''} />
             <span className="text-[10px] font-black uppercase tracking-widest">{manualLoading || loading ? 'Scanning' : 'Refresh'}</span>
+          </button>
+          <button
+            onClick={() => void rebuildUniverse()}
+            disabled={rebuildLoading}
+            title="Clear universe cache and re-run screener + ADR/DVOL/Beta gates"
+            className={`h-9 px-4 rounded-full border flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-wait ${universeFallback ? 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20' : 'border-violet-500/20 bg-violet-500/8 text-violet-300 hover:bg-violet-500/15'}`}
+          >
+            <RefreshCcw size={14} className={rebuildLoading ? 'animate-spin' : ''} />
+            <span className="text-[10px] font-black uppercase tracking-widest">{rebuildLoading ? 'Rebuilding' : 'Rebuild Universe'}</span>
           </button>
         </div>
       </div>
