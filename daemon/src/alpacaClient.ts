@@ -319,7 +319,7 @@ export function selectTopSymbols(metas: SymbolMeta[], n = 60): string[] {
 
 // ── Universe persistence — file-backed (replaces browser localStorage) ──────
 const UNIVERSE_FILE = path.join(__dirname, '../../data/universe-cache.json');
-const UNIVERSE_TTL_MS = 6 * 60 * 60 * 1000;
+const UNIVERSE_TTL_MS = 10 * 60 * 60 * 1000;
 export const UNIVERSE_TARGET = 120;
 
 const BETA_MIN = 1.2;
