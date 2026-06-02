@@ -1539,8 +1539,9 @@ export function ProTradeScannerScreen() {
       daemonWs.on('connected', () => setDaemonOnline(true)),
       daemonWs.on('disconnected', () => setDaemonOnline(false)),
       daemonWs.on('snapshot_update', (payload) => {
-        const p = payload as { rows: ProTradeRow[]; spyTrend5m: 'UP'|'DOWN'|'FLAT'; spyTrend15m: 'UP'|'DOWN'|'FLAT'; regime: ProTradeSnapshot['regime']; fetchedAt: string; universeBuiltAt?: string | null };
-        setSnapshot((prev) => prev ? { ...prev, ...p, universeBuiltAt: p.universeBuiltAt ?? prev.universeBuiltAt } : { rows: p.rows, rawRows: p.rows, filteredRows: [], qualifiedCount: 0, scannedCount: p.rows.length, rawCount: p.rows.length, filteredOut: 0, fetchedAt: p.fetchedAt, universeBuiltAt: p.universeBuiltAt ?? null, providerStatus: 'daemon', spyTrend5m: p.spyTrend5m, spyTrend15m: p.spyTrend15m, regime: p.regime });
+        const p = payload as { rows: ProTradeRow[]; spyTrend5m: 'UP'|'DOWN'|'FLAT'; spyTrend15m: 'UP'|'DOWN'|'FLAT'; regime: ProTradeSnapshot['regime']; fetchedAt: string; universeBuiltAt?: string | null; qualifiedCount?: number; universeSize?: number };
+        const qCount = p.qualifiedCount ?? p.rows.filter(r => r.qualified).length;
+        setSnapshot((prev) => prev ? { ...prev, ...p, universeBuiltAt: p.universeBuiltAt ?? prev.universeBuiltAt, qualifiedCount: qCount, scannedCount: p.universeSize ?? p.rows.length } : { rows: p.rows, rawRows: p.rows, filteredRows: [], qualifiedCount: qCount, scannedCount: p.universeSize ?? p.rows.length, rawCount: p.rows.length, filteredOut: 0, fetchedAt: p.fetchedAt, universeBuiltAt: p.universeBuiltAt ?? null, providerStatus: 'daemon', spyTrend5m: p.spyTrend5m, spyTrend15m: p.spyTrend15m, regime: p.regime });
         setLoading(false);
         setError('');
       }),
@@ -1883,8 +1884,13 @@ export function ProTradeScannerScreen() {
               <div className="ml-auto text-right">
                 <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">Scan Health</p>
                 <p className="text-xs font-mono text-slate-300 leading-none">
-                  {formingCount} forming ·{' '}
-                  <span className={tradeReadyCount > 0 ? 'text-emerald-400 font-black' : 'text-slate-400'}>
+                  <span className="text-slate-400">universe {snapshot?.scannedCount ?? rows.length}</span>
+                  {' '}·{' '}
+                  <span className={(snapshot?.qualifiedCount ?? 0) > 0 ? 'text-emerald-400 font-black' : 'text-slate-500'}>
+                    {snapshot?.qualifiedCount ?? 0} qualified
+                  </span>
+                  {' '}· {formingCount} forming ·{' '}
+                  <span className={tradeReadyCount > 0 ? 'text-amber-400 font-black' : 'text-slate-400'}>
                     {tradeReadyCount} ready
                   </span>
                   {pendingConfirmCount > 0 && (
@@ -1999,7 +2005,7 @@ export function ProTradeScannerScreen() {
               Provider: Alpaca IEX
             </span>
             <span className="px-3 py-1 rounded-full border border-violet-500/20 text-violet-300 bg-violet-500/10">
-              Screened Universe: {snapshot?.universeBuiltAt ? `locked ${toETTime(snapshot.universeBuiltAt)} ET` : 'pending 8:30 AM ET'}
+              Universe: {snapshot ? `${rows.length} stocks${snapshot.universeBuiltAt ? ` · built ${toETTime(snapshot.universeBuiltAt)} ET` : ''}` : 'building…'}
             </span>
             {watchlist.symbols.length > 0 && (
               <span className="px-3 py-1 rounded-full border border-amber-500/30 text-amber-300 bg-amber-500/10">

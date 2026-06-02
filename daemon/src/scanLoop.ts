@@ -44,6 +44,8 @@ export async function runFullScan(): Promise<void> {
     regime: snapshot.regime,
     fetchedAt: snapshot.fetchedAt,
     universeBuiltAt: getUniverseBuiltAt(),
+    qualifiedCount: qualified,
+    universeSize: snapshot.rows.length,
   });
 }
 
