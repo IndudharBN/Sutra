@@ -3,7 +3,7 @@ import type { ProTradeSnapshot, ProTradeRow } from './engine/proTradeScannerApi'
 import { alpacaBarStream } from './alpacaBarStream';
 import { getState } from './stateStore';
 import { emit } from './httpServer';
-import { getUniverseBuiltAt } from './alpacaClient';
+import { getUniverseBuiltAt, isUniverseFallback } from './alpacaClient';
 
 let currentSnapshot: ProTradeSnapshot | null = null;
 
@@ -46,6 +46,7 @@ export async function runFullScan(): Promise<void> {
     universeBuiltAt: getUniverseBuiltAt(),
     qualifiedCount: qualified,
     universeSize: snapshot.rows.length,
+    universeFallback: isUniverseFallback(),
   });
 }
 

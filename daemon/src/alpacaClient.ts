@@ -341,7 +341,9 @@ function toETDate(): string {
 }
 
 let _universeBuiltAt: string | null = null;
+let _universeFallback = false;
 export function getUniverseBuiltAt(): string | null { return _universeBuiltAt; }
+export function isUniverseFallback(): boolean { return _universeFallback; }
 
 function readUniverseFile(): UniverseFile | null {
   try {
@@ -448,6 +450,7 @@ export async function buildDynamicUniverse(
   const fileData = readUniverseFile();
   if (fileData?.date === today) {
     if (fileData.builtAt) _universeBuiltAt = fileData.builtAt;
+    _universeFallback = false;
     const symbols = [...new Set([...fileData.symbols, ...pinnedSymbols])];
     cacheSet('universe', fileData.symbols, UNIVERSE_TTL_MS);
     return symbols;
@@ -506,12 +509,15 @@ export async function buildDynamicUniverse(
     if (ranked.length < 20) throw new Error(`only ${ranked.length} symbols passed gates`);
     cacheSet('universe', ranked, UNIVERSE_TTL_MS);
     writeUniverseFile(ranked);
+    _universeFallback = false;
     return [...new Set([...ranked, ...pinnedSymbols])];
   } catch (err) {
     console.warn('[Universe] Dynamic build failed, using static fallback:', err);
     const fallback = (staticFallback.length ? staticFallback : DEFAULT_LIVE_UNIVERSE).slice(0, UNIVERSE_TARGET);
-    cacheSet('universe', fallback, 30 * 60 * 1000);
+    cacheSet('universe', fallback, 5 * 60 * 1000); // 5-min TTL so next scan retries screener soon
     _universeBuiltAt = new Date().toISOString();
+    _universeFallback = true;
+    console.warn('[Universe] FALLBACK active — will retry screener in 5 min');
     return [...new Set([...fallback, ...pinnedSymbols])];
   }
 }

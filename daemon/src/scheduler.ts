@@ -1,5 +1,6 @@
 import { runFullScan, runHotSetScan, getCurrentSnapshot } from './scanLoop';
 import { clearUniverseCache } from './engine/proTradeScannerApi';
+import { isUniverseFallback, clearUniverseCache as clearUniverseCacheClient } from './alpacaClient';
 import { alpacaBarStream } from './alpacaBarStream';
 import { getState, setState, saveState, applyDayRoll } from './stateStore';
 import { monitorPaperTrades } from './engine/monitorTrades';
@@ -259,8 +260,16 @@ export function startScheduler(): void {
   // once per symbol (120 calls/5m = Alpaca 429). The 20s timer below is sufficient.
   alpacaBarStream.connect();
 
-  // Initial sync + scan (non-blocking)
-  syncAccount().then(() => runFullScan()).catch((err) => console.error('[init] startup scan error:', err));
+  // Initial sync + scan. If the universe lands on fallback, retry after 5 min.
+  syncAccount().then(() => runFullScan()).then(() => {
+    if (isUniverseFallback()) {
+      console.warn('[scheduler] startup scan used fallback universe — retrying screener in 5 min');
+      setTimeout(() => {
+        clearUniverseCacheClient();
+        runFullScan().catch((err) => console.error('[scheduler] fallback-retry scan error:', err));
+      }, 5 * 60 * 1000);
+    }
+  }).catch((err) => console.error('[init] startup scan error:', err));
 
   // If daemon starts after market close and missed the EOD window, close open trades now
   if (isEODWindow()) {

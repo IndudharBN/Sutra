@@ -1492,6 +1492,7 @@ export function ProTradeScannerScreen() {
   const [viewMode, setViewMode] = React.useState<'premarket' | 'workflow'>(() => isPremarketWindow() ? 'premarket' : 'workflow');
   const [riskData, setRiskData] = React.useState<DaemonRisk | null>(null);
   const [daemonOnline, setDaemonOnline] = React.useState<boolean | null>(null);
+  const [universeFallback, setUniverseFallback] = React.useState(false);
 
   // ── Daemon: initial state load ────────────────────────────────────────────
   React.useEffect(() => {
@@ -1500,7 +1501,8 @@ export function ProTradeScannerScreen() {
     // Load initial state from daemon REST
     daemonClient.getState()
       .then((state: Record<string, unknown>) => {
-        if (state['rows']) setSnapshot({ rows: state['rows'], rawRows: state['rawRows'] ?? [], filteredRows: state['filteredRows'] ?? [], qualifiedCount: 0, scannedCount: 0, rawCount: 0, filteredOut: 0, fetchedAt: (state['fetchedAt'] as string) ?? new Date().toISOString(), universeBuiltAt: (state['universeBuiltAt'] as string | null) ?? null, providerStatus: 'daemon', spyTrend5m: (state['spyTrend5m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', spyTrend15m: (state['spyTrend15m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', regime: state['regime'] as ProTradeSnapshot['regime'] } as ProTradeSnapshot);
+        if (state['rows']) { const rows = state['rows'] as ProTradeRow[]; setSnapshot({ rows, rawRows: rows, filteredRows: [], qualifiedCount: rows.filter(r => r.qualified).length, scannedCount: rows.length, rawCount: rows.length, filteredOut: 0, fetchedAt: (state['fetchedAt'] as string) ?? new Date().toISOString(), universeBuiltAt: (state['universeBuiltAt'] as string | null) ?? null, providerStatus: 'daemon', spyTrend5m: (state['spyTrend5m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', spyTrend15m: (state['spyTrend15m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', regime: state['regime'] as ProTradeSnapshot['regime'] } as ProTradeSnapshot); }
+        if (state['universeFallback']) setUniverseFallback(state['universeFallback'] as boolean);
         if (state['trades']) setPaperTrades(state['trades'] as PaperTrade[]);
         setDaemonOnline(true);
         setLoading(false);
@@ -1539,8 +1541,9 @@ export function ProTradeScannerScreen() {
       daemonWs.on('connected', () => setDaemonOnline(true)),
       daemonWs.on('disconnected', () => setDaemonOnline(false)),
       daemonWs.on('snapshot_update', (payload) => {
-        const p = payload as { rows: ProTradeRow[]; spyTrend5m: 'UP'|'DOWN'|'FLAT'; spyTrend15m: 'UP'|'DOWN'|'FLAT'; regime: ProTradeSnapshot['regime']; fetchedAt: string; universeBuiltAt?: string | null; qualifiedCount?: number; universeSize?: number };
+        const p = payload as { rows: ProTradeRow[]; spyTrend5m: 'UP'|'DOWN'|'FLAT'; spyTrend15m: 'UP'|'DOWN'|'FLAT'; regime: ProTradeSnapshot['regime']; fetchedAt: string; universeBuiltAt?: string | null; qualifiedCount?: number; universeSize?: number; universeFallback?: boolean };
         const qCount = p.qualifiedCount ?? p.rows.filter(r => r.qualified).length;
+        if (p.universeFallback !== undefined) setUniverseFallback(p.universeFallback);
         setSnapshot((prev) => prev ? { ...prev, ...p, universeBuiltAt: p.universeBuiltAt ?? prev.universeBuiltAt, qualifiedCount: qCount, scannedCount: p.universeSize ?? p.rows.length } : { rows: p.rows, rawRows: p.rows, filteredRows: [], qualifiedCount: qCount, scannedCount: p.universeSize ?? p.rows.length, rawCount: p.rows.length, filteredOut: 0, fetchedAt: p.fetchedAt, universeBuiltAt: p.universeBuiltAt ?? null, providerStatus: 'daemon', spyTrend5m: p.spyTrend5m, spyTrend15m: p.spyTrend15m, regime: p.regime });
         setLoading(false);
         setError('');
@@ -2004,8 +2007,9 @@ export function ProTradeScannerScreen() {
             <span className="px-3 py-1 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10">
               Provider: Alpaca IEX
             </span>
-            <span className="px-3 py-1 rounded-full border border-violet-500/20 text-violet-300 bg-violet-500/10">
+            <span className={`px-3 py-1 rounded-full border ${universeFallback ? 'border-amber-500/40 text-amber-300 bg-amber-500/10' : 'border-violet-500/20 text-violet-300 bg-violet-500/10'}`}>
               Universe: {snapshot ? `${rows.length} stocks${snapshot.universeBuiltAt ? ` · built ${toETTime(snapshot.universeBuiltAt)} ET` : ''}` : 'building…'}
+              {universeFallback && ' ⚠ fallback — click refresh to rebuild'}
             </span>
             {watchlist.symbols.length > 0 && (
               <span className="px-3 py-1 rounded-full border border-amber-500/30 text-amber-300 bg-amber-500/10">

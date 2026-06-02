@@ -12,7 +12,7 @@ import {
   getGroupCbSummary,
   unpauseGroupCb,
 } from './riskManager';
-import { getUniverseBuiltAt } from './alpacaClient';
+import { getUniverseBuiltAt, isUniverseFallback, clearUniverseCache } from './alpacaClient';
 import { closePaperTrade } from './engine/monitorTrades';
 import type { PaperTrade } from './types';
 import type { SignalGroup } from './types';
@@ -105,6 +105,7 @@ app.get('/api/state', (_req, res) => {
     regime: snapshot?.regime ?? null,
     fetchedAt: snapshot?.fetchedAt ?? null,
     universeBuiltAt: getUniverseBuiltAt(),
+    universeFallback: isUniverseFallback(),
     trades: loadTrades(),
     riskState: state.riskState,
     riskSettings: state.riskSettings,
@@ -253,9 +254,14 @@ app.post('/api/trades/:id/close', (req, res) => {
 });
 
 // POST /api/scan — trigger an immediate full scan (UI refresh button)
-// Returns immediately; scan runs async and pushes result via snapshot_update WS event.
+// If the current universe is a fallback, clears the cache first so the screener is retried.
 app.post('/api/scan', (_req, res) => {
-  res.json({ ok: true, message: 'scan triggered' });
+  const wasFallback = isUniverseFallback();
+  if (wasFallback) {
+    clearUniverseCache();
+    console.log('[scan] refresh triggered — fallback universe cleared, rebuilding from screener');
+  }
+  res.json({ ok: true, message: wasFallback ? 'scan triggered — rebuilding universe from screener' : 'scan triggered' });
   setImmediate(() => {
     runFullScan().catch((err) => console.warn('[httpServer] manual scan error:', err));
   });
