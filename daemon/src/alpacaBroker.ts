@@ -60,7 +60,9 @@ export async function placePaperBracketOrder(params: {
 }): Promise<AlpacaOrderResult> {
   const { symbol, direction, entry, stop, target, notional } = params;
   const side = direction === 'BULL' ? 'buy' : 'sell';
-  const qty = Math.max(0.0001, Math.round((notional / entry) * 10000) / 10000);
+  // Whole shares only — Alpaca rejects fractional quantities on bracket orders
+  // ("fractional orders must be simple orders"). Min 1 share to avoid zero-qty.
+  const qty = Math.max(1, Math.round(notional / entry));
   const buff = Number((entry * 0.001).toFixed(2));
   const stopLimitPrice = direction === 'BULL'
     ? Number((stop - buff).toFixed(2))

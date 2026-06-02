@@ -1,9 +1,8 @@
 import express from 'express';
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import * as fs from 'fs';
-import * as path from 'path';
 import { env } from './env';
+import { loadTrades, saveTrades, appendLedger } from './tradeStore';
 import { getState, setState, saveState } from './stateStore';
 import { getCurrentSnapshot, runFullScan } from './scanLoop';
 import { getPaperAccount, placePaperBracketOrder, closePaperPosition } from './alpacaBroker';
@@ -16,18 +15,6 @@ import { getUniverseBuiltAt, isUniverseFallback, clearUniverseCache } from './al
 import { closePaperTrade } from './engine/monitorTrades';
 import type { PaperTrade } from './types';
 import type { SignalGroup } from './types';
-
-const TRADES_FILE = path.join(__dirname, '../../data/trades.json');
-
-function loadTrades(): PaperTrade[] {
-  try { return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf-8')); } catch { return []; }
-}
-
-function saveTrades(trades: PaperTrade[]): void {
-  const tmp = TRADES_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(trades, null, 2));
-  fs.renameSync(tmp, TRADES_FILE);
-}
 
 // ── WebSocket broadcast ────────────────────────────────────────────────────────
 
@@ -45,6 +32,11 @@ export type WsEvent =
   | 'account_update';
 
 export function emit(event: WsEvent, payload: unknown): void {
+  // Mirror every trade lifecycle event into the append-only ledger. This is the
+  // single choke point all trade events pass through, from any source.
+  if (event === 'trade_opened' || event === 'trade_updated' || event === 'trade_closed') {
+    appendLedger(event, payload);
+  }
   if (!wss) return;
   const msg = JSON.stringify({ event, payload });
   for (const client of wss.clients) {
@@ -277,7 +269,9 @@ app.post('/api/scan', (_req, res) => {
   });
 });
 
-// DELETE /api/trades — clear all trades (dev/reset only)
+// DELETE /api/trades — clear all trades (dev/reset only).
+// saveTrades() snapshots the existing trades to a timestamped backup before
+// clearing, and the trade-ledger.jsonl history is never touched.
 app.delete('/api/trades', (_req, res) => {
   saveTrades([]);
   res.json({ ok: true });

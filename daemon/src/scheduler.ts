@@ -11,24 +11,8 @@ import { checkSectorConcentration, checkPortfolioBeta } from './portfolioRisk';
 import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperPosition, closeAllPaperPositions } from './alpacaBroker';
 import { env } from './env';
 import { emit } from './httpServer';
-import * as fs from 'fs';
-import * as path from 'path';
-
-const TRADES_FILE = path.join(__dirname, '../../data/trades.json');
-
-function loadTrades() {
-  try {
-    return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf-8'));
-  } catch {
-    return [];
-  }
-}
-
-function saveTrades(trades: unknown[]) {
-  const tmp = TRADES_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(trades, null, 2));
-  fs.renameSync(tmp, TRADES_FILE);
-}
+import { loadTrades, saveTrades, appendLedger } from './tradeStore';
+import type { PaperTrade } from './types';
 
 function toETDate(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -226,7 +210,7 @@ function eodClose(): void {
     const price = priceBySymbol.get(t.symbol) ?? t.entry;
     const gross = t.direction === 'BEAR' ? (t.entry - price) * t.quantity : (price - t.entry) * t.quantity;
     changed = true;
-    return {
+    const closed = {
       ...t,
       status: 'Closed',
       outcome: 'EOD',
@@ -235,10 +219,13 @@ function eodClose(): void {
       pnlPercent: Number((gross / t.notional * 100).toFixed(2)),
       closedAt: new Date().toISOString(),
     };
+    // eodClose does not go through emit(), so record the close in the ledger here.
+    appendLedger('trade_closed', closed);
+    return closed;
   });
 
   if (changed) {
-    saveTrades(updated);
+    saveTrades(updated as PaperTrade[]);
     console.log('[eod] all open trades closed at market');
     closeAllPaperPositions().catch((err: Error) =>
       console.warn('[alpaca] EOD closeAll failed:', err.message),
