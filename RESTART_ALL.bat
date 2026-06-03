@@ -27,8 +27,10 @@ if errorlevel 1 (
 )
 
 :: -- Stop the old daemon on 3001 (UI is pm2-managed; pm2 restarts it) ------
+:: NOTE: netstat instead of Get-NetTCPConnection -- the latter is CIM/WMI-backed
+:: and can hang for minutes on Windows 11, stalling the restart.
 echo  [2/4] Stopping daemon on port 3001...
-PowerShell -NoProfile -Command "$c = Get-NetTCPConnection -LocalPort 3001 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue; Write-Host ('  Daemon stopped (PID ' + $c.OwningProcess + ').') } else { Write-Host '  Daemon was not running.' }"
+PowerShell -NoProfile -Command "$ls = netstat -ano | Select-String ':3001\s' | Where-Object { $_ -match 'LISTENING' }; $procIds = $ls | ForEach-Object { ($_.ToString().Trim() -split '\s+')[-1] } | Sort-Object -Unique; if ($procIds) { foreach ($p in $procIds) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; Write-Host ('  Daemon stopped (PID ' + $p + ').') } } else { Write-Host '  Daemon was not running.' }"
 timeout /t 2 /nobreak >nul
 
 :: -- Start a fresh daemon window ------------------------------------------

@@ -1495,19 +1495,29 @@ export function ProTradeScannerScreen() {
   const [daemonOnline, setDaemonOnline] = React.useState<boolean | null>(null);
   const [universeFallback, setUniverseFallback] = React.useState(false);
 
+  // Apply a full daemon /api/state payload to local UI state.
+  // Shared by mount load, WS reconnect-refetch, the polling backstop, and manual
+  // refresh so they all rebuild the snapshot identically (incl. universeBuiltAt +
+  // fallback). REST is the source of truth; WS only carries deltas on top of this.
+  const applyDaemonState = React.useCallback((state: Record<string, unknown>) => {
+    if (state['rows']) {
+      const rows = state['rows'] as ProTradeRow[];
+      setSnapshot({ rows, rawRows: rows, filteredRows: [], qualifiedCount: rows.filter(r => r.qualified).length, scannedCount: rows.length, rawCount: rows.length, filteredOut: 0, fetchedAt: (state['fetchedAt'] as string) ?? new Date().toISOString(), universeBuiltAt: (state['universeBuiltAt'] as string | null) ?? null, providerStatus: 'daemon', spyTrend5m: (state['spyTrend5m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', spyTrend15m: (state['spyTrend15m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', regime: state['regime'] as ProTradeSnapshot['regime'] } as ProTradeSnapshot);
+    }
+    if (state['universeFallback'] !== undefined) setUniverseFallback(state['universeFallback'] as boolean);
+    if (state['trades']) setPaperTrades(state['trades'] as PaperTrade[]);
+    setDaemonOnline(true);
+    setLoading(false);
+    setError('');
+  }, []);
+
   // ── Daemon: initial state load ────────────────────────────────────────────
   React.useEffect(() => {
     daemonWs.connect();
 
     // Load initial state from daemon REST
     daemonClient.getState()
-      .then((state: Record<string, unknown>) => {
-        if (state['rows']) { const rows = state['rows'] as ProTradeRow[]; setSnapshot({ rows, rawRows: rows, filteredRows: [], qualifiedCount: rows.filter(r => r.qualified).length, scannedCount: rows.length, rawCount: rows.length, filteredOut: 0, fetchedAt: (state['fetchedAt'] as string) ?? new Date().toISOString(), universeBuiltAt: (state['universeBuiltAt'] as string | null) ?? null, providerStatus: 'daemon', spyTrend5m: (state['spyTrend5m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', spyTrend15m: (state['spyTrend15m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', regime: state['regime'] as ProTradeSnapshot['regime'] } as ProTradeSnapshot); }
-        if (state['universeFallback']) setUniverseFallback(state['universeFallback'] as boolean);
-        if (state['trades']) setPaperTrades(state['trades'] as PaperTrade[]);
-        setDaemonOnline(true);
-        setLoading(false);
-      })
+      .then(applyDaemonState)
       .catch(() => {
         setDaemonOnline(false);
         setError('Daemon offline — start with: npm run daemon');
@@ -1528,18 +1538,33 @@ export function ProTradeScannerScreen() {
     const acctId = window.setInterval(() => {
       daemonClient.getAccount().then((a) => { if (a.equity > 0) setAccountBalance(a.equity); }).catch(() => {});
       daemonClient.getRisk().then(setRiskData).catch(() => {});
+      // Snapshot polling backstop: only fire when the WS is down. A WebSocket is
+      // best-effort push, not a sync guarantee — if the socket drops (laptop sleep,
+      // backgrounded tab, network blip) no push arrives and the screen would freeze
+      // on stale rows. This REST poll repaints from the source of truth within 15s.
+      // When the WS is healthy we skip it so push deltas aren't clobbered.
+      if (!daemonWs.connected) {
+        daemonClient.getState().then(applyDaemonState).catch(() => setDaemonOnline(false));
+      }
     }, 15_000);
 
     return () => {
       window.clearInterval(acctId);
       daemonWs.destroy();
     };
-  }, []);
+  }, [applyDaemonState]);
 
   // ── Daemon WebSocket push ─────────────────────────────────────────────────
   React.useEffect(() => {
     const unsubs = [
-      daemonWs.on('connected', () => setDaemonOnline(true)),
+      daemonWs.on('connected', () => {
+        setDaemonOnline(true);
+        // Reconnect-refetch: the WS only delivers future deltas, so a freshly
+        // (re)opened socket is still showing whatever rows we had when it dropped.
+        // Pull the current snapshot now so a reconnect repaints immediately rather
+        // than waiting for the next scan emit (pre-market that could be 9:30).
+        daemonClient.getState().then(applyDaemonState).catch(() => {});
+      }),
       daemonWs.on('disconnected', () => setDaemonOnline(false)),
       daemonWs.on('snapshot_update', (payload) => {
         const p = payload as { rows: ProTradeRow[]; spyTrend5m: 'UP'|'DOWN'|'FLAT'; spyTrend15m: 'UP'|'DOWN'|'FLAT'; regime: ProTradeSnapshot['regime']; fetchedAt: string; universeBuiltAt?: string | null; qualifiedCount?: number; universeSize?: number; universeFallback?: boolean };
@@ -1571,7 +1596,7 @@ export function ProTradeScannerScreen() {
       }),
     ];
     return () => unsubs.forEach((fn) => fn());
-  }, []);
+  }, [applyDaemonState]);
 
   const alertedTradeReadyRef = React.useRef<Set<string>>(new Set());
   const pendingConfirmCount = 0; // daemon handles confirmation queue
@@ -1737,8 +1762,7 @@ export function ProTradeScannerScreen() {
       await daemonClient.triggerScan();
       // Also pull current state immediately so UI isn't blank while scan runs
       const s = await daemonClient.getState() as Record<string, unknown>;
-      if (s['rows']) setSnapshot({ rows: s['rows'], rawRows: s['rawRows'] ?? [], filteredRows: s['filteredRows'] ?? [], qualifiedCount: 0, scannedCount: 0, rawCount: 0, filteredOut: 0, fetchedAt: (s['fetchedAt'] as string) ?? new Date().toISOString(), universeBuiltAt: null, providerStatus: 'daemon', spyTrend5m: (s['spyTrend5m'] as 'UP'|'DOWN'|'FLAT') ?? 'FLAT', spyTrend15m: (s['spyTrend15m'] as 'UP'|'DOWN'|'FLAT') ?? 'FLAT', regime: s['regime'] as ProTradeSnapshot['regime'] } as ProTradeSnapshot);
-      if (s['trades']) setPaperTrades(s['trades'] as PaperTrade[]);
+      applyDaemonState(s);
     } catch { /* daemon offline — ignore */ }
     finally { setManualLoading(false); }
   }

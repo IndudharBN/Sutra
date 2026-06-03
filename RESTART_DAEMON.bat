@@ -26,8 +26,11 @@ if errorlevel 1 (
 )
 
 :: -- Stop the old daemon on 3001 ------------------------------------------
+:: NOTE: use netstat (fast/reliable) to find the listener PID. Get-NetTCPConnection
+:: is backed by CIM/WMI and can hang for minutes on Windows 11 when that service is
+:: busy -- it stalled this script before, leaving the old daemon running.
 echo  [2/3] Stopping daemon on port 3001...
-PowerShell -NoProfile -Command "$c = Get-NetTCPConnection -LocalPort 3001 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue; Write-Host ('  Daemon stopped (PID ' + $c.OwningProcess + ').') } else { Write-Host '  Daemon was not running.' }"
+PowerShell -NoProfile -Command "$ls = netstat -ano | Select-String ':3001\s' | Where-Object { $_ -match 'LISTENING' }; $procIds = $ls | ForEach-Object { ($_.ToString().Trim() -split '\s+')[-1] } | Sort-Object -Unique; if ($procIds) { foreach ($p in $procIds) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; Write-Host ('  Daemon stopped (PID ' + $p + ').') } } else { Write-Host '  Daemon was not running.' }"
 timeout /t 2 /nobreak >nul
 
 :: -- Start a fresh daemon window ------------------------------------------

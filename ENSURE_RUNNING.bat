@@ -14,10 +14,12 @@ title Sutra -- Ensure Running
 cd /d "%~dp0"
 
 :: -- Daemon on 3001 -----------------------------------------------------------
-PowerShell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 3001 -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
+:: NOTE: netstat probes instead of Get-NetTCPConnection -- the latter is CIM/WMI-
+:: backed and can hang for minutes on Windows 11, which would freeze this watchdog.
+PowerShell -NoProfile -Command "if (netstat -ano | Select-String ':3001\s' | Where-Object { $_ -match 'LISTENING' }) { exit 0 } else { exit 1 }"
 if errorlevel 1 (
   echo [ENSURE] Daemon not on 3001 -- checking for stale port holder...
-  PowerShell -NoProfile -Command "$p = (Get-NetTCPConnection -LocalPort 3001 -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -gt 4 } | Select-Object -First 1).OwningProcess; if ($p) { Stop-Process -Id $p -Force; Start-Sleep -Seconds 2; Write-Host '[ENSURE] Killed stale PID' $p }"
+  PowerShell -NoProfile -Command "$p = netstat -ano | Select-String ':3001\s' | Where-Object { $_ -match 'LISTENING' } | ForEach-Object { ($_.ToString().Trim() -split '\s+')[-1] } | Where-Object { [int]$_ -gt 4 } | Sort-Object -Unique | Select-Object -First 1; if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; Write-Host '[ENSURE] Killed stale PID' $p }"
   echo [ENSURE] Starting Sutra daemon on 3001...
   start "Sutra Daemon [3001]" cmd /k "cd /d "%~dp0" && node daemon/dist/index.js || (echo. & echo [DAEMON CRASHED -- check error above] & pause)"
 ) else (
@@ -25,7 +27,7 @@ if errorlevel 1 (
 )
 
 :: -- UI on 3006 ---------------------------------------------------------------
-PowerShell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 3006 -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
+PowerShell -NoProfile -Command "if (netstat -ano | Select-String ':3006\s' | Where-Object { $_ -match 'LISTENING' }) { exit 0 } else { exit 1 }"
 if errorlevel 1 (
   echo [ENSURE] UI not on 3006 -- starting sutra-ui via pm2...
   pm2 restart sutra-ui

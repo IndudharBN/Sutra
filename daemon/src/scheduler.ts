@@ -30,6 +30,15 @@ function isMarketHours(): boolean {
   return mins >= 9 * 60 + 30 && mins < 16 * 60;
 }
 
+// Scan window starts pre-market so the dashboard builds the tape before the open.
+// This is display only — trading (executor + monitor) stays gated to isMarketHours,
+// so no entries fire before 9:30 ET.
+const PREMARKET_SCAN_START_MIN = 8 * 60; // 08:00 ET — pre-market scan begins
+function isScanWindow(): boolean {
+  const mins = etMinutes();
+  return mins >= PREMARKET_SCAN_START_MIN && mins < 16 * 60;
+}
+
 function isEODWindow(): boolean {
   const mins = etMinutes();
   return mins >= 15 * 60 + 50; // no upper bound — eodFiredDate guard prevents double-fire
@@ -264,17 +273,20 @@ export function startScheduler(): void {
     eodClose();
   }
 
-  // Full scan every 60s during market hours
+  // Full scan every 60s across the scan window (pre-market 8:00 ET → close).
+  // Pre-market scanning keeps the dashboard live before the open; no trades fire
+  // because the executor below stays gated to isMarketHours.
   setInterval(() => {
-    if (!isMarketHours()) return;
+    if (!isScanWindow()) return;
     if (fullScanRunning) return;
     fullScanRunning = true;
     runFullScan().finally(() => { fullScanRunning = false; });
   }, 60_000);
 
-  // Hot-set scan every 20s (backup to bar-stream boundary trigger)
+  // Hot-set scan every 20s (backup to bar-stream boundary trigger).
+  // Runs across the scan window so forming setups stay fresh pre-market too.
   setInterval(() => {
-    if (!isMarketHours()) return;
+    if (!isScanWindow()) return;
     if (hotScanRunning) return;
     hotScanRunning = true;
     runHotSetScan().finally(() => { hotScanRunning = false; });
@@ -318,7 +330,9 @@ export function startScheduler(): void {
     saveState();
   }, 60_000);
 
-  // Universe rebuild at 8:30 AM ET — gap and RVOL data is reliable by then.
+  // Universe rebuild at 8:30 AM ET — gap and RVOL data is reliable by then. This is
+  // the authoritative daily rebuild; the pre-market 60s loop (8:00→8:30) scans the
+  // existing/startup universe so the dashboard is live, then this refreshes it.
   // If daemon started before 8:30: schedule a one-shot clear+rebuild at exactly 8:30.
   // If daemon started after 8:30: the startup scan already builds today's universe (no action needed).
   const msToRebuild = msUntil830ET();
