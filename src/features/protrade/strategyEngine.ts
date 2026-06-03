@@ -1113,6 +1113,9 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
 // R:R minimum 2.0 compensates for the wider stop with a higher reward requirement.
 const STOP_BUFFER_15M = 1.0;
 const MIN_RR_15M = 2.0;
+// ADR floor for the 15m family (S10/S11/S12) only. Scoped here so tuning it
+// never affects the 5m strategies (S1-S9) or the universe-level ADR gate.
+const ADR_MIN_15M = 2.5;
 
 // ─── S10: 15m OB Retest (E1) ─────────────────────────────────────────────────
 // True E1 engine: unmitigated 15m order block created by a ≥1.6×ATR impulse bar.
@@ -1152,7 +1155,7 @@ export function evaluateOrb15mRetest(input: StrategyInput): StrategySignal {
   const atOb = dir === 'BULL' ? atBullOb : atBearOb;
   const obReject = ob && atOb ? rejectionCandle(fifteen, dir, ob) : false;
   const rvolOk = input.rvol >= 1.0;
-  const adrOk = input.atrPct >= 3.0;
+  const adrOk = input.atrPct >= ADR_MIN_15M;
 
   const entry = input.price;
   const rawStop = ob && atOb
@@ -1182,8 +1185,8 @@ export function evaluateOrb15mRetest(input: StrategyInput): StrategySignal {
       ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`)
       : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — 15m OB retest needs participation`),
     adrOk
-      ? pass('ADR ≥3%', `${round(input.atrPct, 1)}% ✓`)
-      : fail('ADR ≥3%', `${round(input.atrPct, 1)}% — 15m OB needs ≥3% daily range`),
+      ? pass('ADR ≥2.5%', `${round(input.atrPct, 1)}% ✓`)
+      : fail('ADR ≥2.5%', `${round(input.atrPct, 1)}% — 15m OB needs ≥2.5% daily range`),
     rrOk
       ? pass('R:R ≥2.0', `${round(computedRR, 2)} ✓`)
       : fail('R:R ≥2.0', `${round(computedRR, 2)} — insufficient reward vs 1×ATR buffer stop`),
@@ -1242,7 +1245,7 @@ export function evaluateVwap15mPullback(input: StrategyInput): StrategySignal {
   const reclaimed = dir === 'BULL' ? trigger.close > input.vwap : trigger.close < input.vwap;
   const rsOk = dir === 'BULL' ? input.rsVsBenchmark >= 1.005 : input.rsVsBenchmark <= 0.995;
   const rvolOk = input.rvol >= 1.0;
-  const adrOk = input.atrPct >= 3.0;
+  const adrOk = input.atrPct >= ADR_MIN_15M;
   const entry = input.price;
   const swing = dir === 'BULL' ? Math.min(...recent4.map(c => c.low)) : Math.max(...recent4.map(c => c.high));
   const rawStop = dir === 'BULL' ? swing - input.atr20 * STOP_BUFFER_15M : swing + input.atr20 * STOP_BUFFER_15M;
@@ -1251,7 +1254,7 @@ export function evaluateVwap15mPullback(input: StrategyInput): StrategySignal {
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
   const rrOk = rr(entry, stop, t2, dir) >= MIN_RR_15M;
-  const tradePlan = selfDir && touchedVwap && reclaimed && rsOk && rvolOk && rrOk
+  const tradePlan = selfDir && touchedVwap && reclaimed && rsOk && rvolOk && adrOk && rrOk
     ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
     : null;
   const checklist = [
@@ -1263,7 +1266,7 @@ export function evaluateVwap15mPullback(input: StrategyInput): StrategySignal {
     reclaimed ? pass('VWAP reclaim', `15m close ${dir === 'BULL' ? 'above' : 'below'} VWAP ✓`) : fail('VWAP reclaim', 'Waiting for 15m close back through VWAP'),
     rsOk ? pass('RS vs SPY ≥0.5%', `${round(input.rsVsBenchmark, 4)} ✓`) : fail('RS vs SPY ≥0.5%', `${round(input.rsVsBenchmark, 4)} — 15m reclaim requires RS edge`),
     rvolOk ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — low-volume 15m reclaim unreliable`),
-    adrOk ? pass('ADR ≥3%', `${round(input.atrPct, 1)}% ✓`) : fail('ADR ≥3%', `${round(input.atrPct, 1)}% — 15m needs ≥3% range`),
+    adrOk ? pass('ADR ≥2.5%', `${round(input.atrPct, 1)}% ✓`) : fail('ADR ≥2.5%', `${round(input.atrPct, 1)}% — 15m needs ≥2.5% range`),
     rrOk ? pass('R:R ≥2.0', '✓') : fail('R:R ≥2.0', 'Reward insufficient vs 1×ATR stop'),
     pass('15m trend', `${input.trend15m}${selfInput.trendAligned ? ' aligned ✓' : ''} — informational`),
   ];
@@ -1278,7 +1281,7 @@ export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
   const fifteen = input.candles.fifteen;
   const trigger = last(fifteen);
   if (fifteen.length < 12 || !trigger) {
-    return signal('ema20_bounce_15m', input, [fail('Data', 'Need 12+ 15m bars (3h of data — fires from ~12:30 PM ET)')], null, 'Insufficient 15m data.');
+    return signal('ema20_bounce_15m', input, [fail('Data', 'Need 12+ 15m bars for a stable EMA20')], null, 'Insufficient 15m data.');
   }
   const ema20Series = ema(closes(fifteen), 20);
   const ema20Now = last(ema20Series);
@@ -1305,7 +1308,12 @@ export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
   );
   const reclaimed = dir === 'BULL' ? trigger.close > ema20Now : trigger.close < ema20Now;
   const rvolOk = input.rvol >= 1.0;
-  const adrOk = input.atrPct >= 3.0;
+  const adrOk = input.atrPct >= ADR_MIN_15M;
+  // Time gate: no S12 entries before 10:45 AM ET (1h15m into the session). A 15m
+  // EMA20 trend isn't meaningful until the session has developed. Explicit clock
+  // gate, same pattern as S1's 10:15 gate.
+  const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const timeGateOk = etNow.getHours() * 60 + etNow.getMinutes() >= 10 * 60 + 45;
   const entry = input.price;
   const rawStop = dir === 'BULL'
     ? ema20Now - input.atr20 * STOP_BUFFER_15M
@@ -1315,7 +1323,7 @@ export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
   const rrOk = rr(entry, stop, t2, dir) >= MIN_RR_15M;
-  const tradePlan = emaRising && touchedEma && reclaimed && rvolOk && rrOk
+  const tradePlan = emaRising && touchedEma && reclaimed && rvolOk && adrOk && rrOk && timeGateOk
     ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
     : null;
   const checklist = [
@@ -1332,12 +1340,13 @@ export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
       ? pass('Recovery candle', `15m close ${dir === 'BULL' ? 'above' : 'below'} EMA20 ✓`)
       : fail('Recovery candle', 'Waiting for 15m close back through EMA20'),
     rvolOk ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — 15m bounce needs volume`),
-    adrOk ? pass('ADR ≥3%', `${round(input.atrPct, 1)}% ✓`) : fail('ADR ≥3%', `${round(input.atrPct, 1)}% — 15m needs ≥3% range`),
+    adrOk ? pass('ADR ≥2.5%', `${round(input.atrPct, 1)}% ✓`) : fail('ADR ≥2.5%', `${round(input.atrPct, 1)}% — 15m needs ≥2.5% range`),
     rrOk ? pass('R:R ≥2.0', '✓') : fail('R:R ≥2.0', 'Reward insufficient vs 1×ATR stop'),
     htfTrendContext(selfInput),
     pass('VWAP', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above ✓' : 'Below ✓') : 'misaligned'} — informational`),
+    timeGateOk ? pass('Time gate ≥10:45 AM', '1h15m into session ✓') : fail('Time gate ≥10:45 AM', `${etNow.getHours()}:${String(etNow.getMinutes()).padStart(2, '0')} ET — S12 waits until 10:45 (15m trend developed)`),
   ];
-  return signal('ema20_bounce_15m', selfInput, checklist, tradePlan, 'S12 15m EMA20 bounce: self-determined direction from 15m EMA20 slope + 45m touch + reclaim + RVOL≥1.0 + R:R≥2.0. Hard gates: selfDir (slope ≥0.1% per 1h), touchedEma, reclaimed, rvolOk, rrOk.');
+  return signal('ema20_bounce_15m', selfInput, checklist, tradePlan, 'S12 15m EMA20 bounce: self-determined direction from 15m EMA20 slope + 45m touch + reclaim + RVOL≥1.0 + R:R≥2.0 + time gate ≥10:45 ET. Hard gates: selfDir (slope ≥0.1% per 1h), touchedEma, reclaimed, rvolOk, rrOk, timeGateOk.');
 }
 
 // ─── S13: Range-Bound Mean Reversion ─────────────────────────────────────────
