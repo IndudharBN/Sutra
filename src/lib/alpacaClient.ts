@@ -250,7 +250,7 @@ export const UNIVERSE_TARGET = 120;
 // Tracks when buildDynamicUniverse last locked the symbol pool
 let _universeBuiltAt: string | null = null;
 export function getUniverseBuiltAt(): string | null { return _universeBuiltAt; }
-const BETA_MIN = 1.2;
+const BETA_MIN = 1.0;
 const BETA_MAX = 2.8;
 const ADR_PCT_MIN = 2.5;   // matches Stock-analyzer threshold
 const DVOL_MIN_M = 3.0;    // $3M avg daily dollar volume

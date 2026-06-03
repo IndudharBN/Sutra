@@ -322,7 +322,7 @@ const UNIVERSE_FILE = path.join(__dirname, '../../data/universe-cache.json');
 const UNIVERSE_TTL_MS = 10 * 60 * 60 * 1000;
 export const UNIVERSE_TARGET = 120;
 
-const BETA_MIN = 1.2;
+const BETA_MIN = 1.0;
 const BETA_MAX = 2.8;
 const ADR_PCT_MIN = 2.5;
 const DVOL_MIN_M = 3.0;
