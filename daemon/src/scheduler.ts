@@ -280,7 +280,9 @@ export function startScheduler(): void {
     if (!isScanWindow()) return;
     if (fullScanRunning) return;
     fullScanRunning = true;
-    runFullScan().finally(() => { fullScanRunning = false; });
+    runFullScan()
+      .catch((err) => console.error('[scan] full scan failed (will retry next cycle):', (err as Error).message))
+      .finally(() => { fullScanRunning = false; });
   }, 60_000);
 
   // Hot-set scan every 20s (backup to bar-stream boundary trigger).
@@ -289,7 +291,9 @@ export function startScheduler(): void {
     if (!isScanWindow()) return;
     if (hotScanRunning) return;
     hotScanRunning = true;
-    runHotSetScan().finally(() => { hotScanRunning = false; });
+    runHotSetScan()
+      .catch((err) => console.error('[scan] hot-set scan failed (will retry next cycle):', (err as Error).message))
+      .finally(() => { hotScanRunning = false; });
   }, 20_000);
 
   // Trade monitor every 10s

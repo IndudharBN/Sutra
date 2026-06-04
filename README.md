@@ -47,17 +47,40 @@ workstation unlock and logon — Sutra starts itself.
 
 Open `http://localhost:3006` and check the **● Daemon** badge is green in the top bar.
 
-### Manual start (if needed)
+### Daily restart (recommended)
+
+Leaving the daemon running is fine, but a fresh start each morning is good hygiene: it
+gives a clean Alpaca WebSocket, clears in-memory caches, and **re-arms the 8:30 AM ET
+universe rebuild** — that one-shot only schedules if the daemon starts *before* 8:30. Run
+**before 8:30 ET** (before 8:00 is ideal, to catch the full pre-market tape):
 
 ```bat
-ENSURE_RUNNING.bat
+RESTART_DAEMON.bat
 ```
 
-Safe to run anytime. If both processes are already up it exits in under a second.
+If you power the machine off overnight, the cold-boot logon trigger already gives you a
+fresh daemon — no manual restart needed, just log in before 8:30 ET.
+
+### Restart scripts — which one
+
+| Script | Rebuilds | Daemon (3001) | UI (3006) | Use when |
+|---|---|---|---|---|
+| `ENSURE_RUNNING.bat` | No | Start **if down** | Start if down | Safety net / recover from a crash. Auto-fires on unlock + logon. |
+| `RESTART_DAEMON.bat` | Yes | **Force fresh** | Left alone | Daily restart, or after daemon code changes. |
+| `RESTART_ALL.bat` | Yes | **Force fresh** | **Restart** + open browser | Dashboard itself misbehaves, or you want a full clean slate. |
+
+`ENSURE_RUNNING` is start-*if-down* — it will **not** restart a daemon that's already
+running. For a guaranteed daily restart use `RESTART_DAEMON.bat`. Safe to run anytime; if
+nothing needs starting it exits in under a second.
 
 ---
 
 ## What happens when the daemon crashes
+
+> Transient network timeouts (a slow Alpaca/Yahoo fetch hitting `AbortSignal.timeout`) no
+> longer crash the daemon — they're caught and logged (`[scan] … failed (will retry next
+> cycle)`), and a process-level guard keeps any stray async rejection from killing it. A
+> hard crash now indicates a genuine fault worth reading in the window below.
 
 1. The cmd window titled **"Sutra Daemon [3001]"** stays open showing the full error and a
    `[DAEMON CRASHED -- check error above]` line, then pauses.

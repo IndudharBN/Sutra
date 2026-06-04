@@ -4,6 +4,17 @@ import { loadState, saveState, getState } from './stateStore';
 import { startScheduler } from './scheduler';
 import { startHttpServer } from './httpServer';
 
+// Safety net: a transient network timeout (AbortSignal.timeout) or any stray async
+// rejection must never hard-kill the trading daemon. Node 24 crashes the process on
+// unhandled rejections by default — log loudly and stay alive so the next scan/monitor
+// cycle recovers. (Note: real crash recovery still wants a supervisor like pm2.)
+process.on('unhandledRejection', (reason) => {
+  console.error('[sutra-daemon] unhandledRejection (kept alive):', reason instanceof Error ? `${reason.name}: ${reason.message}` : reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[sutra-daemon] uncaughtException (kept alive):', err.message);
+});
+
 function toETTime(): string {
   return new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false });
 }
