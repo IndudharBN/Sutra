@@ -26,24 +26,28 @@ if errorlevel 1 (
   exit /b 1
 )
 
-:: -- Stop the old daemon on 3001 (UI is pm2-managed; pm2 restarts it) ------
-:: NOTE: netstat instead of Get-NetTCPConnection -- the latter is CIM/WMI-backed
-:: and can hang for minutes on Windows 11, stalling the restart.
-echo  [2/4] Stopping daemon on port 3001...
-PowerShell -NoProfile -Command "$ls = netstat -ano | Select-String ':3001\s' | Where-Object { $_ -match 'LISTENING' }; $procIds = $ls | ForEach-Object { ($_.ToString().Trim() -split '\s+')[-1] } | Sort-Object -Unique; if ($procIds) { foreach ($p in $procIds) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; Write-Host ('  Daemon stopped (PID ' + $p + ').') } } else { Write-Host '  Daemon was not running.' }"
+:: -- Restart the daemon via pm2 (memory-recycled + autorestart) -----------
+:: pm2 delete fully stops the managed process and releases port 3001; the
+:: netstat sweep then clears any stale NON-pm2 holder so the fresh start can't
+:: hit EADDRINUSE. NOTE: netstat instead of Get-NetTCPConnection -- the latter
+:: is CIM/WMI-backed and can hang for minutes on Windows 11.
+echo  [2/4] Restarting daemon (pm2) on port 3001...
+call pm2 delete sutra-daemon >nul 2>&1
+PowerShell -NoProfile -Command "$ls = netstat -ano | Select-String ':3001\s' | Where-Object { $_ -match 'LISTENING' }; $procIds = $ls | ForEach-Object { ($_.ToString().Trim() -split '\s+')[-1] } | Where-Object { [int]$_ -gt 4 } | Sort-Object -Unique; if ($procIds) { foreach ($p in $procIds) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; Write-Host ('  Cleared stale port holder PID ' + $p + '.') } }"
 timeout /t 2 /nobreak >nul
-
-:: -- Start a fresh daemon window ------------------------------------------
-echo  [3/4] Starting daemon on port 3001...
-start "Sutra Daemon [3001]" cmd /k "cd /d "%~dp0" && node daemon\dist\index.js || (echo. & echo [DAEMON CRASHED -- check error above] & pause)"
-timeout /t 5 /nobreak >nul
+call pm2 start ecosystem.config.cjs --only sutra-daemon
+timeout /t 3 /nobreak >nul
 
 :: -- Restart the UI via pm2 (start it if pm2 has no entry yet) -------------
-echo  [4/4] Restarting UI (pm2) on port 3006...
+echo  [3/4] Restarting UI (pm2) on port 3006...
 call pm2 restart sutra-ui
 if errorlevel 1 (
-  call pm2 start npm --name sutra-ui -- run dev
+  call pm2 start ecosystem.config.cjs --only sutra-ui
 )
+
+:: -- Persist the pm2 process list so both survive a reboot ----------------
+echo  [4/4] Saving pm2 process list...
+call pm2 save
 
 timeout /t 3 /nobreak >nul
 start "" "http://localhost:3006"

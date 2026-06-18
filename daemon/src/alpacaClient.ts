@@ -24,14 +24,42 @@ interface AlpacaSnapshot {
   minuteBar?: AlpacaBar;
 }
 
+// In-memory TTL cache. NOTE: keys embed the (sorted) symbol list, so the hot-set
+// scan mints a fresh key every cycle as its membership shifts. Without eviction
+// this Map grew without bound — each entry holds 50–120 symbols × up to 390
+// candles — and ballooned the daemon to ~1.4 GB until GC stalled the event loop.
+// Fix: delete entries on expiry (lazy), sweep periodically, and cap total size.
 interface CacheEntry<T> { data: T; expiresAt: number; }
 const _cache = new Map<string, CacheEntry<unknown>>();
+const CACHE_MAX_ENTRIES = 300;
+let _setsSincePrune = 0;
+
 function cacheGet<T>(key: string): T | null {
   const e = _cache.get(key) as CacheEntry<T> | undefined;
-  return e && Date.now() < e.expiresAt ? e.data : null;
+  if (!e) return null;
+  if (Date.now() >= e.expiresAt) { _cache.delete(key); return null; }
+  return e.data;
 }
+
+// Drop every expired entry; if still over the cap (many live but never re-read
+// combos), evict the soonest-to-expire until under it.
+function pruneCache(): void {
+  const now = Date.now();
+  for (const [k, e] of _cache) {
+    if (now >= e.expiresAt) _cache.delete(k);
+  }
+  if (_cache.size > CACHE_MAX_ENTRIES) {
+    const byExpiry = [..._cache.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+    const overflow = _cache.size - CACHE_MAX_ENTRIES;
+    for (let i = 0; i < overflow; i++) _cache.delete(byExpiry[i][0]);
+  }
+}
+
 function cacheSet<T>(key: string, data: T, ttlMs: number) {
   _cache.set(key, { data, expiresAt: Date.now() + ttlMs });
+  // Sweep on a cadence (cacheSet is called many times per scan) so one-off
+  // symbol-combo keys that are never read again still get reclaimed.
+  if (++_setsSincePrune >= 25) { _setsSincePrune = 0; pruneCache(); }
 }
 
 export function clearBarCache(symbol: string): void {

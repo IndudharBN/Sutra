@@ -12,6 +12,13 @@ process.on('unhandledRejection', (reason) => {
   console.error('[sutra-daemon] unhandledRejection (kept alive):', reason instanceof Error ? `${reason.name}: ${reason.message}` : reason);
 });
 process.on('uncaughtException', (err) => {
+  // A port conflict is fatal, not transient: if we "keep alive" through it we end
+  // up a server-less zombie whose scan loop still hammers Alpaca (double-scan ->
+  // 429s) while pm2 tracks us as healthy. Exit so the supervisor restarts cleanly.
+  if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+    console.error('[sutra-daemon] FATAL: port already in use — exiting so pm2 restarts cleanly');
+    process.exit(1);
+  }
   console.error('[sutra-daemon] uncaughtException (kept alive):', err.message);
 });
 

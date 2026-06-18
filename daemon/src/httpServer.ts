@@ -318,6 +318,20 @@ export function startHttpServer(): void {
     ws.on('error', () => {/* ignore client errors */});
   });
 
+  // Fail loud, not silent. A listen error (almost always EADDRINUSE from a stale
+  // daemon still holding the port) must NOT be swallowed by the process-level
+  // uncaughtException "kept alive" handler in index.ts — that left a daemon
+  // running with no HTTP server, so the dashboard reported "offline" while the
+  // process looked alive. Exit(1) instead so the pm2 supervisor recycles us.
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[httpServer] FATAL: port ${env.DAEMON_PORT} already in use — another daemon is holding it. Exiting so pm2 can restart cleanly.`);
+    } else {
+      console.error('[httpServer] FATAL server error:', err);
+    }
+    process.exit(1);
+  });
+
   server.listen(env.DAEMON_PORT, () => {
     console.log(`[httpServer] listening on port ${env.DAEMON_PORT} — REST + ws://localhost:${env.DAEMON_PORT}/ws`);
   });

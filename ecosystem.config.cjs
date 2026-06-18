@@ -17,7 +17,25 @@ module.exports = {
       exec_mode: 'fork',
       autorestart: true,
       watch: false,
-      max_memory_restart: '512M',
+
+      // --- Crash/leak resilience ------------------------------------------------
+      // History: an unbounded TTL cache (alpacaClient._cache) leaked until the
+      // daemon hit ~1.4 GB and GC-thrashed the event loop, so it held port 3001
+      // but stopped answering HTTP (dashboard showed "offline" though alive).
+      // The cache now evicts (see alpacaClient.ts), so RSS sawtooths ~140–750 MB
+      // and reclaims. These limits are a BACKSTOP only — set above the legit
+      // ~750 MB scan peak but well below the old 1.4 GB stall zone, so a genuine
+      // runaway still gets recycled without firing on normal scan spikes.
+      max_memory_restart: '1200M',
+      node_args: '--max-old-space-size=1024',
+
+      // Don't tight-loop on a persistent failure (e.g. port held by a non-pm2
+      // zombie): require a real uptime before counting a start as "good", and
+      // back off between restarts so EADDRINUSE can't spin the CPU.
+      min_uptime: '20s',
+      max_restarts: 15,
+      exp_backoff_restart_delay: 2000,
+      kill_timeout: 8000,
 
       // Log files (relative to CWD)
       out_file: './logs/daemon-out.log',
