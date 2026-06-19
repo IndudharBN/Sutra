@@ -26,16 +26,16 @@ if errorlevel 1 (
   exit /b 1
 )
 
-:: -- Restart the daemon via pm2 (memory-recycled + autorestart) -----------
-:: pm2 delete fully stops the managed process and releases port 3001; the
-:: netstat sweep then clears any stale NON-pm2 holder so the fresh start can't
-:: hit EADDRINUSE. NOTE: netstat instead of Get-NetTCPConnection -- the latter
-:: is CIM/WMI-backed and can hang for minutes on Windows 11.
-echo  [2/4] Restarting daemon (pm2) on port 3001...
-call pm2 delete sutra-daemon >nul 2>&1
-PowerShell -NoProfile -Command "$ls = netstat -ano | Select-String ':3001\s' | Where-Object { $_ -match 'LISTENING' }; $procIds = $ls | ForEach-Object { ($_.ToString().Trim() -split '\s+')[-1] } | Where-Object { [int]$_ -gt 4 } | Sort-Object -Unique; if ($procIds) { foreach ($p in $procIds) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; Write-Host ('  Cleared stale port holder PID ' + $p + '.') } }"
+:: -- Restart the daemon via RUN_DAEMON.bat (self-restarting window, no pm2) -
+:: Kill whatever holds 3001 (old wrapper's node, or any stray), then launch a
+:: fresh wrapper window. RUN_DAEMON.bat itself also sweeps 3001 before its first
+:: start. NOTE: netstat instead of Get-NetTCPConnection -- the latter is
+:: CIM/WMI-backed and can hang for minutes on Windows 11.
+echo  [2/4] Restarting daemon (wrapper window) on port 3001...
+taskkill /F /FI "WINDOWTITLE eq Sutra Daemon [3001]" >nul 2>&1
+PowerShell -NoProfile -Command "$ls = netstat -ano | Select-String ':3001\s' | Where-Object { $_ -match 'LISTENING' }; $procIds = $ls | ForEach-Object { ($_.ToString().Trim() -split '\s+')[-1] } | Where-Object { [int]$_ -gt 4 } | Sort-Object -Unique; if ($procIds) { foreach ($p in $procIds) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; Write-Host ('  Cleared port holder PID ' + $p + '.') } }"
 timeout /t 2 /nobreak >nul
-call pm2 start ecosystem.config.cjs --only sutra-daemon
+start "Sutra Daemon [3001]" "%~dp0RUN_DAEMON.bat"
 timeout /t 3 /nobreak >nul
 
 :: -- Restart the UI via pm2 (start it if pm2 has no entry yet) -------------

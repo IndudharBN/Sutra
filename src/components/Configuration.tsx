@@ -62,10 +62,14 @@ function usePaperStats() {
       .catch(() => setTrades([]));
   }, []);
 
-  // Win = structural exit at target. Loss = structural exit at stop.
-  // EOD/Manual are operational closes — excluded from W/L so they don't distort the record.
-  const isWin = (t: PaperTradeRecord) => t.outcome === 'Target' || t.outcome === 'T1 Profit';
-  const isLoss = (t: PaperTradeRecord) => t.outcome === 'Stop';
+  // Win/Loss by realized P&L across ALL closed trades (incl. EOD & Manual).
+  // Previously only Target/T1-Profit counted as wins and only Stop as losses,
+  // which silently excluded EOD/Manual exits. Since ~73% of trades close at EOD
+  // (no time-stop), that left WR% computed on a tiny, unrepresentative subset
+  // (e.g. 5 of 191 trades -> a misleading ~11%). P&L is the honest arbiter:
+  // profitable = win, negative = loss, exact scratch (0) counts as neither.
+  const isWin = (t: PaperTradeRecord) => (t.pnl ?? 0) > 0;
+  const isLoss = (t: PaperTradeRecord) => (t.pnl ?? 0) < 0;
 
   const closed = trades.filter((t) => t.status === 'Closed');
   const open = trades.filter((t) => t.status === 'Open');

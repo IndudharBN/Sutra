@@ -1,57 +1,18 @@
 // pm2 process config — run from project root.
-// Usage: pm2 start ecosystem.config.cjs   ← start both apps
-//        pm2 stop all / pm2 restart all
-//        pm2 logs sutra-daemon / pm2 logs sutra-ui
-//        pm2 save        ← persist process list across reboots (re-run after any change)
+//
+// NOTE: the daemon is NO LONGER managed by pm2. pm2's god daemon proved
+// unstable on this machine (it kept dying and orphaning the daemon -> split
+// brain -> "Daemon offline"). The daemon now runs via RUN_DAEMON.bat, a plain
+// self-restarting wrapper window with no god-daemon dependency (the memory leak
+// that justified pm2's recycle is fixed in code). pm2 here manages only the UI.
+//
+// Usage: pm2 start ecosystem.config.cjs --only sutra-ui
+//        pm2 logs sutra-ui / pm2 status / pm2 save
 
 'use strict';
 
 module.exports = {
   apps: [
-    {
-      name: 'sutra-daemon',
-      script: './daemon/dist/index.js',
-      // CWD must be project root so data/ and daemon/.env.daemon resolve correctly
-      cwd: __dirname,
-      instances: 1,
-      exec_mode: 'fork',
-      autorestart: true,
-      watch: false,
-
-      // --- Crash/leak resilience ------------------------------------------------
-      // History: an unbounded TTL cache (alpacaClient._cache) leaked until the
-      // daemon hit ~1.4 GB and GC-thrashed the event loop, so it held port 3001
-      // but stopped answering HTTP (dashboard showed "offline" though alive).
-      // The cache now evicts (see alpacaClient.ts), so RSS sawtooths ~140–750 MB
-      // and reclaims. These limits are a BACKSTOP only — set above the legit
-      // ~750 MB scan peak but well below the old 1.4 GB stall zone, so a genuine
-      // runaway still gets recycled without firing on normal scan spikes.
-      max_memory_restart: '1200M',
-      node_args: '--max-old-space-size=1024',
-
-      // Don't tight-loop on a persistent failure (e.g. port held by a non-pm2
-      // zombie): require a real uptime before counting a start as "good", and
-      // back off between restarts so EADDRINUSE can't spin the CPU.
-      min_uptime: '20s',
-      max_restarts: 15,
-      exp_backoff_restart_delay: 2000,
-      kill_timeout: 8000,
-
-      // Log files (relative to CWD)
-      out_file: './logs/daemon-out.log',
-      error_file: './logs/daemon-error.log',
-      merge_logs: true,
-      time: true,
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-
-      // Keep last 7 days / 50 MB of logs (requires pm2-logrotate)
-      // pm2 install pm2-logrotate
-
-      env: {
-        NODE_ENV: 'production',
-      },
-    },
-
     {
       name: 'sutra-ui',
       script: './node_modules/vite/bin/vite.js',
