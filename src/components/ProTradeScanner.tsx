@@ -986,8 +986,10 @@ function PaperTradeMonitor({
   const open = filteredTrades.filter((trade) => trade.status === 'Open');
   const closed = filteredTrades.filter((trade) => trade.status === 'Closed');
   const isToday = monitorDate === todayET();
-  // Sum stored trade.pnl — same source as Performance screen so the two always agree.
-  // The HUD "Today P&L" widget separately shows the Alpaca equity delta.
+  // Sum stored trade.pnl for the SELECTED DAY only — filteredTrades is scoped to
+  // monitorDate (the date picker). This is the day's net, NOT all-time; the
+  // Performance tab shows the all-time total. The HUD "Today P&L" widget shows
+  // the Alpaca equity delta.
   const totalPnl = filteredTrades.reduce((total, trade) => {
     if (trade.status === 'Open') return total;
     const pnl = (!trade.pnl || trade.pnl === 0)
@@ -1012,7 +1014,7 @@ function PaperTradeMonitor({
         </div>
         <div className="flex items-center gap-3">
           <span className={`text-xs font-black ${totalPnl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
-            Total P&L {totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}
+            {isToday ? 'Today' : 'Day'} P&L {totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}
           </span>
           {closed.some((t) => !t.pnl || t.pnl === 0 || (t.outcome === 'T1 Profit' && (t.pnl ?? 0) < 0)) && (
             <button onClick={onFixZeroPnl} className="text-[10px] uppercase font-black tracking-widest px-2 py-1 rounded border border-amber-500/30 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 transition-colors">
