@@ -3,6 +3,7 @@ import { env } from './env';
 import { loadState, saveState, getState } from './stateStore';
 import { startScheduler } from './scheduler';
 import { startHttpServer } from './httpServer';
+import { startWatchdog } from './watchdog';
 
 // Safety net: a transient network timeout (AbortSignal.timeout) or any stray async
 // rejection must never hard-kill the trading daemon. Node 24 crashes the process on
@@ -45,6 +46,7 @@ async function main() {
 
   startHttpServer();
   startScheduler();
+  startWatchdog();
 }
 
 main().catch((err) => {
