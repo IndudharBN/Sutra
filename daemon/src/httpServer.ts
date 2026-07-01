@@ -24,6 +24,7 @@ export type WsEvent =
   | 'snapshot_update'
   | 'trade_opened'
   | 'trade_updated'
+  | 'trade_partial'
   | 'trade_closed'
   | 'risk_update'
   | 'alert'

@@ -97,6 +97,11 @@ interface PaperTrade {
   target2: number;
   trailingStop: number;
   t1HitAt?: string;
+  // 1R partial exit (set by the daemon): half banked at +1R, stop → breakeven, runner to T2
+  partialExitAt?: string;
+  partialExitPrice?: number;
+  partialQty?: number;
+  realizedPnl?: number;
   rr: number;
   rr1: number;
   quantity: number;
@@ -261,9 +266,13 @@ function countRows(rows: ProTradeRow[], stage: WorkflowStage, rawRows: ProTradeR
 }
 
 function paperPnl(trade: PaperTrade, exitPrice: number) {
-  const gross = trade.direction === 'BEAR'
-    ? (trade.entry - exitPrice) * trade.quantity
-    : (exitPrice - trade.entry) * trade.quantity;
+  // After a daemon-side 1R partial, only the runner half is still open — live P&L
+  // is the remainder's move plus the banked realizedPnl. Mirrors daemon monitorTrades.
+  const remainingQty = trade.quantity - (trade.partialQty ?? 0);
+  const move = trade.direction === 'BEAR'
+    ? (trade.entry - exitPrice)
+    : (exitPrice - trade.entry);
+  const gross = move * remainingQty + (trade.realizedPnl ?? 0);
   return {
     pnl: Number(gross.toFixed(2)),
     pnlPercent: Number((gross / trade.notional * 100).toFixed(2)),

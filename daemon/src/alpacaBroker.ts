@@ -78,6 +78,74 @@ export async function placePaperBracketOrder(params: {
   });
 }
 
+// ── 1R partial + breakeven sync ───────────────────────────────────────────────
+// Mirrors the daemon's internal 1R exit logic at the broker so protection is real
+// even if the daemon wedges mid-trade (its known failure mode):
+//   1. cancel the original bracket legs (they hold the position's shares),
+//   2. market-close half the position (whole shares; skipped when qty = 1),
+//   3. re-arm an OCO on the runner: take-profit at T2 + stop at breakeven.
+// Best-effort by design — the internal ledger stays the source of truth; any
+// step that fails leaves the position flat-able by the monitor's closePaperPosition.
+export async function syncPartialAndBreakeven(params: {
+  symbol: string;
+  direction: 'BULL' | 'BEAR';
+  entry: number;
+  target2: number;
+}): Promise<void> {
+  const { symbol, direction, entry, target2 } = params;
+
+  // Current broker position — qty may differ from the internal ledger (whole shares).
+  const pos = await paperFetch<AlpacaPosition>(`/v2/positions/${encodeURIComponent(symbol)}`);
+  const heldQty = Math.abs(Math.trunc(Number(pos.qty)));
+  if (!Number.isFinite(heldQty) || heldQty < 1) return;
+
+  // Free the shares: cancel all open orders on this symbol (the bracket legs).
+  try {
+    const orders = await paperFetch<{ id: string }[]>(
+      `/v2/orders?symbols=${encodeURIComponent(symbol)}&status=open&limit=20`,
+    );
+    await Promise.allSettled(orders.map((o) => paperFetch(`/v2/orders/${o.id}`, { method: 'DELETE' })));
+  } catch { /* best-effort */ }
+
+  const exitSide = direction === 'BULL' ? 'sell' : 'buy';
+  const partialQty = Math.floor(heldQty / 2);
+
+  // Bank half at market (skipped for 1-share positions — BE stop still applies below).
+  if (partialQty >= 1) {
+    await paperFetch('/v2/orders', {
+      method: 'POST',
+      body: JSON.stringify({
+        symbol, qty: String(partialQty), side: exitSide, type: 'market', time_in_force: 'day',
+      }),
+    });
+  }
+
+  const runnerQty = heldQty - partialQty;
+  if (runnerQty < 1) return;
+
+  // Re-arm the runner: OCO take-profit at T2 / stop at breakeven (entry).
+  // Small buffer on the stop-limit so a gap through breakeven still fills.
+  const buff = Number((entry * 0.001).toFixed(2));
+  const stopLimitPrice = direction === 'BULL' ? entry - buff : entry + buff;
+  const placeOco = () => paperFetch('/v2/orders', {
+    method: 'POST',
+    body: JSON.stringify({
+      symbol, qty: String(runnerQty), side: exitSide, type: 'limit', time_in_force: 'day',
+      order_class: 'oco',
+      limit_price: target2.toFixed(2),
+      take_profit: { limit_price: target2.toFixed(2) },
+      stop_loss: { stop_price: entry.toFixed(2), limit_price: stopLimitPrice.toFixed(2) },
+    }),
+  });
+  try {
+    await placeOco();
+  } catch {
+    // The partial market order may not have settled yet — one retry after 2s.
+    await new Promise((r) => setTimeout(r, 2000));
+    await placeOco();
+  }
+}
+
 export async function cancelPaperOrder(orderId: string): Promise<void> {
   await fetch(`${PAPER_BASE}/v2/orders/${orderId}`, {
     method: 'DELETE',

@@ -33,6 +33,12 @@ export interface PaperTrade {
   target2: number;
   trailingStop: number;
   t1HitAt?: string;
+  // 1R partial exit: half the position is banked at +1R, stop moves to breakeven,
+  // the runner half continues toward T2. realizedPnl is included in the final pnl.
+  partialExitAt?: string;
+  partialExitPrice?: number;
+  partialQty?: number;
+  realizedPnl?: number;
   rr: number;
   rr1: number;
   quantity: number;

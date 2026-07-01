@@ -8,7 +8,7 @@ import { buildPaperTrade, canPaperTradeRow } from './engine/buildPaperTrade';
 import { isTideBlocked } from './engine/isTideBlocked';
 import { checkGroupCircuitBreaker, checkStrategyCircuitBreaker, checkDailyLossLimit, recordGroupTradeResult, recordTradeResult } from './riskManager';
 import { checkSectorConcentration, checkPortfolioBeta } from './portfolioRisk';
-import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperPosition, closeAllPaperPositions } from './alpacaBroker';
+import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperPosition, closeAllPaperPositions, syncPartialAndBreakeven } from './alpacaBroker';
 import { env } from './env';
 import { emit } from './httpServer';
 import { loadTrades, saveTrades, appendLedger } from './tradeStore';
@@ -88,6 +88,23 @@ async function monitorLoop(): Promise<void> {
     for (let i = 0; i < trades.length; i++) {
       const before = trades[i];
       const after = updated[i];
+      // 1R partial fired: mirror it at the broker — bank half, move the stop to
+      // breakeven on the runner. Async best-effort; internal ledger is the truth.
+      if (before.status === 'Open' && after.status === 'Open' && !before.partialExitAt && after.partialExitAt) {
+        emit('trade_partial', after);
+        appendLedger('trade_partial', after);
+        console.log(`[monitor] ${after.symbol} 1R partial — banked $${after.realizedPnl?.toFixed(2)} (${after.partialQty} sh), stop → BE`);
+        if (after.direction !== 'NEUTRAL') {
+          syncPartialAndBreakeven({
+            symbol: after.symbol,
+            direction: after.direction as 'BULL' | 'BEAR',
+            entry: after.entry,
+            target2: after.target2 || after.target,
+          }).catch((err: Error) =>
+            console.warn(`[alpaca] 1R partial sync failed ${after.symbol}:`, err.message),
+          );
+        }
+      }
       if (before.status === 'Open' && after.status === 'Closed' && after.pnl !== undefined) {
         recordGroupTradeResult((after.signalGroup ?? 'UNCLASSIFIED') as import('./types').SignalGroup, after.pnl);
         recordTradeResult(after.strategyId ?? 'unknown', after.pnl, accountBalance);
@@ -257,12 +274,15 @@ async function eodClose(): Promise<void> {
 
   let changed = false;
   const unresolved: string[] = [];
-  const updated = trades.map((t: { status: string; symbol: string; direction: string; entry: number; quantity: number; notional: number }) => {
+  const updated = trades.map((t: { status: string; symbol: string; direction: string; entry: number; quantity: number; notional: number; partialQty?: number; realizedPnl?: number }) => {
     if (t.status !== 'Open') return t;
     const live = priceBySymbol.get(t.symbol);
     if (live == null) unresolved.push(t.symbol);
     const price = live ?? t.entry;
-    const gross = t.direction === 'BEAR' ? (t.entry - price) * t.quantity : (price - t.entry) * t.quantity;
+    // After a 1R partial only the runner half is still open; add the banked realizedPnl.
+    const remainingQty = t.quantity - (t.partialQty ?? 0);
+    const move = t.direction === 'BEAR' ? (t.entry - price) : (price - t.entry);
+    const gross = move * remainingQty + (t.realizedPnl ?? 0);
     changed = true;
     const closed = {
       ...t,

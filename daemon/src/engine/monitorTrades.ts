@@ -6,9 +6,13 @@ function baseSymbol(symbol: string): string {
 }
 
 function paperPnl(trade: PaperTrade, exitPrice: number) {
-  const gross = trade.direction === 'BEAR'
-    ? (trade.entry - exitPrice) * trade.quantity
-    : (exitPrice - trade.entry) * trade.quantity;
+  // After a 1R partial, only the runner half is still open — final P&L is the
+  // remainder's move plus the already-banked realizedPnl from the partial.
+  const remainingQty = trade.quantity - (trade.partialQty ?? 0);
+  const move = trade.direction === 'BEAR'
+    ? (trade.entry - exitPrice)
+    : (exitPrice - trade.entry);
+  const gross = move * remainingQty + (trade.realizedPnl ?? 0);
   return {
     pnl: Number(gross.toFixed(2)),
     pnlPercent: Number((gross / trade.notional * 100).toFixed(2)),
@@ -65,16 +69,35 @@ export function monitorPaperTrades(
     const target2 = paperTarget2(trade);
     const trailingStop = paperTrailingStop(trade);
     const hitTarget2 = trade.direction === 'BEAR' ? current <= target2 : current >= target2;
-    const hitT1 = trade.direction === 'BEAR' ? current <= target1 : current >= target1;
+    // 1R trigger (was T1 = 1.5R): 448-trade sample showed the median winner never
+    // travelled 1.5R before EOD — winners round-tripped into losses. At +1R we bank
+    // half the position (realizedPnl), move the stop to breakeven on the runner,
+    // and let it work toward T2. Worst case after the partial is +0.5R.
+    const initialRisk = Math.abs(trade.entry - Number(trade.stop || 0));
+    const oneR = trade.direction === 'BEAR' ? trade.entry - initialRisk : trade.entry + initialRisk;
+    const hit1R = initialRisk > 0 && (trade.direction === 'BEAR' ? current <= oneR : current >= oneR);
     const hitStop = trade.direction === 'BEAR' ? current >= trailingStop : current <= trailingStop;
 
     if (hitTarget2) {
       changed = true;
       return closePaperTrade(trade, target2, 'Target');
     }
-    if (!trade.t1HitAt && hitT1) {
+    if (!trade.t1HitAt && hit1R) {
       changed = true;
-      return { ...trade, t1HitAt: new Date().toISOString(), trailingStop: trade.entry };
+      const partialQty = Number((trade.quantity / 2).toFixed(4));
+      const banked = trade.direction === 'BEAR'
+        ? (trade.entry - current) * partialQty
+        : (current - trade.entry) * partialQty;
+      const nowIso = new Date().toISOString();
+      return {
+        ...trade,
+        t1HitAt: nowIso,
+        partialExitAt: nowIso,
+        partialExitPrice: Number(current.toFixed(2)),
+        partialQty,
+        realizedPnl: Number(banked.toFixed(2)),
+        trailingStop: trade.entry,
+      };
     }
     if (trade.t1HitAt) {
       const t1Level = target1;
