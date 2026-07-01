@@ -7,8 +7,11 @@ import type { SignalGroup, StrategyChecklistItem, StrategyId, StrategyInput, Str
 import { STRATEGY_LABELS, workflowStageRank } from './workflowTypes';
 
 const MIN_RR = 1.5;
-const PREFERRED_RR = 2.5;
-const T1_RR = 1.5;           // scale out 50% at T1, SL → entry (BE), then → T1 on pullback confirm
+// 2.0 (was 2.5): 448-trade sample — only 1 trade ever reached a 2.5R target before EOD;
+// median winner closed +1.87%. A 2R take-profit is reachable inside the day session and
+// pairs with the 1R partial (bank half at 1R, runner exits at 2R). Broker TP = T2 = 2R max.
+const PREFERRED_RR = 2.0;
+const T1_RR = 1.5;           // runner trail ratchet level (stop lifts BE → T1); 1R partial handled by the daemon monitor
 const STOP_BUFFER_ATR = 0.5; // breathing room beyond anchor extreme
 const MIN_STOP_ATR = 0.5;    // stop must be ≥ 50% of daily ATR from entry
 const MIN_STOP_PCT = 0.005;  // stop must be ≥ 0.5% of price — catches atr20=0 (no daily data)
@@ -70,14 +73,21 @@ function planFromLevelsT1T2(
 ): TradePlan | null {
   const risk = input.direction === 'BULL' ? entry - stop : stop - entry;
   if (!Number.isFinite(risk) || risk <= 0) return null;
-  const rrT2 = rr(entry, stop, t2, input.direction);
+  // Hard 2R cap on T2 — this is the take-profit that goes to the broker. Structural
+  // targets NEARER than 2R are kept (an honest 1.8R pivot beats an invented 2R);
+  // anything farther is clipped to 2R. Single choke point: every strategy's plan
+  // flows through here, so the cap holds book-wide.
+  const t2Capped = input.direction === 'BULL'
+    ? Math.min(t2, entry + risk * PREFERRED_RR)
+    : Math.max(t2, entry - risk * PREFERRED_RR);
+  const rrT2 = rr(entry, stop, t2Capped, input.direction);
   if (!Number.isFinite(rrT2) || rrT2 < MIN_RR) return null;
   return {
     entry: round(entry, 2),
     stop: round(stop, 2),
-    target: round(t2, 2),
+    target: round(t2Capped, 2),
     target1: round(t1, 2),
-    target2: round(t2, 2),
+    target2: round(t2Capped, 2),
     rr: round(rrT2, 2),
     rr1: T1_RR,
     riskPerShare: round(Math.abs(entry - stop), 2),
@@ -183,8 +193,9 @@ function findNearestSwingTarget(
 // Structural T2 — fallback chain: 5m pivot → 15m pivot → PDH/PDL → 2.5R
 // Pivot-based levels use the actual intraday structure (unbroken swing highs/lows).
 // PDH/PDL is kept as a last resort when the session is too young for pivots.
-// All levels are capped at 3R; structural pivots override the 2.5R floor because
-// a real level at 1.8R is more honest than an invented 2.5R with no structure behind it.
+// Pivot search still scans out to 3R so a genuine level is found, but the booked T2
+// is clipped to 2R in planFromLevelsT1T2 — structural pivots NEARER than 2R override
+// because a real level at 1.8R is more honest than an invented 2R with nothing behind it.
 function structuralT2(
   input: StrategyInput,
   entry: number,
