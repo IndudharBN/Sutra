@@ -29,7 +29,11 @@ function baseInput(overrides: Partial<StrategyInput> = {}): StrategyInput {
     symbol: 'TEST',
     company: 'Test Corp',
     direction: 'BULL',
-    price: 11.08,
+    // 10.6 = a genuine retest hovering near the ORB high (10.35): breakout distance 0.25
+    // clears the 0.25×ATR noise floor while stop width (0.25 + 1×ATR = 0.85) stays inside
+    // the S1 asymmetry cap of 1.5×ATR (0.9). The old 11.08 was 0.73 above the level —
+    // a chase, which the stop-width gate now correctly blocks.
+    price: 10.6,
     rvol: 1.7,
     gapPct: 2.1,
     atr20: 0.6,
@@ -83,27 +87,42 @@ describe('ProTrade strategy engine', () => {
     expect(result.missing).toContain('Live data provider required for Trade Ready');
   });
 
-  it('keeps VWAP pullback forming when reclaim has not happened', () => {
+  it('keeps VWAP pullback forming when direction cannot be established', () => {
+    // Only 8 candles → EMA9 slope over 50m unavailable → selfDir null → no trade plan
     const result = evaluateVwapPullback(baseInput({
       price: 10.3,
       vwap: 10.45,
       vwapAligned: false,
     }));
     expect(result.stage).toBe('forming');
-    expect(result.missing).toContain('VWAP side');
+    expect(result.missing).toContain('Directional bias');
+    expect(result.tradePlan).toBeNull();
   });
 
-  it('blocks a 5m setup when 15m context is not directional', () => {
-    const result = evaluateOrbRetest(baseInput({
-      trend15m: 'FLAT',
-      trend15mAligned: false,
-    }));
-    expect(result.stage).toBe('forming');
-    expect(result.missing).toContain('15m directional context');
+  it('blocks ORB retest when the stop width exceeds the 1.5×ATR asymmetry cap', () => {
+    // Entry 0.73 above the ORB high + 1×ATR stop anchor = 1.33 risk > 0.9 cap (chase entry)
+    const result = evaluateOrbRetest(baseInput({ price: 11.08 }));
+    expect(result.tradePlan).toBeNull();
+    expect(result.missing).toContain('Stop width ≤1.5×ATR');
   });
 
   it('confirms or locks RS continuation when setup is valid (session gate may apply)', () => {
-    const input = baseInput({ atr20: 0.05, price: 11.08 });
+    // Tight micro-range fixture: stop width must be ≤1.5% of entry for S3
+    const tight = [
+      candle(0, 11.0, 11.03, 10.96, 11.0),
+      candle(1, 11.0, 11.04, 10.97, 11.02),
+      candle(2, 11.02, 11.05, 10.98, 11.01),
+      candle(3, 11.01, 11.04, 10.97, 11.0),
+      candle(4, 11.0, 11.03, 10.96, 11.02),
+      candle(5, 11.02, 11.05, 10.98, 11.03),
+      candle(6, 11.03, 11.05, 10.99, 11.04),
+      candle(7, 11.04, 11.09, 11.0, 11.08), // breaks micro-high 11.05
+    ];
+    const input = baseInput({
+      atr20: 0.05,
+      price: 11.08,
+      candles: { one: tight, five: tight, fifteen: tight, daily: tight },
+    });
     const result = evaluateRsContinuation(input);
     expect(['confirmed', 'locked', 'trade_ready']).toContain(result.stage);
     expect(result.tradePlan).not.toBeNull();
