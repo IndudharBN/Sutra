@@ -6,15 +6,17 @@ import { STRATEGY_CODES } from './workflowTypes';
 
 // ─── Per-strategy conviction sizing ──────────────────────────────────────────
 // Earned by realized performance over 448 paper trades (May 20–Jul 1 2026):
-//   S4 liquidity_sweep  64.1% WR, PF 8.24, +$69.5/trade → 1.5×
-//   S6 mss_breakout     59.0% WR, PF 2.16, +$10.8/trade → 1.25×
-//   S8 ema20_bounce     48.3% WR, PF 1.81, +$7.8/trade  → 1.25×
-// Everything else stays at 1.0× — size scales with proven edge only. Revisit
-// after the tightened gates (S1/S2/S5/S7/S9/S11/S12/S14) have fresh forward data.
+//   S4 liquidity_sweep  64.1% WR, PF 8.24, +$69.5/trade → 2.0×  (~6% risk/trade)
+//   S6 mss_breakout     59.0% WR, PF 2.16, +$10.8/trade → 1.333× (~4% risk/trade)
+//   S8 ema20_bounce     48.3% WR, PF 1.81, +$7.8/trade  → 1.333× (~4% risk/trade)
+// Multipliers are relative to the base riskPerTradePct (3% default) — the %
+// figures above hold only at that base. Everything else stays at 1.0× — size
+// scales with proven edge only. Revisit after the tightened gates
+// (S1/S2/S5/S7/S9/S11/S12/S14) have fresh forward data.
 const STRATEGY_SIZE_MULT: Record<string, number> = {
-  liquidity_sweep: 1.5,
-  mss_breakout: 1.25,
-  ema20_bounce: 1.25,
+  liquidity_sweep: 2.0,
+  mss_breakout: 4 / 3,
+  ema20_bounce: 4 / 3,
 };
 
 export function etMinutesNow(): number {
