@@ -986,17 +986,14 @@ function PaperTradeMonitor({
   const open = filteredTrades.filter((trade) => trade.status === 'Open');
   const closed = filteredTrades.filter((trade) => trade.status === 'Closed');
   const isToday = monitorDate === todayET();
-  // Sum stored trade.pnl for the SELECTED DAY only — filteredTrades is scoped to
-  // monitorDate (the date picker). This is the day's net, NOT all-time; the
-  // Performance tab shows the all-time total. The HUD "Today P&L" widget shows
-  // the Alpaca equity delta.
-  const totalPnl = filteredTrades.reduce((total, trade) => {
-    if (trade.status === 'Open') return total;
-    const pnl = (!trade.pnl || trade.pnl === 0)
-      ? paperPnl(trade, estimatedExitPrice(trade)).pnl
-      : trade.pnl;
-    return total + pnl;
-  }, 0);
+  // Sum the STORED realized trade.pnl for closed trades on the SELECTED DAY only
+  // (filteredTrades is scoped to monitorDate via the date picker). This must use
+  // the same source of truth as the Performance and Orders tabs — previously this
+  // silently substituted a stop/target estimate for any trade whose stored pnl was
+  // 0, which made the Monitor disagree with Performance for EOD trades booked at a
+  // flat exit. If a trade shows $0 the honest fix is to repair the stored exit
+  // price (the "Fix P&L" button / daemon backfill), not to fabricate a number here.
+  const totalPnl = closed.reduce((total, trade) => total + (trade.pnl ?? 0), 0);
 
   return (
     <div className="glass rounded-xl overflow-hidden">

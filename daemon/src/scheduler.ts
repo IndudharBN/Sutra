@@ -1,6 +1,6 @@
 import { runFullScan, runHotSetScan, getCurrentSnapshot } from './scanLoop';
 import { clearUniverseCache } from './engine/proTradeScannerApi';
-import { isUniverseFallback, clearUniverseCache as clearUniverseCacheClient } from './alpacaClient';
+import { isUniverseFallback, clearUniverseCache as clearUniverseCacheClient, fetchSnapshots } from './alpacaClient';
 import { alpacaBarStream } from './alpacaBarStream';
 import { getState, setState, saveState, applyDayRoll } from './stateStore';
 import { monitorPaperTrades } from './engine/monitorTrades';
@@ -202,21 +202,66 @@ function tryFireTrades(): void {
   if (tradesFired) saveTrades(trades);
 }
 
-function eodClose(): void {
+// Pull a usable last price out of an Alpaca snapshot, preferring the most
+// recent print, then quote midpoint, then the latest bar close.
+function snapshotPrice(s?: {
+  latestTrade?: { p: number };
+  latestQuote?: { ap: number; bp: number };
+  minuteBar?: { c: number };
+  dailyBar?: { c: number };
+}): number | null {
+  if (!s) return null;
+  if (s.latestTrade?.p) return s.latestTrade.p;
+  if (s.latestQuote?.ap && s.latestQuote?.bp) return (s.latestQuote.ap + s.latestQuote.bp) / 2;
+  if (s.minuteBar?.c) return s.minuteBar.c;
+  if (s.dailyBar?.c) return s.dailyBar.c;
+  return null;
+}
+
+async function eodClose(): Promise<void> {
   const state = getState();
   const today = toETDate();
   if (state.eodFiredDate === today) return;
 
   const trades = loadTrades();
+  const openTrades = trades.filter((t: { status: string }) => t.status === 'Open');
+  if (openTrades.length === 0) {
+    state.eodFiredDate = today;
+    saveState();
+    return;
+  }
+
   const snapshot = getCurrentSnapshot();
-  const priceBySymbol = new Map(
+  const priceBySymbol = new Map<string, number>(
     (snapshot?.rows ?? []).map((r: { symbol: string; price: number }) => [r.symbol, r.price]),
   );
 
+  // Any held symbol missing from the live snapshot would otherwise default to
+  // entry → a fabricated $0 P&L. This happens routinely when the daemon
+  // restarts post-close and runs a "missed EOD close" before the scan has
+  // repopulated rows (a held name may also simply have dropped out of the
+  // scanner's top-N). Fetch a real last price straight from Alpaca for those.
+  const missing = [...new Set(openTrades.map((t: { symbol: string }) => t.symbol))]
+    .filter((s) => !priceBySymbol.has(s));
+  if (missing.length) {
+    try {
+      const snaps = await fetchSnapshots(missing);
+      for (const sym of missing) {
+        const p = snapshotPrice(snaps[sym]);
+        if (p != null) priceBySymbol.set(sym, p);
+      }
+    } catch (err) {
+      console.warn('[eod] snapshot price backfill failed:', (err as Error).message);
+    }
+  }
+
   let changed = false;
+  const unresolved: string[] = [];
   const updated = trades.map((t: { status: string; symbol: string; direction: string; entry: number; quantity: number; notional: number }) => {
     if (t.status !== 'Open') return t;
-    const price = priceBySymbol.get(t.symbol) ?? t.entry;
+    const live = priceBySymbol.get(t.symbol);
+    if (live == null) unresolved.push(t.symbol);
+    const price = live ?? t.entry;
     const gross = t.direction === 'BEAR' ? (t.entry - price) * t.quantity : (price - t.entry) * t.quantity;
     changed = true;
     const closed = {
@@ -236,6 +281,9 @@ function eodClose(): void {
   if (changed) {
     saveTrades(updated as PaperTrade[]);
     console.log('[eod] all open trades closed at market');
+    if (unresolved.length) {
+      console.warn(`[eod] no live price for ${unresolved.join(', ')} — booked at entry (P&L $0); rerun backfill once data is available`);
+    }
     closeAllPaperPositions().catch((err: Error) =>
       console.warn('[alpaca] EOD closeAll failed:', err.message),
     );
@@ -270,7 +318,7 @@ export function startScheduler(): void {
   // If daemon starts after market close and missed the EOD window, close open trades now
   if (isEODWindow()) {
     console.log('[scheduler] post-market startup — running missed EOD close');
-    eodClose();
+    eodClose().catch((err) => console.error('[eod] missed-close error:', (err as Error).message));
   }
 
   // Full scan every 60s across the scan window (pre-market 8:00 ET → close).
@@ -315,7 +363,7 @@ export function startScheduler(): void {
 
   // EOD close check every 30s
   setInterval(() => {
-    if (isEODWindow()) eodClose();
+    if (isEODWindow()) eodClose().catch((err) => console.error('[eod] close error:', (err as Error).message));
   }, 30_000);
 
   // State save every 30s
