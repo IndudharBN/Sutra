@@ -19,6 +19,25 @@ const STRATEGY_SIZE_MULT: Record<string, number> = {
   ema20_bounce: 4 / 3,
 };
 
+// Absolute per-strategy notional ceiling (USD). User directive 2026-07-02: S4 tops
+// out at $15k regardless of group cap — its FVG/GOLD group caps otherwise allow
+// $19k–$29k on the ~$97k paper account. Only meaningful while account size makes
+// the group caps exceed it; a small live account never reaches this ceiling.
+const STRATEGY_NOTIONAL_CAP_USD: Record<string, number> = {
+  liquidity_sweep: 15_000,
+};
+
+// Minimum viable notional — skip the trade entirely rather than fire a token position.
+// Two floors, whichever is higher:
+//   1. one share's price — the Alpaca bracket path rounds qty up to 1 whole share, so an
+//      internal $24 "position" would silently become a ~$300 broker position (mismatch);
+//   2. 0.5% of account — dust fills pollute WR/expectancy stats and waste position slots.
+// Scales with account size: at $97k the floor is ~$485; at a $1k live account it is the
+// share price, i.e. only names cheap enough to honestly afford one whole share fire.
+export function minViableNotional(accountBalance: number, entry: number): number {
+  return Math.max(accountBalance * 0.005, entry);
+}
+
 export function etMinutesNow(): number {
   const now = new Date();
   const h = parseInt(now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
@@ -93,10 +112,11 @@ export function buildPaperTrade(
   const signalGroup = row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED';
   const sigGroupSizeMult = row.primaryStrategy?.groupSizeMult ?? 1.0;
   const baseNotional = computeNotional(accountBalance, plan.entry, plan.stop, signalGroup, sigGroupSizeMult);
-  const adjustedNotional = baseNotional * effectiveMult * cbSizeMult;
+  const usdCap = STRATEGY_NOTIONAL_CAP_USD[strategyId ?? ''] ?? Infinity;
+  const adjustedNotional = Math.min(baseNotional * effectiveMult * cbSizeMult, usdCap);
   const budgetCap = availablePaperNotional(currentTrades, accountBalance);
   const notional = Math.min(budgetCap, adjustedNotional);
-  if (notional <= 0) return null;
+  if (notional < minViableNotional(accountBalance, plan.entry)) return null;
   const quantity = Math.round((notional / plan.entry) * 10000) / 10000;
   if (quantity <= 0) return null;
 
