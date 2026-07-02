@@ -1120,7 +1120,10 @@ function PaperTradeMonitor({
                               ? 'border-amber-500/40 bg-amber-500/10 text-amber-400'
                               : 'border-slate-600/40 bg-slate-800/30 text-slate-400'
                       }`}>
-                      {trade.status === 'Open' ? (trade.t1HitAt ? 'T1 Hit' : 'Open') : (trade.outcome === 'T1 Profit' ? 'T1 HIT / TRAILED' : trade.outcome)}
+                      {/* t1HitAt now fires at +1R (daemon banks half + stop→BE); the stored
+                          outcome value 'T1 Profit' is unchanged for analytics continuity —
+                          only the display label reflects the 1R-partial semantics. */}
+                      {trade.status === 'Open' ? (trade.partialExitAt || trade.t1HitAt ? '1R Partial' : 'Open') : (trade.outcome === 'T1 Profit' ? '1R PARTIAL / TRAILED' : trade.outcome)}
                     </span>
                   </td>
                   <td className={`py-3 px-3 border-r border-white/5 text-right font-black ${livePnl.pnl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
