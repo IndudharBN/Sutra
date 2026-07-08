@@ -610,11 +610,41 @@ export function PerformanceScreen() {
                 'S4: sweep wick + reclaim within 100-min window',
                 '1m EMA must confirm timing before auto-execute fires',
                 'Stop anchored to structural swing — min 0.75×ATR noise floor',
-                'T1 = 2R → scale 50%, stop to entry; T2 = structural level',
+                '+1R → bank 50% + stop to breakeven; runner exits at T2 (2R cap, broker-synced)',
               ].map((r) => (
                 <div key={r} className="flex items-start gap-2"><AlertTriangle size={11} className="text-amber-500 mt-0.5 shrink-0" /><span>{r}</span></div>
               ))}
             </div>
+          </div>
+          <div className="glass p-5 rounded-xl">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2 mb-4">
+              <TrendingUp size={14} className="text-cyan-400" />Tape Alignment Gate
+            </h3>
+            <p className="text-[10px] text-slate-500 mb-3">
+              SPY FLAT never blocks — only an opposing SPY trend does. A stock's OWN flat tape blocks
+              auto-fire even when the strategy checklist is Trade Ready (qualified gate).
+            </p>
+            <table className="w-full text-left text-[11px]">
+              <thead>
+                <tr className="text-[9px] font-black uppercase tracking-widest text-slate-500 border-b border-white/10">
+                  <th className="py-2 pr-2">Condition</th>
+                  <th className="py-2">Effect</th>
+                </tr>
+              </thead>
+              <tbody className="text-slate-400">
+                {[
+                  ['SPY 5m/15m FLAT', 'Passes — no block, full size', 'text-emerald-400'],
+                  ['SPY trend against the trade', 'Size cut (0.5×/0.75×) or tide-block', 'text-amber-400'],
+                  ["Stock's own 5m or 15m FLAT", 'Auto-fire blocked (qualified=false)', 'text-rose-400'],
+                  ["Stock's own trends directional + aligned", 'Fires (if score/RVOL/VWAP also pass)', 'text-emerald-400'],
+                ].map(([cond, effect, tone]) => (
+                  <tr key={cond} className="border-b border-white/5">
+                    <td className="py-2 pr-2 text-slate-300">{cond}</td>
+                    <td className={`py-2 font-bold ${tone}`}>{effect}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
