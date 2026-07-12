@@ -1139,9 +1139,16 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
   const breakout = selfDir !== null; // flag break IS the direction signal
   const rvolOk = input.rvol >= 1.2; // raised from 1.0 — flag breaks on average volume are lunch drifts
   const flagMaxVol = Math.max(...flagBars.map((c) => c.volume));
+  // Project the trigger bar to full 5m volume before comparing (same correction S7 uses).
+  // The scanner polls mid-bar, so the forming bar carries only a fraction of its final
+  // volume — comparing raw partial volume against COMPLETED flag bars demanded a hidden
+  // 3–6× real expansion and killed nearly every genuine break (S9: 1 trade in 19 days).
+  const s9BarAgeMs = Date.now() - new Date(trigger.time).getTime();
+  const s9BarProgress = Math.min(Math.max(s9BarAgeMs / (5 * 60 * 1000), 0.1), 1.0);
+  const projectedBreakVol = trigger.volume / s9BarProgress;
   // Break bar must show CLEAR urgency vs consolidation — 1.2× flag max (was 1.0×, which a
   // marginally louder drift bar could satisfy)
-  const volExpansion = trigger.volume > flagMaxVol * 1.2;
+  const volExpansion = projectedBreakVol > flagMaxVol * 1.2;
 
   const entry = input.price;
   const rawStop = dir === 'BULL'
@@ -1167,8 +1174,8 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
       ? pass('RVOL', `${round(input.rvol, 2)}× ✓`)
       : fail('RVOL', `${round(input.rvol, 2)}× — needs ≥1.2×`),
     volExpansion
-      ? pass('Volume expansion ≥1.2×', `Break bar ${round(trigger.volume / Math.max(flagMaxVol, 1), 1)}× flag max vol ✓`)
-      : fail('Volume expansion ≥1.2×', `Break bar vol below 1.2× flag max (${flagMaxVol.toLocaleString()}) — drift break, not institutional`),
+      ? pass('Volume expansion ≥1.2×', `Break bar ${round(projectedBreakVol / Math.max(flagMaxVol, 1), 1)}× flag max (projected, ${round(s9BarProgress * 100, 0)}% bar complete) ✓`)
+      : fail('Volume expansion ≥1.2×', `Break bar ${round(projectedBreakVol / Math.max(flagMaxVol, 1), 1)}× projected vs 1.2× flag max (${flagMaxVol.toLocaleString()}) — drift break, not institutional`),
     longTaxCheck(selfInput, dir),
     htfTrendContext(selfInput),
     pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP misaligned — watch'} — informational`),

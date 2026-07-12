@@ -13,16 +13,23 @@ import { getRiskSettings } from '../riskManager';
 import { computeBeta } from '../portfolioRisk';
 
 // Retired by user directive — enforced in code (not the mutable riskSettings state file)
-// so it survives daemon state saves and restarts. S2 v1 retune ran 25 trades at 8% WR /
-// PF 0.36 (Jul 2–10); the v2 rehab (cushioned reclaim, 10:45 gate, buffered rescue exit)
-// remains in strategyEngine.ts — remove 'vwap_pullback' from this list to trial it.
-const RETIRED_STRATEGIES: string[] = ['vwap_pullback'];
+// so it survives daemon state saves and restarts.
+// - vwap_pullback (S2, Jul 10): v1 retune ran 25 trades at 8% WR / PF 0.36; the v2 rehab
+//   (cushioned reclaim, 10:45 gate, buffered rescue exit) remains in strategyEngine.ts.
+// - s7_volume_surge (S7, Jul 12): handcuffed-by-design to S8 via capScoutSignals, 1W/5L
+//   standalone record, and honest surge detection needs tick data, not 5m polling.
+// Remove an id from this list to trial that strategy again.
+const RETIRED_STRATEGIES: string[] = ['vwap_pullback', 's7_volume_surge'];
 import { fetchSharesOutstanding, getFloatFromCache } from '../alpacaBroker';
 import { fetchEarningsCalendar, getEarningsDays } from '../finnhubClient';
 
-// S9 (flag_break) and S7 (s7_volume_surge) are scout strategies — they need their
-// partner (S1 / S8 respectively) to be active before they can progress past forming.
-// Without the partner there is no structural context for an entry.
+// S7 (s7_volume_surge) is a scout strategy — it needs its partner (S8) active before
+// it can progress past forming. Without the partner there is no structural context.
+// flag_break handcuff removed 2026-07-12: requiring a simultaneous above-forming
+// orb_retest on the same symbol at the same scan tick reduced S9 to 1 trade in 19
+// sessions — a strategy that never got a standalone trial. Its own gates (7-bar
+// compression + projected volume expansion + RVOL≥1.2 + long tax) now stand alone.
+// S7 is retired via RETIRED_STRATEGIES; its clause remains for any future re-trial.
 function capScoutSignals(signals: StrategySignal[]): StrategySignal[] {
   const FORMING_RANK = workflowStageRank('forming');
   const aboveForming = new Set(
@@ -30,7 +37,6 @@ function capScoutSignals(signals: StrategySignal[]): StrategySignal[] {
   );
   return signals.map(s => {
     const needsPartner =
-      (s.strategyId === 'flag_break'       && !aboveForming.has('orb_retest')) ||
       (s.strategyId === 's7_volume_surge'  && !aboveForming.has('ema20_bounce'));
     if (needsPartner && workflowStageRank(s.stage) > FORMING_RANK) {
       return { ...s, stage: 'forming' as WorkflowStage, tradePlan: null };

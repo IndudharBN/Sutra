@@ -607,6 +607,14 @@ export function PerformanceScreen() {
                 <AlertTriangle size={11} className="text-rose-500 mt-0.5 shrink-0" />
                 <span className="text-rose-300 font-bold">S2 VWAP Pullback: DISABLED (Jul 10) — 8% WR / PF 0.36 over 25 post-retune trades; rehab v2 parked in code</span>
               </div>
+              <div className="flex items-start gap-2">
+                <AlertTriangle size={11} className="text-rose-500 mt-0.5 shrink-0" />
+                <span className="text-rose-300 font-bold">S7 Volume Surge: DISABLED (Jul 12) — S8-handcuffed by design, 1W/5L standalone; needs tick data to trade honestly</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <CheckCircle2 size={11} className="text-emerald-500 mt-0.5 shrink-0" />
+                <span className="text-emerald-300">S9 Flag Break: freed (Jul 12) — S1 handcuff removed + break-bar volume now projected to full 5m; first standalone trial</span>
+              </div>
               {[
                 'S3: 15m trend must align — hard fail if counter-trend',
                 'S3: RVOL ≥ 1.2× — no institutional interest, no trade',
