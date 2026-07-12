@@ -537,10 +537,20 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
       ? (vwapTouchBar.close - vwapTouchBar.low) / touchBarRange >= 0.25
       : (vwapTouchBar.high - vwapTouchBar.close) / touchBarRange >= 0.25
   );
-  // Reclaim: trigger bar must close above VWAP itself — EMA9 reclaim mid-pullback is not enough
+  // Reclaim with CUSHION: trigger bar must close beyond VWAP by 0.1×ATR — not merely one
+  // tick over it. Post-fix forensics (25 trades, Jul 2–10): entries millimetres above VWAP
+  // died on the first retest wiggle at avg -0.12R, 8% WR. A reclaim that can't clear a
+  // 0.1×ATR cushion hasn't actually reclaimed anything.
+  const reclaimCushion = input.atr20 * 0.1;
   const reclaimed = trigger
-    ? (dir === 'BULL' ? trigger.close > input.vwap : trigger.close < input.vwap)
+    ? (dir === 'BULL' ? trigger.close > input.vwap + reclaimCushion : trigger.close < input.vwap - reclaimCushion)
     : false;
+  // Time gate: no S2 before 10:45 ET. Every one of the 25 post-fix S2 entries fired at
+  // 10:30–10:40 — the qualified-gate unlock stampede — straight into the trend-flip chop
+  // that killed 23 of them. The 10:30 print is the FIRST directional reading of the day,
+  // not a confirmed one; S2 needs the reclaim to survive past it.
+  const etNowS2 = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const timeGateOk = etNowS2.getHours() * 60 + etNowS2.getMinutes() >= 10 * 60 + 45;
   const rvolOk = input.rvol >= 0.8;
   const rsOk = input.rsVsBenchmark >= 1.0;
   const rsLabel = `RS ${round(input.rsVsBenchmark, 4)} vs SPY${rsOk ? ' ✓' : ' — lagging'}`;
@@ -556,7 +566,7 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   // trendAligned promoted to a HARD gate (was informational): entering the "pullback phase"
   // before the 5m trend confirmed the reclaim is exactly where the 68% stop-out rate lived.
   const trendOk = selfInput.trendAligned;
-  const tradePlan = selfDir && touchedValue && wickOk && reclaimed && rvolOk && rsOk && trendOk && longTaxOk(selfInput, dir)
+  const tradePlan = selfDir && touchedValue && wickOk && reclaimed && rvolOk && rsOk && trendOk && timeGateOk && longTaxOk(selfInput, dir)
     ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
     : null;
   const checklist = [
@@ -567,8 +577,11 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
       ? pass('Rejection wick', `VWAP defended — ${dir === 'BULL' ? 'lower' : 'upper'} wick ≥25% of bar range ✓`)
       : fail('Rejection wick', 'No rejection wick at VWAP — no institutional defence evidence'),
     reclaimed
-      ? pass('VWAP reclaim', `Closed ${dir === 'BULL' ? 'above' : 'below'} VWAP ✓`)
-      : fail('VWAP reclaim', `Waiting for close ${dir === 'BULL' ? 'above' : 'below'} VWAP — EMA9 reclaim not sufficient`),
+      ? pass('VWAP reclaim +0.1×ATR', `Closed ${dir === 'BULL' ? 'above' : 'below'} VWAP with cushion ✓`)
+      : fail('VWAP reclaim +0.1×ATR', `Needs close ${dir === 'BULL' ? '>' : '<'} VWAP ${dir === 'BULL' ? '+' : '−'} ${round(reclaimCushion, 2)} — tick-over reclaims died at 8% WR`),
+    timeGateOk
+      ? pass('Time gate ≥10:45 AM', 'Past the 10:30 trend-unlock stampede ✓')
+      : fail('Time gate ≥10:45 AM', `${etNowS2.getHours()}:${String(etNowS2.getMinutes()).padStart(2, '0')} ET — all 25 early S2 entries (10:30–10:40) hit the trend-flip chop`),
     trendOk
       ? pass('5m trend aligned (hard gate)', `${selfInput.trend5m} ✓ — Phase 3 reclaim confirmed`)
       : fail('5m trend aligned (hard gate)', `${selfInput.trend5m} — reclaim not yet confirmed by 5m trend; pullback-phase entries stopped out 68% of the time`),
@@ -582,7 +595,7 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
     ema1mCheck(input),
     spySessionCheck(selfInput),
   ];
-  return signal('vwap_pullback', selfInput, checklist, tradePlan, 'S2 VWAP pullback: slope ≥0.25% + VWAP touch + rejection wick ≥25% + VWAP reclaim + RVOL≥0.8 + RS≥1.0 + 5m trend aligned. Stop: VWAP−0.5×ATR. Hard gates: selfDir (slope ≥0.25%), touchedValue, wickOk, reclaimed, rvolOk, rsOk, trendOk, longTax (BULL: above VWAP + RS≥1.0).');
+  return signal('vwap_pullback', selfInput, checklist, tradePlan, 'S2 VWAP pullback v2: slope ≥0.25% + VWAP touch + rejection wick ≥25% + reclaim with 0.1×ATR cushion + RVOL≥0.8 + RS≥1.0 + 5m trend aligned + no entries before 10:45 ET. Stop: VWAP−0.5×ATR. Hard gates: selfDir, touchedValue, wickOk, reclaimed (cushioned), rvolOk, rsOk, trendOk, timeGateOk, longTax.');
 }
 
 export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
@@ -1523,7 +1536,11 @@ export function evaluateRangeBoundReversion(input: StrategyInput): StrategySigna
 // When S14 fires alongside S10 (E1) or S5-ob (E2), classifier promotes to GOLD.
 // Hard gates: higherTfOb (price in 15m or 5m OB zone), atOb1m, obReject1m, RVOL≥1.0, R:R≥2.0.
 const STOP_BUFFER_1M = 0.3;  // tighter buffer — 1m zone is far more precise than 5m/15m
-const MIN_RR_SNIPER  = 2.5;  // raised from 2.0 — S14 went 1W/5L (avg stop -$176); a precision entry that can't clear 2.5R isn't precise enough
+// 2.0 (was briefly 2.5): the 2.5 gate collided with the book-wide 2R TP cap — structuralT2's
+// fallback is now exactly 2R, so demanding 2.5R potential bricked S14 entirely (0 trades
+// Jul 2–10). 2.0 re-arms it; entry quality is carried by the HTF-OB + 1m-OB + rejection
+// confluence and RVOL≥1.2, not by an unreachable R:R bar.
+const MIN_RR_SNIPER  = 2.0;
 
 export function evaluateSniper1m(input: StrategyInput): StrategySignal {
   const one = input.candles.one;
@@ -1631,8 +1648,8 @@ export function evaluateSniper1m(input: StrategyInput): StrategySignal {
       ? pass('RVOL ≥1.2×', `${round(input.rvol, 2)}× ✓`)
       : fail('RVOL ≥1.2×', `${round(input.rvol, 2)}× — sniper entry needs participation`),
     rrOk
-      ? pass('R:R ≥2.5', `${round(computedRR, 2)} ✓ — tight 1m stop gives edge`)
-      : fail('R:R ≥2.5', `${round(computedRR, 2)} — 1m zone too close to entry`),
+      ? pass('R:R ≥2.0', `${round(computedRR, 2)} ✓ — tight 1m stop gives edge`)
+      : fail('R:R ≥2.0', `${round(computedRR, 2)} — 1m zone too close to entry`),
     longTaxCheck(selfInput, dir),
     htfTrendContext(selfInput),
     pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above ✓' : 'Below ✓') : 'misaligned'} — informational`),
@@ -1641,7 +1658,7 @@ export function evaluateSniper1m(input: StrategyInput): StrategySignal {
 
   return signal(
     'sniper_1m', selfInput, checklist, tradePlan,
-    'S14 E4: 1m OB inside confirmed 15m or 5m OB zone. Tightest stop (0.3×ATR), best R:R. Promotes to GOLD when S10 or S5-ob also fires. Hard gates: HTF backing, atOb1m, obReject1m, RVOL≥1.2, R:R≥2.5, longTax (BULL: above VWAP + RS≥1.0).',
+    'S14 E4: 1m OB inside confirmed 15m or 5m OB zone. Tightest stop (0.3×ATR), best R:R. Promotes to GOLD when S10 or S5-ob also fires. Hard gates: HTF backing, atOb1m, obReject1m, RVOL≥1.2, R:R≥2.0 (aligned with 2R TP cap), longTax (BULL: above VWAP + RS≥1.0).',
     false,
     ob1m && atOb1m ? [{ label: '1m OB Zone', startTime: one[ob1m.index]?.time ?? '', endTime: one[one.length - 1]?.time ?? '', high: ob1m.high, low: ob1m.low }] : [],
   );

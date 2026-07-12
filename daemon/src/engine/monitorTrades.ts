@@ -121,7 +121,15 @@ export function monitorPaperTrades(
     }
     if ((trade.strategyId === 'vwap_pullback' || trade.strategyId === 'rs_continuation') && !trade.t1HitAt) {
       const vwap = vwapBySymbol.get(baseSymbol(trade.symbol));
-      if (vwap && (trade.direction === 'BULL' ? current < vwap : current > vwap)) {
+      // Buffered re-cross (was one tick through VWAP): S2 enters just above VWAP by
+      // construction, so a zero-tolerance re-cross executed 23/25 trades at avg -0.12R
+      // before the thesis could express — every reclaim retest was instant death.
+      // Require price to be through VWAP by 25% of the trade's initial risk before
+      // conceding: cuts genuine failures at ~-0.3R, survives the normal retest wiggle.
+      const rescueBuffer = Math.abs(trade.entry - Number(trade.stop || 0)) * 0.25;
+      if (vwap && (trade.direction === 'BULL'
+        ? current < vwap - rescueBuffer
+        : current > vwap + rescueBuffer)) {
         changed = true;
         return closePaperTrade(trade, current, 'Stop');
       }
