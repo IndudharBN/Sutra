@@ -603,6 +603,10 @@ export function PerformanceScreen() {
               <AlertTriangle size={14} className="text-amber-400" />Day Trader Rules
             </h3>
             <div className="space-y-2 text-[11px] text-slate-400">
+              <div className="flex items-start gap-2">
+                <AlertTriangle size={11} className="text-rose-500 mt-0.5 shrink-0" />
+                <span className="text-rose-300 font-bold">S2 VWAP Pullback: DISABLED (Jul 10) — 8% WR / PF 0.36 over 25 post-retune trades; rehab v2 parked in code</span>
+              </div>
               {[
                 'S3: 15m trend must align — hard fail if counter-trend',
                 'S3: RVOL ≥ 1.2× — no institutional interest, no trade',

@@ -11,6 +11,12 @@ import type { MarketDataProviderStatus, StrategySignal, WorkflowStage } from './
 import { workflowStageRank } from './workflowTypes';
 import { getRiskSettings } from '../riskManager';
 import { computeBeta } from '../portfolioRisk';
+
+// Retired by user directive — enforced in code (not the mutable riskSettings state file)
+// so it survives daemon state saves and restarts. S2 v1 retune ran 25 trades at 8% WR /
+// PF 0.36 (Jul 2–10); the v2 rehab (cushioned reclaim, 10:45 gate, buffered rescue exit)
+// remains in strategyEngine.ts — remove 'vwap_pullback' from this list to trial it.
+const RETIRED_STRATEGIES: string[] = ['vwap_pullback'];
 import { fetchSharesOutstanding, getFloatFromCache } from '../alpacaBroker';
 import { fetchEarningsCalendar, getEarningsDays } from '../finnhubClient';
 
@@ -411,7 +417,7 @@ function buildRowFromAlpaca(
     candles,
   });
   const strategySignals = capScoutSignals(stampGroupClassification(
-    allSignals.filter((s) => !disabledStrategies.includes(s.strategyId))
+    allSignals.filter((s) => !disabledStrategies.includes(s.strategyId) && !RETIRED_STRATEGIES.includes(s.strategyId))
   ));
 
   const primaryStrategy = strategySignals[0] || null;
