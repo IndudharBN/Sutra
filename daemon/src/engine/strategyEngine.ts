@@ -1589,10 +1589,11 @@ export function evaluateSniper1m(input: StrategyInput): StrategySignal {
         : input.price >= ob1m.low - tol1m && input.price <= ob1m.high + tol1m)
     : false;
 
-  // Check last 3 1m bars for rejection (not just the final bar). The 60s scan cycle can
-  // miss a 1-bar rejection by a single tick; 3 bars (~3 min) gives enough visibility
-  // without letting stale setups through. Same logic as rejectionCandle() in smc.ts.
-  const obReject1m = ob1m && atOb1m ? one.slice(-3).some((c) => {
+  // Check last 5 1m bars for rejection (was 3). Against a ~60s scan cadence, a 3-bar
+  // window made the setup a timing lottery — the rejection had to exist at the exact
+  // moment the scanner looked. 5 bars (~5 min) keeps the zone-fresh requirement while
+  // halving the odds of missing a genuine rejection between ticks.
+  const obReject1m = ob1m && atOb1m ? one.slice(-5).some((c) => {
     const r = c.high - c.low;
     if (r <= 0) return false;
     const touches = dir === 'BULL'
@@ -1609,7 +1610,16 @@ export function evaluateSniper1m(input: StrategyInput): StrategySignal {
   const rawStop = ob1m && atOb1m
     ? (dir === 'BULL' ? ob1m.low - input.atr20 * STOP_BUFFER_1M : ob1m.high + input.atr20 * STOP_BUFFER_1M)
     : entry;
-  const stop = noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel);
+  // Sniper-scale stop floor — deliberately NOT the book-wide noiseFlooredStop. That
+  // floor (0.75×ATR, built for 5m strategies) silently inflated S14's "0.3×ATR sniper
+  // stop" to a full-width stop, destroying the tight-stop/2R thesis that justifies the
+  // strategy (its 6 historical stops averaged -$176 — full-width losses, not sniper
+  // losses). Floor at STOP_BUFFER_1M (0.3×ATR) from entry: small honest losses are the
+  // sniper's cost of doing business, and 2R at ~0.6×ATR is actually reachable intraday.
+  const minSniperDist = input.atr20 * STOP_BUFFER_1M;
+  const sniperFloor = dir === 'BULL' ? entry - minSniperDist : entry + minSniperDist;
+  const flooredStop = dir === 'BULL' ? Math.min(rawStop, sniperFloor) : Math.max(rawStop, sniperFloor);
+  const stop = Number.isFinite(flooredStop) && flooredStop > 0 ? flooredStop : sniperFloor;
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
