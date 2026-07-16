@@ -866,23 +866,42 @@ function DecisionPanel({
           <ProTradeCandlePreview row={row} />
 
           <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-            <p className="text-[10px] uppercase tracking-widest text-slate-500 font-black">Trade Plan</p>
-            <div className="mt-3 grid grid-cols-2 md:grid-cols-5 gap-2">
-              {[
-                ['Entry', fmtMoney(row.tradePlan?.entry)],
-                ['Stop', fmtMoney(row.tradePlan?.stop)],
-                ['T1', fmtMoney(row.tradePlan?.target1 || row.tradePlan?.target)],
-                ['T2', fmtMoney(row.tradePlan?.target2 || row.tradePlan?.target)],
-                ['R:R', row.tradePlan ? row.tradePlan.rr.toFixed(2) : '--'],
-                ['Risk/Share', fmtMoney(row.tradePlan?.riskPerShare)],
-              ].map(([label, value]) => (
-                <div key={label} className="rounded-lg border border-white/10 bg-black/20 p-2">
-                  <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">{label}</p>
-                  <p className="mt-1 text-xs text-white font-mono font-black">{value}</p>
-                </div>
-              ))}
-            </div>
-            <p className="mt-3 text-xs text-slate-400">{row.tradePlan?.invalidation || 'No trade plan calculated yet.'}</p>
+            {/* Fall back to the provisional plan (display-only) while the setup is FORMING —
+                shows where the strategy WOULD trade so the trader can pre-stage the read. */}
+            {(() => {
+              const plan = row.tradePlan ?? row.provisionalPlan ?? null;
+              const isProvisional = !row.tradePlan && !!row.provisionalPlan;
+              const awaiting = isProvisional ? (row.primaryStrategy?.missing || []).filter((m) => m !== 'Entry/stop/target not calculated') : [];
+              return (
+                <>
+                  <p className="text-[10px] uppercase tracking-widest text-slate-500 font-black">
+                    Trade Plan{isProvisional && <span className="ml-2 px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-300">PROVISIONAL</span>}
+                  </p>
+                  <div className="mt-3 grid grid-cols-2 md:grid-cols-5 gap-2">
+                    {[
+                      ['Entry', fmtMoney(plan?.entry)],
+                      ['Stop', fmtMoney(plan?.stop)],
+                      ['T1', fmtMoney(plan?.target1 || plan?.target)],
+                      ['T2', fmtMoney(plan?.target2 || plan?.target)],
+                      ['R:R', plan ? plan.rr.toFixed(2) : '--'],
+                      ['Risk/Share', fmtMoney(plan?.riskPerShare)],
+                    ].map(([label, value]) => (
+                      <div key={label} className="rounded-lg border border-white/10 bg-black/20 p-2">
+                        <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">{label}</p>
+                        <p className={`mt-1 text-xs font-mono font-black ${isProvisional ? 'text-slate-400 italic' : 'text-white'}`}>{value}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="mt-3 text-xs text-slate-400">
+                    {row.tradePlan
+                      ? row.tradePlan.invalidation
+                      : isProvisional
+                        ? `Provisional — not executable. Awaiting: ${awaiting.slice(0, 3).join(', ') || 'gate confirmation'}`
+                        : 'No trade plan calculated yet.'}
+                  </p>
+                </>
+              );
+            })()}
           </div>
 
           <div className="rounded-xl border border-white/10 bg-white/5 p-3">

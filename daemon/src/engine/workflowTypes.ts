@@ -85,6 +85,10 @@ export interface StrategySignal {
   checklist: StrategyChecklistItem[];
   missing: string[];
   tradePlan: TradePlan | null;
+  // Display-only: the plan the strategy WOULD trade if its hard gates passed.
+  // Populated even while forming so the UI can draw provisional entry/stop/target
+  // lines. NEVER read by the executor, stage logic, or risk checks.
+  provisionalPlan?: TradePlan | null;
   zones: ChartZone[];
   canAutoReady: boolean;
   orderBlockReason: string;

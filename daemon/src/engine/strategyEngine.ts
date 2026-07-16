@@ -283,6 +283,9 @@ function signal(
   reason: string,
   manualOnly = false,
   zones: StrategySignal['zones'] = [],
+  // Display-only: the plan this strategy WOULD trade if its hard gates passed.
+  // Feeds the UI's provisional preview lines; never read by stage/executor/risk.
+  provisionalPlan: TradePlan | null = null,
 ): StrategySignal {
   const stage = stageFromChecklist(checklist, tradePlan, input, manualOnly);
   return {
@@ -295,6 +298,7 @@ function signal(
     checklist,
     missing: missing(checklist, tradePlan, input, manualOnly),
     tradePlan,
+    provisionalPlan: tradePlan ?? provisionalPlan,
     zones,
     canAutoReady: !manualOnly,
     orderBlockReason: stage === 'trade_ready' ? '' : missing(checklist, tradePlan, input, manualOnly).join(' | '),
@@ -465,7 +469,8 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   // wide ORB stops meant losers were huge while winners drifted to EOD. Cap the stop
   // width at 1.5×ATR so a full stop-out can never dwarf the realistic intraday reward.
   const riskOk = risk <= input.atr20 * 1.5;
-  const tradePlan = selfDir && range && confirmedBreak && retest && orbWidthOk && input.rvol >= rvolMin && timeGateOk && riskOk && longTaxOk(selfInput, dir) ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
+  const tradePlan = selfDir && range && confirmedBreak && retest && orbWidthOk && input.rvol >= rvolMin && timeGateOk && riskOk && longTaxOk(selfInput, dir) ? planCandidate : null;
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from ORB break`) : fail('Directional bias', 'Price inside ORB — no breakout yet'),
     htfTrendContext(selfInput),
@@ -490,7 +495,7 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
     endTime: range.endTime,
     high: range.high,
     low: range.low,
-  }] : []);
+  }] : [], planCandidate);
 }
 
 export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
@@ -566,9 +571,8 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   // trendAligned promoted to a HARD gate (was informational): entering the "pullback phase"
   // before the 5m trend confirmed the reclaim is exactly where the 68% stop-out rate lived.
   const trendOk = selfInput.trendAligned;
-  const tradePlan = selfDir && touchedValue && wickOk && reclaimed && rvolOk && rsOk && trendOk && timeGateOk && longTaxOk(selfInput, dir)
-    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
-    : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
+  const tradePlan = selfDir && touchedValue && wickOk && reclaimed && rvolOk && rsOk && trendOk && timeGateOk && longTaxOk(selfInput, dir) ? planCandidate : null;
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from VWAP slope`) : fail('Directional bias', 'VWAP flat — range session, no pullback direction'),
     htfTrendContext(selfInput),
@@ -595,7 +599,7 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
     ema1mCheck(input),
     spySessionCheck(selfInput),
   ];
-  return signal('vwap_pullback', selfInput, checklist, tradePlan, 'S2 VWAP pullback v2: slope ≥0.25% + VWAP touch + rejection wick ≥25% + reclaim with 0.1×ATR cushion + RVOL≥0.8 + RS≥1.0 + 5m trend aligned + no entries before 10:45 ET. Stop: VWAP−0.5×ATR. Hard gates: selfDir, touchedValue, wickOk, reclaimed (cushioned), rvolOk, rsOk, trendOk, timeGateOk, longTax.');
+  return signal('vwap_pullback', selfInput, checklist, tradePlan, 'S2 VWAP pullback v2: slope ≥0.25% + VWAP touch + rejection wick ≥25% + reclaim with 0.1×ATR cushion + RVOL≥0.8 + RS≥1.0 + 5m trend aligned + no entries before 10:45 ET. Stop: VWAP−0.5×ATR. Hard gates: selfDir, touchedValue, wickOk, reclaimed (cushioned), rvolOk, rsOk, trendOk, timeGateOk, longTax.', false, [], planCandidate);
 }
 
 export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
@@ -633,7 +637,8 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
   const stopWidthOk = stopWidthPct <= 0.015;
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
-  const tradePlan = recent.length >= 6 && rsEdge && breakout && stopSide && stopWidthOk && input.rvol >= 1.0 ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
+  const tradePlan = recent.length >= 6 && rsEdge && breakout && stopSide && stopWidthOk && input.rvol >= 1.0 ? planCandidate : null;
   const fifteen = input.candles.fifteen;
   const trend1h: 'UP' | 'DOWN' | 'FLAT' = fifteen.length >= 5
     ? (fifteen[fifteen.length - 1].close > fifteen[fifteen.length - 5].close * 1.001 ? 'UP'
@@ -653,7 +658,7 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
     ema1mCheck(input),
     spyTapeCheck(selfInput),
   ];
-  return signal('rs_continuation', selfInput, checklist, tradePlan, 'S3 RS continuation: micro range break + RS≥0.5% + RVOL≥1.0 + stop ≤1.5%. Hard gates: breakout (self-determines direction), rsEdge, rvol, stopSide, stopWidthOk.');
+  return signal('rs_continuation', selfInput, checklist, tradePlan, 'S3 RS continuation: micro range break + RS≥0.5% + RVOL≥1.0 + stop ≤1.5%. Hard gates: breakout (self-determines direction), rsEdge, rvol, stopSide, stopWidthOk.', false, [], planCandidate);
 }
 
 export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
@@ -756,9 +761,8 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
         trendAligned: selfDir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN',
       }
     : input;
-  const tradePlan = swept && reclaimed && nearLevel && sweepWickOk && reclaimVolOk
-    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
-    : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
+  const tradePlan = swept && reclaimed && nearLevel && sweepWickOk && reclaimVolOk ? planCandidate : null;
   const sweepDetail = sweptLevel !== null
     ? (sweepSource === 'ORB'
         ? `ORB ${dir === 'BULL' ? 'low' : 'high'} ${round(sweptLevel, 2)}`
@@ -779,7 +783,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     ema1mCheck(input),
     spySessionCheck(selfInput),
   ];
-  return signal('liquidity_sweep', selfInput, checklist, tradePlan, `S4 Sweep (${sweepSource ?? 'no level'}): T1=${orOpposite ? 'OR opposite' : '2R'} T2=${orOpposite ? round(orOpposite, 2) : '2.5R'}`);
+  return signal('liquidity_sweep', selfInput, checklist, tradePlan, `S4 Sweep (${sweepSource ?? 'no level'}): T1=${orOpposite ? 'OR opposite' : '2R'} T2=${orOpposite ? round(orOpposite, 2) : '2.5R'}`, false, [], planCandidate);
 }
 
 export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
@@ -857,7 +861,8 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   // Asymmetry gate: cap stop width at 1.5×ATR — wide structural zones made S5's losers
   // (avg -$113) run 1.7× its winners; a 62.6% WR would have been needed to break even.
   const riskOk = risk <= input.atr20 * 1.5;
-  const tradePlan = entryConfirmed && rvolOk && fvgSizeOk && !lateSession && trend15Ok && riskOk && longTaxOk(selfInput, dir) ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
+  const tradePlan = entryConfirmed && rvolOk && fvgSizeOk && !lateSession && trend15Ok && riskOk && longTaxOk(selfInput, dir) ? planCandidate : null;
   const structureLabel = atOb && atFvg
     ? `OB+FVG confluence`
     : atOb ? `OB entry`
@@ -893,7 +898,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
     ema1mCheck(input),
     spyTapeCheck(selfInput),
   ];
-  const sig = signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5: OB or FVG retest. Hard gates: OB needs rejection candle; FVG solo needs RVOL≥1.2× + gap ≥ 0.25×ATR; BOTH paths need 15m trend aligned + stop ≤1.5×ATR + longTax (BULL: above VWAP + RS≥1.0); blocked after 15:00 ET.');
+  const sig = signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5: OB or FVG retest. Hard gates: OB needs rejection candle; FVG solo needs RVOL≥1.2× + gap ≥ 0.25×ATR; BOTH paths need 15m trend aligned + stop ≤1.5×ATR + longTax (BULL: above VWAP + RS≥1.0); blocked after 15:00 ET.', false, [], planCandidate);
   return { ...sig, enginePath: (atOb ? 'ob' : atFvg ? 'fvg' : undefined) as StrategySignal['enginePath'] };
 }
 
@@ -944,7 +949,8 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
-  const tradePlan = mssOk && bar2Ok && !zoneBlocked && volOk ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger) : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
+  const tradePlan = mssOk && bar2Ok && !zoneBlocked && volOk ? planCandidate : null;
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from structural break`) : fail('Directional bias', 'No structural break in last 30m — direction unknown'),
     htfTrendContext(selfInput),
@@ -956,7 +962,7 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
     ema1mCheck(input),
     spyTapeCheck(selfInput),
   ];
-  return signal('mss_breakout', selfInput, checklist, tradePlan, 'S6 MSS: structural break + clear path. Hard gates: mssOk (self-determines direction), bar2Ok (0.8×ATR), zoneBlocked (1×ATR), RVOL≥0.8.');
+  return signal('mss_breakout', selfInput, checklist, tradePlan, 'S6 MSS: structural break + clear path. Hard gates: mssOk (self-determines direction), bar2Ok (0.8×ATR), zoneBlocked (1×ATR), RVOL≥0.8.', false, [], planCandidate);
 }
 
 function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
@@ -1011,9 +1017,8 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
   // VWAP alignment and session RVOL promoted to HARD gates (were informational):
   // a "surge" against the session anchor on a dead-volume day is a trap bar, not a breakout.
   const rvolOk = input.rvol >= 1.2;
-  const tradePlan = volSpike && selfDir && selfInput.vwapAligned && rvolOk && longTaxOk(selfInput, dir)
-    ? planFromLevelsT1T2(selfInput, price, stop, t1, t2, bar)
-    : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, price, stop, t1, t2, bar);
+  const tradePlan = volSpike && selfDir && selfInput.vwapAligned && rvolOk && longTaxOk(selfInput, dir) ? planCandidate : null;
   const checklist = [
     selfDir
       ? pass('Directional bias', `${selfDir} — self-determined from 30m range break`)
@@ -1030,7 +1035,7 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
     pass('ADR room', `${!adrExhausted(input.candles.five, input.atr20) ? '< 80% ATR used ✓' : '>80% ATR used — watch sizing'} — informational`),
     spyTapeCheck(selfInput),
   ];
-  return signal('s7_volume_surge', selfInput, checklist, tradePlan, 'S7: Institutional 2.5× volume surge on 30m range break. Hard gates: volSpike (2.5× projected bar volume), selfDir (range break), vwapAligned, RVOL≥1.2, longTax (BULL: above VWAP + RS≥1.0).');
+  return signal('s7_volume_surge', selfInput, checklist, tradePlan, 'S7: Institutional 2.5× volume surge on 30m range break. Hard gates: volSpike (2.5× projected bar volume), selfDir (range break), vwapAligned, RVOL≥1.2, longTax (BULL: above VWAP + RS≥1.0).', false, [], planCandidate);
 }
 
 // ─── S8: EMA20 Bounce ────────────────────────────────────────────────────────
@@ -1080,9 +1085,8 @@ export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
-  const tradePlan = emaRising && touchedEma && reclaimed && input.rvol >= 0.8
-    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
-    : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
+  const tradePlan = emaRising && touchedEma && reclaimed && input.rvol >= 0.8 ? planCandidate : null;
 
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from EMA20 slope`) : fail('Directional bias', 'EMA20 flat — no slope to define bounce direction'),
@@ -1103,7 +1107,7 @@ export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
   ];
 
   return signal('ema20_bounce', selfInput, checklist, tradePlan,
-    'S8 EMA20 bounce: EMA slope self-determines direction. Rising/falling EMA20 touched + recovery close + RVOL≥0.8. Hard gates: selfDir (slope), emaRising, touchedEma, reclaimed, rvol.');
+    'S8 EMA20 bounce: EMA slope self-determines direction. Rising/falling EMA20 touched + recovery close + RVOL≥0.8. Hard gates: selfDir (slope), emaRising, touchedEma, reclaimed, rvol.', false, [], planCandidate);
 }
 
 // ─── S9: Flag Break ───────────────────────────────────────────────────────────
@@ -1158,9 +1162,8 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
-  const tradePlan = flagFormed && breakout && rvolOk && volExpansion && longTaxOk(selfInput, dir)
-    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
-    : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
+  const tradePlan = flagFormed && breakout && rvolOk && volExpansion && longTaxOk(selfInput, dir) ? planCandidate : null;
 
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from flag break side`) : fail('Directional bias', `Waiting for close above ${round(flagHigh, 2)} or below ${round(flagLow, 2)}`),
@@ -1184,7 +1187,7 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
   ];
 
   return signal('flag_break', selfInput, checklist, tradePlan,
-    'S9 Flag Break: break side self-determines direction. 7-bar compression < 0.5×ATR + close through flag + RVOL≥1.2 + vol expansion ≥1.2× flag max. Hard gates: selfDir (break), flagFormed, rvolOk, volExpansion, longTax (BULL: above VWAP + RS≥1.0).');
+    'S9 Flag Break: break side self-determines direction. 7-bar compression < 0.5×ATR + close through flag + RVOL≥1.2 + vol expansion ≥1.2× flag max. Hard gates: selfDir (break), flagFormed, rvolOk, volExpansion, longTax (BULL: above VWAP + RS≥1.0).', false, [], planCandidate);
 }
 
 // ─── 15m Strategy constants ───────────────────────────────────────────────────
@@ -1249,9 +1252,8 @@ export function evaluateOrb15mRetest(input: StrategyInput): StrategySignal {
   const rrOk = computedRR >= MIN_RR_15M;
   const trigger = last(fifteen);
 
-  const tradePlan = selfDir && atOb && obReject && rvolOk && adrOk && rrOk && trigger
-    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
-    : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
+  const tradePlan = selfDir && atOb && obReject && rvolOk && adrOk && rrOk && trigger ? planCandidate : null;
 
   const obLabel = ob ? `${round(ob.low, 2)}–${round(ob.high, 2)}` : 'none';
   const checklist = [
@@ -1280,6 +1282,7 @@ export function evaluateOrb15mRetest(input: StrategyInput): StrategySignal {
     'S10 E1: Unmitigated 15m OB (≥1.6×ATR impulse) retest. Self-determines direction from zone geometry. Hard gates: atOb, obReject, RVOL≥1.0, ADR≥3%, R:R≥2.0.',
     false,
     ob && atOb ? [{ label: '15m OB Zone', startTime: fifteen[ob.index]?.time ?? '', endTime: fifteen[fifteen.length - 1]?.time ?? '', high: ob.high, low: ob.low }] : [],
+    planCandidate,
   );
 }
 
@@ -1336,9 +1339,8 @@ export function evaluateVwap15mPullback(input: StrategyInput): StrategySignal {
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
   const rrOk = rr(entry, stop, t2, dir) >= MIN_RR_15M;
-  const tradePlan = selfDir && touchedVwap && reclaimed && rsOk && rvolOk && adrOk && rrOk && longTaxOk(selfInput, dir)
-    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
-    : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
+  const tradePlan = selfDir && touchedVwap && reclaimed && rsOk && rvolOk && adrOk && rrOk && longTaxOk(selfInput, dir) ? planCandidate : null;
   const checklist = [
     selfDir
       ? pass('Directional bias', `${selfDir} — self-determined from 15m EMA9 slope`)
@@ -1353,7 +1355,7 @@ export function evaluateVwap15mPullback(input: StrategyInput): StrategySignal {
     longTaxCheck(selfInput, dir),
     pass('15m trend', `${input.trend15m}${selfInput.trendAligned ? ' aligned ✓' : ''} — informational`),
   ];
-  return signal('vwap15m_pullback', selfInput, checklist, tradePlan, 'S11 15m VWAP pullback: self-determined from 15m EMA9 slope. Hard gates: selfDir (slope ≥0.1%), touchedVwap, reclaimed, RS≥0.5%, RVOL≥1.2, R:R≥2.0, longTax (BULL: above VWAP + RS≥1.0).');
+  return signal('vwap15m_pullback', selfInput, checklist, tradePlan, 'S11 15m VWAP pullback: self-determined from 15m EMA9 slope. Hard gates: selfDir (slope ≥0.1%), touchedVwap, reclaimed, RS≥0.5%, RVOL≥1.2, R:R≥2.0, longTax (BULL: above VWAP + RS≥1.0).', false, [], planCandidate);
 }
 
 // ─── S12: 15m EMA20 Bounce ───────────────────────────────────────────────────
@@ -1409,9 +1411,8 @@ export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
   const rrOk = rr(entry, stop, t2, dir) >= MIN_RR_15M;
-  const tradePlan = emaRising && touchedEma && reclaimed && rvolOk && adrOk && rrOk && timeGateOk && trendOk && longTaxOk(selfInput, dir)
-    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
-    : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
+  const tradePlan = emaRising && touchedEma && reclaimed && rvolOk && adrOk && rrOk && timeGateOk && trendOk && longTaxOk(selfInput, dir) ? planCandidate : null;
   const checklist = [
     selfDir
       ? pass('Directional bias', `${selfDir} — self-determined from 15m EMA20 slope`)
@@ -1436,7 +1437,7 @@ export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
     pass('VWAP', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above ✓' : 'Below ✓') : 'misaligned'} — informational`),
     timeGateOk ? pass('Time gate ≥10:45 AM', '1h15m into session ✓') : fail('Time gate ≥10:45 AM', `${etNow.getHours()}:${String(etNow.getMinutes()).padStart(2, '0')} ET — S12 waits until 10:45 (15m trend developed)`),
   ];
-  return signal('ema20_bounce_15m', selfInput, checklist, tradePlan, 'S12 15m EMA20 bounce: self-determined direction from 15m EMA20 slope + 45m touch + reclaim + RVOL≥1.2 + R:R≥2.0 + time gate ≥10:45 ET. Hard gates: selfDir (slope ≥0.1% per 1h), touchedEma, reclaimed, rvolOk, rrOk, timeGateOk, trendOk (15m trend), longTax (BULL: above VWAP + RS≥1.0).');
+  return signal('ema20_bounce_15m', selfInput, checklist, tradePlan, 'S12 15m EMA20 bounce: self-determined direction from 15m EMA20 slope + 45m touch + reclaim + RVOL≥1.2 + R:R≥2.0 + time gate ≥10:45 ET. Hard gates: selfDir (slope ≥0.1% per 1h), touchedEma, reclaimed, rvolOk, rrOk, timeGateOk, trendOk (15m trend), longTax (BULL: above VWAP + RS≥1.0).', false, [], planCandidate);
 }
 
 // ─── S13: Range-Bound Mean Reversion ─────────────────────────────────────────
@@ -1495,9 +1496,8 @@ export function evaluateRangeBoundReversion(input: StrategyInput): StrategySigna
   const rrToVwap = rr(entry, stop, t1, dir);
   const rrOk = rrToVwap >= MIN_RR; // need ≥1.5R to VWAP — validates the mean-reversion gap exists
 
-  const tradePlan = rangeOk && atExtreme && wickOk && rvolOk && rrOk
-    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
-    : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
+  const tradePlan = rangeOk && atExtreme && wickOk && rvolOk && rrOk ? planCandidate : null;
 
   const checklist = [
     selfDir
@@ -1532,7 +1532,7 @@ export function evaluateRangeBoundReversion(input: StrategyInput): StrategySigna
       endTime: rangeBars[rangeBars.length - 1].time,
       high: rangeHigh,
       low: rangeLow,
-    }] : []);
+    }] : [], planCandidate);
 }
 
 // ─── S14: 1m Sniper (E4) ─────────────────────────────────────────────────────
@@ -1634,9 +1634,8 @@ export function evaluateSniper1m(input: StrategyInput): StrategySignal {
   const rrOk = computedRR >= MIN_RR_SNIPER;
   const trigger = last(one);
 
-  const tradePlan = selfDir && atOb1m && obReject1m && rvolOk && rrOk && trigger && longTaxOk(selfInput, dir)
-    ? planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger)
-    : null;
+  const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
+  const tradePlan = selfDir && atOb1m && obReject1m && rvolOk && rrOk && trigger && longTaxOk(selfInput, dir) ? planCandidate : null;
 
   // Label which higher-TF zone is backing this entry
   const htfLabel = (() => {
@@ -1678,6 +1677,7 @@ export function evaluateSniper1m(input: StrategyInput): StrategySignal {
     'S14 E4: 1m OB inside confirmed 15m or 5m OB zone. Tightest stop (0.3×ATR), best R:R. Promotes to GOLD when S10 or S5-ob also fires. Hard gates: HTF backing, atOb1m, obReject1m, RVOL≥1.2, R:R≥2.0 (aligned with 2R TP cap), longTax (BULL: above VWAP + RS≥1.0).',
     false,
     ob1m && atOb1m ? [{ label: '1m OB Zone', startTime: one[ob1m.index]?.time ?? '', endTime: one[one.length - 1]?.time ?? '', high: ob1m.high, low: ob1m.low }] : [],
+    planCandidate,
   );
 }
 

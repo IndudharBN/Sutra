@@ -95,6 +95,7 @@ export interface ProTradeRow {
   strategySignals: StrategySignal[];
   primaryStrategy: StrategySignal | null;
   tradePlan: StrategySignal['tradePlan'];
+  provisionalPlan?: StrategySignal['tradePlan'];  // display-only: levels while forming
   confidence: number;
   dataStatus: MarketDataProviderStatus;
   candles: {
@@ -466,6 +467,7 @@ function buildRowFromAlpaca(
     strategySignals,
     primaryStrategy,
     tradePlan: primaryStrategy?.tradePlan || null,
+    provisionalPlan: primaryStrategy?.provisionalPlan || null,
     confidence: primaryStrategy?.confidence || scored.score,
     dataStatus: providerStatus,
     candles,

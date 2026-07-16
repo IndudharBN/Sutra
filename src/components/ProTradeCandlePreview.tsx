@@ -56,6 +56,38 @@ export function ProTradeCandlePreview({ row }: { row: ProTradeRow | null }) {
     }));
     series.setData(data);
 
+    // Provisional preview: the setup is still FORMING (no executable plan), but the
+    // strategy has computed where it WOULD trade. Draw muted dashed lines so the
+    // trader can pre-stage the read. Display-only — provisionalPlan is never used
+    // by the executor or risk checks.
+    const provisional = !row.tradePlan && row.provisionalPlan ? row.provisionalPlan : null;
+    if (provisional) {
+      series.createPriceLine({
+        price: provisional.entry,
+        color: 'rgba(148, 163, 184, 0.9)',
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: 'Entry?',
+      });
+      series.createPriceLine({
+        price: provisional.stop,
+        color: 'rgba(251, 113, 133, 0.55)',
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: 'Stop?',
+      });
+      series.createPriceLine({
+        price: provisional.target,
+        color: 'rgba(52, 211, 153, 0.55)',
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: 'Target?',
+      });
+    }
+
     if (row.tradePlan) {
       series.createPriceLine({
         price: row.tradePlan.entry,
@@ -122,7 +154,9 @@ export function ProTradeCandlePreview({ row }: { row: ProTradeRow | null }) {
         </div>
         <div className="text-right">
           <p className="text-[10px] uppercase tracking-widest text-slate-500 font-black">R:R</p>
-          <p className="text-xs text-emerald-300 font-black">{row.tradePlan ? row.tradePlan.rr.toFixed(2) : '--'}</p>
+          <p className={`text-xs font-black ${row.tradePlan ? 'text-emerald-300' : 'text-slate-400'}`}>
+            {row.tradePlan ? row.tradePlan.rr.toFixed(2) : row.provisionalPlan ? `${row.provisionalPlan.rr.toFixed(2)}?` : '--'}
+          </p>
         </div>
       </div>
       <div ref={hostRef} className="h-[280px] w-full" />
