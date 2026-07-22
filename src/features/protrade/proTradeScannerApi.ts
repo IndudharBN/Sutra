@@ -52,6 +52,32 @@ const DEFAULT_LIVE_UNIVERSE = [
   'TSLA', 'AAPL', 'MSFT', 'NFLX', 'UBER', 'LYFT', 'COIN', 'SQ', 'SHOP', 'CRWD', 'ZS', 'PANW', 'OKTA', 'SPLK', 'PATH', 'AI', 'SOUN', 'BBAI', 'IONQ', 'RGTI', 'QBTS', 'DJT', 'SMCI', 'WOLF', 'LUNR', 'SPCE', 'RKT', 'HIMS', 'ACHR',
 ];
 
+// ── Benchmark routing: QQQ for tech/growth, SPY for everything else ──────────
+// The scanner universe is Nasdaq-heavy (semis, AI, crypto-miners, quantum,
+// high-beta growth). Measuring those names' relative strength and tape
+// alignment against SPY — ~30% financials/healthcare/staples — reads the wrong
+// market: on a day when QQQ trends hard and SPY chops, a lagging semi scores as
+// "strong vs SPY" and SPY's tide sits FLAT. Tech names are benchmarked to QQQ.
+const TECH_SECTORS = new Set(['XLK', 'XLC']);
+const TECH_SYMBOLS = new Set([
+  // Semis / AI hardware
+  'NVDA','AMD','AVGO','MU','AMAT','LRCX','KLAC','INTC','QCOM','MRVL','ON','MCHP','ADI','SMCI','ARM','TSM','GFS','WOLF','ALGM','SMTC','SNDK','STX','LITE','VIAV','CIEN','GLW','TXN','NXPI',
+  // Software / internet / platforms
+  'MSFT','AAPL','GOOGL','GOOG','META','AMZN','NFLX','ORCL','CRM','ADBE','NOW','SNOW','DDOG','NET','CRWD','ZS','PANW','OKTA','SPLK','PATH','TWLO','TEAM','WDAY','INTU','SNPS','CDNS','ANET','DOCN','U','RBLX','DASH','ABNB','UBER','LYFT','SHOP','SQ','XYZ','PYPL','AFRM','SOFI','HOOD','COIN','RDDT','TOST','FOUR','Z','LMND','CHWY','EXPE','BKNG','TTD','APP','CRCL',
+  // AI / quantum / space / speculative growth
+  'AI','SOUN','BBAI','IONQ','RGTI','QBTS','PLTR','TEM','ASTS','LUNR','SPCE','ACHR','JOBY','RKLB','CRWV','NBIS','SPCX',
+  // Crypto miners / digital assets (trade with Nasdaq beta)
+  'MARA','RIOT','CLSK','CORZ','IREN','HUT','BITF','WULF','APLD','BMNR','CIFR','GLXY','MSTR','HIVE','BTDR',
+  // Nasdaq-listed high-beta growth
+  'TSLA','HIMS','CVNA','DJT','ROKU','PL','KTOS','SAIL','BRKR','GH','RVMD','ARWR','BBIO','MRNA','ILMN','TECH',
+]);
+
+export function benchmarkFor(symbol: string, sector?: string): 'QQQ' | 'SPY' {
+  if (TECH_SYMBOLS.has(symbol)) return 'QQQ';
+  if (sector && TECH_SECTORS.has(sector)) return 'QQQ';
+  return 'SPY';
+}
+
 export interface ProTradeRow {
   symbol: string;
   company: string;
@@ -70,6 +96,7 @@ export interface ProTradeRow {
   beta: number;
   betaMax: number;
   rsVsBenchmark: number;
+  benchmark: 'QQQ' | 'SPY';  // which index this symbol's RS/tide is measured against
   basePass: boolean;
   baseReason: string;
   earningsChecked: boolean;
@@ -327,6 +354,9 @@ function buildRowFromAlpaca(
   spyTrend5m?: 'UP' | 'DOWN' | 'FLAT',
   spyTrend15m?: 'UP' | 'DOWN' | 'FLAT',
   spyDailyBars?: Candle[],
+  qqqChangePct?: number,
+  qqqTrend5m?: 'UP' | 'DOWN' | 'FLAT',
+  qqqTrend15m?: 'UP' | 'DOWN' | 'FLAT',
 ): ProTradeRow {
   const allOne = (candleSet['1m'] || []);
   const one = allOne.slice(-120);
@@ -367,7 +397,12 @@ function buildRowFromAlpaca(
   const sectorTrend = sectorEtf ? sectorTrends[sectorEtf] : undefined;
   const sectorAligned = direction === 'BULL' ? sectorTrend === 'UP' : direction === 'BEAR' ? sectorTrend === 'DOWN' : false;
 
-  const rsVsBenchmark = computeRsVsBenchmark(h1, spyChangePct);
+  // Route this symbol to its proper benchmark — tech names vs QQQ, rest vs SPY.
+  const benchmark = benchmarkFor(symbol, SYMBOL_SECTOR[symbol]);
+  const benchChangePct = benchmark === 'QQQ' && qqqChangePct !== undefined ? qqqChangePct : spyChangePct;
+  const benchTrend5m = benchmark === 'QQQ' && qqqTrend5m !== undefined ? qqqTrend5m : spyTrend5m;
+  const benchTrend15m = benchmark === 'QQQ' && qqqTrend15m !== undefined ? qqqTrend15m : spyTrend15m;
+  const rsVsBenchmark = computeRsVsBenchmark(h1, benchChangePct);
 
   const prevDay = computePrevDay(daily);
   const premarket = computePremarket(allOne);
@@ -412,8 +447,8 @@ function buildRowFromAlpaca(
     trend15mAligned,
     earningsDays,
     vixLevel,
-    spyTrend5m,
-    spyTrend15m,
+    spyTrend5m: benchTrend5m,
+    spyTrend15m: benchTrend15m,
     dataStatus: providerStatus,
     candles,
   });
@@ -442,6 +477,7 @@ function buildRowFromAlpaca(
     beta: spyDailyBars?.length ? computeBeta(daily, spyDailyBars) : 1.0,
     betaMax: 2.8,
     rsVsBenchmark: round(rsVsBenchmark, 3),
+    benchmark,
     basePass,
     baseReason,
     earningsChecked: earningsDays !== null,
@@ -481,7 +517,7 @@ export { clearUniverseCache };
 export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRow[]> {
   if (!symbols.length) return [];
   const metas = await fetchUniverseMeta(symbols);
-  const [bars1m, bars5m, bars15m, bars1h, bars1d, sectorTrends, newsFlags, spy5mBars, spy15mBars, spyH1Bars, spyRegimeData] = await Promise.all([
+  const [bars1m, bars5m, bars15m, bars1h, bars1d, sectorTrends, newsFlags, spy5mBars, spy15mBars, spyH1Bars, spyRegimeData, qqq5mBars, qqq15mBars, qqqH1Bars] = await Promise.all([
     fetchBars(symbols, '1m'),
     fetchBars(symbols, '5m'),
     fetchBars(symbols, '15m'),
@@ -493,6 +529,9 @@ export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRo
     fetchBars(['SPY'], '15m'),
     fetchBars(['SPY'], '1h'),
     fetchSpyDailyBars(),
+    fetchBars(['QQQ'], '5m'),
+    fetchBars(['QQQ'], '15m'),
+    fetchBars(['QQQ'], '1h'),
   ]);
   const spyTrend5m = candleTrend(spy5mBars['SPY'] || []);
   const spyTrend15m = candleTrend(spy15mBars['SPY'] || []);
@@ -502,6 +541,13 @@ export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRo
   const spyLast = spyH1.length >= 2 ? spyH1[spyH1.length - 1].close : 0;
   const spyBase = spyH1.length >= 4 ? spyH1[spyH1.length - 4].close : (spyH1.length >= 2 ? spyH1[spyH1.length - 2].close : spyLast);
   const spyChangePct = spyBase > 0 ? (spyLast - spyBase) / spyBase : 0;
+  // QQQ mirrors of the SPY tape metrics — tech/growth names are routed to these.
+  const qqqTrend5m = candleTrend(qqq5mBars['QQQ'] || []);
+  const qqqTrend15m = candleTrend(qqq15mBars['QQQ'] || []);
+  const qqqH1 = (qqqH1Bars['QQQ'] || []).slice(-5);
+  const qqqLast = qqqH1.length >= 2 ? qqqH1[qqqH1.length - 1].close : 0;
+  const qqqBase = qqqH1.length >= 4 ? qqqH1[qqqH1.length - 4].close : (qqqH1.length >= 2 ? qqqH1[qqqH1.length - 2].close : qqqLast);
+  const qqqChangePct = qqqBase > 0 ? (qqqLast - qqqBase) / qqqBase : 0;
   const fetchedAt = new Date().toISOString();
   const providerStatus = dataProviderStatus(fetchedAt);
   const metaMap = new Map(metas.map((m) => [m.symbol, m]));
@@ -510,7 +556,7 @@ export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRo
     if (!meta) return [];
     const candleSet = buildCandleSet(sym, { '1m': bars1m, '5m': bars5m, '15m': bars15m, '1h': bars1h, '1d': bars1d });
     const earningsDays = getEarningsDays(sym);
-    return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m, spyRegimeData.spyBars)];
+    return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m, spyRegimeData.spyBars, qqqChangePct, qqqTrend5m, qqqTrend15m)];
   });
 }
 
@@ -535,7 +581,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
   // Guarantee pinned watchlist symbols are always scanned regardless of score rank
   const top = [...new Set([...scored, ...pinnedSymbols])];
 
-  const [bars1m, bars5m, bars15m, bars1h, bars1d, newsFlags, sectorTrends, spyBars, spyRegimeData, spy5mBars, spy15mBars] = await Promise.all([
+  const [bars1m, bars5m, bars15m, bars1h, bars1d, newsFlags, sectorTrends, spyBars, spyRegimeData, spy5mBars, spy15mBars, qqqBars, qqq5mBars, qqq15mBars] = await Promise.all([
     fetchBars(top, '1m'),
     fetchBars(top, '5m'),
     fetchBars(top, '15m'),
@@ -547,6 +593,9 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
     fetchSpyDailyBars(),
     fetchBars(['SPY'], '5m'),
     fetchBars(['SPY'], '15m'),
+    fetchBars(['QQQ'], '1h'),
+    fetchBars(['QQQ'], '5m'),
+    fetchBars(['QQQ'], '15m'),
   ]);
 
   // Warm float cache in background — earnings already pre-warmed above
@@ -561,6 +610,14 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
   const spy5m = (spy5mBars['SPY'] || []);
   const spyTrend5m = candleTrend(spy5m);
   const spyTrend15m = candleTrend(spy15mBars['SPY'] || []);
+
+  // QQQ mirrors — tech/growth names are benchmarked to these instead of SPY.
+  const qqqTrend5m = candleTrend(qqq5mBars['QQQ'] || []);
+  const qqqTrend15m = candleTrend(qqq15mBars['QQQ'] || []);
+  const qqqH1 = (qqqBars['QQQ'] || []).slice(-5);
+  const qqqLast = qqqH1.length >= 2 ? qqqH1[qqqH1.length - 1].close : 0;
+  const qqqBase = qqqH1.length >= 4 ? qqqH1[qqqH1.length - 4].close : (qqqH1.length >= 2 ? qqqH1[qqqH1.length - 2].close : qqqLast);
+  const qqqChangePct = qqqBase > 0 ? (qqqLast - qqqBase) / qqqBase : 0;
 
   // Macro regime: SPY EMA200 (daily) + VIX
   const spyDailyCloses = spyRegimeData.spyBars.map((c) => c.close);
@@ -580,7 +637,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
       if (!meta) return [];
       const candleSet = buildCandleSet(sym, { '1m': bars1m, '5m': bars5m, '15m': bars15m, '1h': bars1h, '1d': bars1d });
       const earningsDays = getEarningsDays(sym);
-      return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m, spyRegimeData.spyBars)];
+      return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m, spyRegimeData.spyBars, qqqChangePct, qqqTrend5m, qqqTrend15m)];
     })
     .sort((a, b) => b.confidence - a.confidence || b.score - a.score);
 

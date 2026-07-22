@@ -501,7 +501,7 @@ function DetailPanel({ row }: { row: ProTradeRow }) {
               ['ATR20', fmtMoney(row.atr20)],
               ['ADR%', row.atrPct ? `${row.atrPct.toFixed(2)}%` : '--'],
               ['$ Vol', row.dollarVolM ? `$${row.dollarVolM.toFixed(1)}M` : '--'],
-              ['RS vs SPY', row.rsVsBenchmark ? row.rsVsBenchmark.toFixed(3) : '--'],
+              [`RS vs ${row.benchmark ?? 'SPY'}`, row.rsVsBenchmark ? row.rsVsBenchmark.toFixed(3) : '--'],
               ['Prev D Hi', row.prevDayHigh > 0 ? fmtMoney(row.prevDayHigh) : '--'],
               ['Prev D Lo', row.prevDayLow > 0 ? fmtMoney(row.prevDayLow) : '--'],
               ['PM High', row.premarketHigh > 0 ? fmtMoney(row.premarketHigh) : '--'],
