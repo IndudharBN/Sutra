@@ -1535,7 +1535,7 @@ export function ProTradeScannerScreen() {
   const applyDaemonState = React.useCallback((state: Record<string, unknown>) => {
     if (state['rows']) {
       const rows = state['rows'] as ProTradeRow[];
-      setSnapshot({ rows, rawRows: rows, filteredRows: [], qualifiedCount: rows.filter(r => r.qualified).length, scannedCount: rows.length, rawCount: rows.length, filteredOut: 0, fetchedAt: (state['fetchedAt'] as string) ?? new Date().toISOString(), universeBuiltAt: (state['universeBuiltAt'] as string | null) ?? null, providerStatus: 'daemon', spyTrend5m: (state['spyTrend5m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', spyTrend15m: (state['spyTrend15m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', regime: state['regime'] as ProTradeSnapshot['regime'] } as ProTradeSnapshot);
+      setSnapshot({ rows, rawRows: rows, filteredRows: [], qualifiedCount: rows.filter(r => r.qualified).length, scannedCount: rows.length, rawCount: rows.length, filteredOut: 0, fetchedAt: (state['fetchedAt'] as string) ?? new Date().toISOString(), universeBuiltAt: (state['universeBuiltAt'] as string | null) ?? null, providerStatus: 'daemon', spyTrend5m: (state['spyTrend5m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', spyTrend15m: (state['spyTrend15m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', qqqTrend5m: (state['qqqTrend5m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', qqqTrend15m: (state['qqqTrend15m'] as 'UP' | 'DOWN' | 'FLAT') ?? 'FLAT', regime: state['regime'] as ProTradeSnapshot['regime'] } as ProTradeSnapshot);
     }
     if (state['universeFallback'] !== undefined) setUniverseFallback(state['universeFallback'] as boolean);
     if (state['trades']) setPaperTrades(state['trades'] as PaperTrade[]);
