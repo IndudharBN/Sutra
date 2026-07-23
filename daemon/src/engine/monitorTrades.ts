@@ -88,8 +88,14 @@ export function monitorPaperTrades(
     // half the position (realizedPnl), move the stop to breakeven on the runner,
     // and let it work toward T2. Worst case after the partial is +0.5R.
     const initialRisk = Math.abs(trade.entry - Number(trade.stop || 0));
-    const oneR = trade.direction === 'BEAR' ? trade.entry - initialRisk : trade.entry + initialRisk;
-    const hit1R = initialRisk > 0 && (trade.direction === 'BEAR' ? current <= oneR : current >= oneR);
+    // Partial distance is capped the same way the take-profit is: a full 1R sits
+    // ~5% away (stops are daily-ATR denominated) and fired on only 8% of trades.
+    // Half of the capped T2 distance keeps the ladder proportional — bank at the
+    // midpoint of a reachable target — lifting partial fires to ~35% in replay.
+    const t2Dist = Math.abs(paperTarget2(trade) - trade.entry);
+    const partialDist = t2Dist > 0 ? Math.min(initialRisk, t2Dist / 2) : initialRisk;
+    const oneR = trade.direction === 'BEAR' ? trade.entry - partialDist : trade.entry + partialDist;
+    const hit1R = partialDist > 0 && (trade.direction === 'BEAR' ? current <= oneR : current >= oneR);
     const hitStop = trade.direction === 'BEAR' ? current >= trailingStop : current <= trailingStop;
 
     if (hitTarget2) {

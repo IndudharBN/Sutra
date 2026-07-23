@@ -66,7 +66,11 @@ export function canPaperTradeRow(
   accountBalance = 100_000,
 ): boolean {
   const plan = effectiveTradePlan(row);
-  return Boolean(plan && plan.rr >= 1.5 && availablePaperNotional(trades, accountBalance) > 0);
+  // plan.rr is the intraday-CAPPED ratio (targets are pulled to a reachable
+  // distance; see planFromLevelsT1T2). The structural R:R>=1.5 floor is enforced
+  // there at plan construction, so gating on the capped value here would reject
+  // every trade whose reachable target sits inside 1.5R.
+  return Boolean(plan && plan.rr > 0 && availablePaperNotional(trades, accountBalance) > 0);
 }
 
 export function buildPaperTrade(
@@ -79,7 +83,7 @@ export function buildPaperTrade(
   cbSizeMult = 1.0,
 ): PaperTrade | null {
   const plan = effectiveTradePlan(row);
-  if (!plan || plan.rr < 1.5) return null;
+  if (!plan || plan.rr <= 0) return null;  // structural R:R floor already applied at plan build
 
   const strategyId = row.primaryStrategy?.strategyId ?? null;
   const isReversal = strategyId === 'liquidity_sweep' || strategyId === 'ob_fvg_retest';

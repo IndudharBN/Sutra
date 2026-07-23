@@ -69,7 +69,9 @@ describe('ProTrade strategy engine', () => {
     const result = evaluateOrbRetest(baseInput());
     expect(result.strategyId).toBe('orb_retest');
     expect(['trade_ready', 'locked']).toContain(result.stage);
-    expect(result.tradePlan?.rr).toBeGreaterThanOrEqual(1.8);
+    // rr is now the intraday-CAPPED ratio, not the structural 2R — the >=1.5
+    // structural floor is enforced inside planFromLevelsT1T2 before capping.
+    expect(result.tradePlan?.rr).toBeGreaterThan(0);
   });
 
   it('locks ORB retest instead of trade ready when using fallback data', () => {
@@ -141,5 +143,26 @@ describe('ProTrade strategy engine', () => {
     }));
     expect(result.stage).toBe('locked');
     expect(result.missing).toContain('Fresh market data required');
+  });
+});
+
+describe('intraday take-profit caps', () => {
+  it('pulls T2 to the ATR/percent cap and still produces a tradeable plan', () => {
+    // atr20 0.6 on an ~11 price: 0.8xATR = 0.48, 3% = 0.33 -> 3% cap binds
+    const result = evaluateOrbRetest(baseInput({ price: 10.6 }));
+    const plan = result.tradePlan ?? result.provisionalPlan;
+    expect(plan).not.toBeNull();
+    const dist = Math.abs(plan!.target2 - plan!.entry);
+    expect(dist).toBeLessThanOrEqual(plan!.entry * 0.03 + 0.01);
+    expect(plan!.rr).toBeGreaterThan(0);   // must stay tradeable after capping
+  });
+
+  it('keeps T1 inside T2 so the trail ratchet cannot sit beyond the exit', () => {
+    const result = evaluateOrbRetest(baseInput({ price: 10.6 }));
+    const plan = result.tradePlan ?? result.provisionalPlan;
+    expect(plan).not.toBeNull();
+    const t1d = Math.abs(plan!.target1 - plan!.entry);
+    const t2d = Math.abs(plan!.target2 - plan!.entry);
+    expect(t1d).toBeLessThanOrEqual(t2d);
   });
 });
