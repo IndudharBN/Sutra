@@ -1597,10 +1597,10 @@ export function ProTradeScannerScreen() {
       }),
       daemonWs.on('disconnected', () => setDaemonOnline(false)),
       daemonWs.on('snapshot_update', (payload) => {
-        const p = payload as { rows: ProTradeRow[]; spyTrend5m: 'UP'|'DOWN'|'FLAT'; spyTrend15m: 'UP'|'DOWN'|'FLAT'; regime: ProTradeSnapshot['regime']; fetchedAt: string; universeBuiltAt?: string | null; qualifiedCount?: number; universeSize?: number; universeFallback?: boolean };
+        const p = payload as { rows: ProTradeRow[]; spyTrend5m: 'UP'|'DOWN'|'FLAT'; spyTrend15m: 'UP'|'DOWN'|'FLAT'; qqqTrend5m?: 'UP'|'DOWN'|'FLAT'; qqqTrend15m?: 'UP'|'DOWN'|'FLAT'; regime: ProTradeSnapshot['regime']; fetchedAt: string; universeBuiltAt?: string | null; qualifiedCount?: number; universeSize?: number; universeFallback?: boolean };
         const qCount = p.qualifiedCount ?? p.rows.filter(r => r.qualified).length;
         if (p.universeFallback !== undefined) setUniverseFallback(p.universeFallback);
-        setSnapshot((prev) => prev ? { ...prev, ...p, universeBuiltAt: p.universeBuiltAt ?? prev.universeBuiltAt, qualifiedCount: qCount, scannedCount: p.universeSize ?? p.rows.length } : { rows: p.rows, rawRows: p.rows, filteredRows: [], qualifiedCount: qCount, scannedCount: p.universeSize ?? p.rows.length, rawCount: p.rows.length, filteredOut: 0, fetchedAt: p.fetchedAt, universeBuiltAt: p.universeBuiltAt ?? null, providerStatus: 'daemon', spyTrend5m: p.spyTrend5m, spyTrend15m: p.spyTrend15m, regime: p.regime });
+        setSnapshot((prev) => prev ? { ...prev, ...p, universeBuiltAt: p.universeBuiltAt ?? prev.universeBuiltAt, qualifiedCount: qCount, scannedCount: p.universeSize ?? p.rows.length } : { rows: p.rows, rawRows: p.rows, filteredRows: [], qualifiedCount: qCount, scannedCount: p.universeSize ?? p.rows.length, rawCount: p.rows.length, filteredOut: 0, fetchedAt: p.fetchedAt, universeBuiltAt: p.universeBuiltAt ?? null, providerStatus: 'daemon', spyTrend5m: p.spyTrend5m, spyTrend15m: p.spyTrend15m, qqqTrend5m: p.qqqTrend5m ?? 'FLAT', qqqTrend15m: p.qqqTrend15m ?? 'FLAT', regime: p.regime });
         setLoading(false);
         setError('');
       }),
@@ -1936,6 +1936,19 @@ export function ProTradeScannerScreen() {
                   <span className="text-slate-600 mx-1">·</span>
                   <span className={snapshot?.spyTrend15m === 'UP' ? 'text-emerald-400' : snapshot?.spyTrend15m === 'DOWN' ? 'text-rose-400' : 'text-slate-400'}>
                     15m {snapshot?.spyTrend15m ?? '--'}
+                  </span>
+                </p>
+              </div>
+              {/* QQQ tide — the benchmark tech/growth names are actually judged against */}
+              <div>
+                <p className="text-[9px] uppercase tracking-widest text-slate-500 font-black">QQQ Tide</p>
+                <p className="text-sm font-mono font-black leading-none">
+                  <span className={snapshot?.qqqTrend5m === 'UP' ? 'text-emerald-400' : snapshot?.qqqTrend5m === 'DOWN' ? 'text-rose-400' : 'text-slate-400'}>
+                    5m {snapshot?.qqqTrend5m ?? '--'}
+                  </span>
+                  <span className="text-slate-600 mx-1">·</span>
+                  <span className={snapshot?.qqqTrend15m === 'UP' ? 'text-emerald-400' : snapshot?.qqqTrend15m === 'DOWN' ? 'text-rose-400' : 'text-slate-400'}>
+                    15m {snapshot?.qqqTrend15m ?? '--'}
                   </span>
                 </p>
               </div>

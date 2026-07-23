@@ -95,6 +95,8 @@ app.get('/api/state', (_req, res) => {
     rows: snapshot?.rows ?? [],
     spyTrend5m: snapshot?.spyTrend5m ?? 'FLAT',
     spyTrend15m: snapshot?.spyTrend15m ?? 'FLAT',
+    qqqTrend5m: snapshot?.qqqTrend5m ?? 'FLAT',
+    qqqTrend15m: snapshot?.qqqTrend15m ?? 'FLAT',
     regime: snapshot?.regime ?? null,
     fetchedAt: snapshot?.fetchedAt ?? null,
     universeBuiltAt: getUniverseBuiltAt(),
@@ -312,6 +314,8 @@ export function startHttpServer(): void {
         rows: snapshot.rows,
         spyTrend5m: snapshot.spyTrend5m,
         spyTrend15m: snapshot.spyTrend15m,
+        qqqTrend5m: snapshot.qqqTrend5m,
+        qqqTrend15m: snapshot.qqqTrend15m,
         regime: snapshot.regime,
         fetchedAt: snapshot.fetchedAt,
       }}));

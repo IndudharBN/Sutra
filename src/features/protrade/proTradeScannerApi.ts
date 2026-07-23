@@ -189,6 +189,8 @@ export interface ProTradeSnapshot {
   providerStatus: string;
   spyTrend5m: 'UP' | 'DOWN' | 'FLAT';
   spyTrend15m: 'UP' | 'DOWN' | 'FLAT';
+  qqqTrend5m: 'UP' | 'DOWN' | 'FLAT';
+  qqqTrend15m: 'UP' | 'DOWN' | 'FLAT';
   regime: MarketRegime;
 }
 
@@ -700,6 +702,8 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
     providerStatus: `Alpaca IEX • ${top.length} symbols`,
     spyTrend5m,
     spyTrend15m,
+    qqqTrend5m,
+    qqqTrend15m,
     regime,
   };
 }

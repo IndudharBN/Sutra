@@ -36,11 +36,13 @@ export async function runFullScan(): Promise<void> {
   hotSetSymbols = newHotSet;
 
   const qualified = snapshot.rows.filter((r) => r.qualified).length;
-  console.log(`[scan] Full done — ${snapshot.rows.length} rows, ${qualified} qualified, hot-set ${newHotSet.length}, SPY 5m=${snapshot.spyTrend5m} 15m=${snapshot.spyTrend15m}`);
+  console.log(`[scan] Full done — ${snapshot.rows.length} rows, ${qualified} qualified, hot-set ${newHotSet.length}, SPY 5m=${snapshot.spyTrend5m} 15m=${snapshot.spyTrend15m}, QQQ 5m=${snapshot.qqqTrend5m} 15m=${snapshot.qqqTrend15m}`);
   emit('snapshot_update', {
     rows: snapshot.rows,
     spyTrend5m: snapshot.spyTrend5m,
     spyTrend15m: snapshot.spyTrend15m,
+    qqqTrend5m: snapshot.qqqTrend5m,
+    qqqTrend15m: snapshot.qqqTrend15m,
     regime: snapshot.regime,
     fetchedAt: snapshot.fetchedAt,
     universeBuiltAt: getUniverseBuiltAt(),
