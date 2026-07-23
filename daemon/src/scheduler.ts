@@ -274,11 +274,16 @@ async function eodClose(): Promise<void> {
 
   let changed = false;
   const unresolved: string[] = [];
-  const updated = trades.map((t: { status: string; symbol: string; direction: string; entry: number; quantity: number; notional: number; partialQty?: number; realizedPnl?: number }) => {
+  const updated = trades.map((t: { status: string; symbol: string; direction: string; entry: number; quantity: number; notional: number; partialQty?: number; realizedPnl?: number; mfe?: number; mae?: number }) => {
     if (t.status !== 'Open') return t;
     const live = priceBySymbol.get(t.symbol);
     if (live == null) unresolved.push(t.symbol);
     const price = live ?? t.entry;
+    // Final excursion update — eodClose bypasses monitorPaperTrades, so without
+    // this the closing move would be missing from the trade's MFE/MAE record.
+    const favorable = t.direction === 'BEAR' ? t.entry - price : price - t.entry;
+    const mfe = Number(Math.max(t.mfe ?? 0, favorable, 0).toFixed(4));
+    const mae = Number(Math.max(t.mae ?? 0, -favorable, 0).toFixed(4));
     // After a 1R partial only the runner half is still open; add the banked realizedPnl.
     const remainingQty = t.quantity - (t.partialQty ?? 0);
     const move = t.direction === 'BEAR' ? (t.entry - price) : (price - t.entry);
@@ -286,6 +291,8 @@ async function eodClose(): Promise<void> {
     changed = true;
     const closed = {
       ...t,
+      mfe,
+      mae,
       status: 'Closed',
       outcome: 'EOD',
       exitPrice: Number(price.toFixed(2)),

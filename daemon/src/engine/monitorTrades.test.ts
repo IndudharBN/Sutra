@@ -89,3 +89,36 @@ describe('1R partial exit engine', () => {
     expect(closed.pnl).toBe((101 - 100) * 100); // no partialQty → full qty, no realizedPnl
   });
 });
+
+describe('MFE/MAE excursion instrumentation', () => {
+  it('records favorable excursion without triggering any exit', () => {
+    const { trades } = monitorPaperTrades([openTrade()], [row(101.5)]); // +0.75R, below 1R
+    const t = trades[0];
+    expect(t.status).toBe('Open');
+    expect(t.mfe).toBeCloseTo(1.5, 4);
+    expect(t.mae).toBe(0);
+    expect(t.partialExitAt).toBeUndefined();
+  });
+
+  it('records adverse excursion and keeps the high-water mark across ticks', () => {
+    const a = monitorPaperTrades([openTrade()], [row(101)]).trades[0];   // +1.0 favorable
+    const b = monitorPaperTrades([a], [row(99)]).trades[0];              // -1.0 adverse
+    expect(b.mfe).toBeCloseTo(1, 4);   // high-water mark retained
+    expect(b.mae).toBeCloseTo(1, 4);
+  });
+
+  it('tracks excursion during the 60s grace period', () => {
+    const fresh = openTrade({ openedAt: new Date().toISOString() });
+    const { trades } = monitorPaperTrades([fresh], [row(102)]);
+    const t = trades[0];
+    expect(t.mfe).toBeCloseTo(2, 4);      // captured despite grace period
+    expect(t.partialExitAt).toBeUndefined(); // but no exit logic ran
+  });
+
+  it('BEAR trades measure excursion in the inverted direction', () => {
+    const bear = openTrade({ direction: 'BEAR', entry: 100, stop: 102, target1: 97, target2: 95, trailingStop: 102 });
+    const { trades } = monitorPaperTrades([bear], [row(98.5, 101)]);
+    expect(trades[0].mfe).toBeCloseTo(1.5, 4);
+    expect(trades[0].mae).toBe(0);
+  });
+});

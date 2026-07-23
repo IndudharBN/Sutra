@@ -33,6 +33,11 @@ export interface PaperTrade {
   target2: number;
   trailingStop: number;
   t1HitAt?: string;
+  // Excursion instrumentation (analysis only — never gates or exits). Max
+  // favorable/adverse price move seen while open, in dollars per share;
+  // R-multiples derived at analysis time from |entry - stop|.
+  mfe?: number;
+  mae?: number;
   // 1R partial exit: half the position is banked at +1R, stop moves to breakeven,
   // the runner half continues toward T2. realizedPnl is included in the final pnl.
   partialExitAt?: string;

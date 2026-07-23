@@ -97,6 +97,9 @@ interface PaperTrade {
   target2: number;
   trailingStop: number;
   t1HitAt?: string;
+  // Excursion instrumentation written by the daemon (analysis only)
+  mfe?: number;
+  mae?: number;
   // 1R partial exit (set by the daemon): half banked at +1R, stop → breakeven, runner to T2
   partialExitAt?: string;
   partialExitPrice?: number;

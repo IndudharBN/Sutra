@@ -59,11 +59,25 @@ export function monitorPaperTrades(
   let changed = false;
   const now = Date.now();
 
-  const next = trades.map((trade) => {
-    if (trade.status !== 'Open') return trade;
+  const next = trades.map((trade0) => {
+    if (trade0.status !== 'Open') return trade0;
+    const current = priceBySymbol.get(baseSymbol(trade0.symbol));
+    if (!current) return trade0;
+
+    // Excursion tracking runs BEFORE the 60s grace period and before any exit
+    // branch, so the first minute's move is captured and every trade carries a
+    // complete MFE/MAE by the time it closes. Instrumentation only: these fields
+    // are never read by exit logic, sizing, or gating.
+    const favorable = trade0.direction === 'BEAR' ? trade0.entry - current : current - trade0.entry;
+    const adverse = -favorable;
+    const mfe = Math.max(trade0.mfe ?? 0, favorable, 0);
+    const mae = Math.max(trade0.mae ?? 0, adverse, 0);
+    const trade = (mfe !== (trade0.mfe ?? 0) || mae !== (trade0.mae ?? 0))
+      ? { ...trade0, mfe: Number(mfe.toFixed(4)), mae: Number(mae.toFixed(4)) }
+      : trade0;
+    if (trade !== trade0) changed = true;
+
     if (now - new Date(trade.openedAt).getTime() < 60_000) return trade;
-    const current = priceBySymbol.get(baseSymbol(trade.symbol));
-    if (!current) return trade;
 
     const target1 = paperTarget1(trade);
     const target2 = paperTarget2(trade);
