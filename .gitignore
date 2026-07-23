@@ -17,3 +17,8 @@ data/universe-cache.json
 
 # IDE
 .idea/
+
+# analysis scratch caches
+bars_cache.json
+daily_cache.json
+data/*.bak-*
