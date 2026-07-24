@@ -29,11 +29,71 @@ function Get-DaemonPid {
     return $null
 }
 
-Write-Host "[watchdog] external health-check armed — poll $HealthUrl every ${IntervalSec}s, kill after $FailsToKill consecutive failures (~$($FailsToKill*$IntervalSec)s wedge)"
+# ── Alpaca creds (read from daemon/.env.daemon so we can flatten independently) ──
+$envFile = Join-Path $PSScriptRoot "..\daemon\.env.daemon"
+$Alpaca = @{}
+if (Test-Path $envFile) {
+    foreach ($l in Get-Content $envFile) {
+        if ($l -match '^\s*(ALPACA_[A-Z_]+)\s*=\s*(.+?)\s*$') { $Alpaca[$Matches[1]] = $Matches[2] }
+    }
+}
+$AlpacaHeaders = @{
+    'APCA-API-KEY-ID'     = $Alpaca['ALPACA_KEY']
+    'APCA-API-SECRET-KEY' = $Alpaca['ALPACA_SECRET']
+}
+$AlpacaBase = $Alpaca['ALPACA_BASE_URL']
+
+function Get-ETMinutes {
+    # ET wall-clock minutes-since-midnight, DST-aware via the Windows tz database.
+    $et = [System.TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time')
+    $now = [System.TimeZoneInfo]::ConvertTime([DateTime]::UtcNow, [System.TimeZoneInfo]::Utc, $et)
+    return ($now.Hour * 60 + $now.Minute)
+}
+
+# EXTERNAL EOD FLATTEN — the safety net. The daemon's own EOD close runs at 15:50 ET
+# on a setInterval; if the daemon is WEDGED at the close its timer never fires and
+# positions carry overnight (this is what drained the account Jul 21–24). This runs
+# in a separate process, so at 15:52 ET it independently flattens any position still
+# open — cancel resting orders first (free the shares), then market-close everything.
+# Idempotent: if the daemon already flattened, there is nothing to close.
+$EOD_FLATTEN_MIN = 15 * 60 + 52   # 15:52 ET — 2 min after the daemon's 15:50, so the
+                                  # daemon gets first crack and we only backstop.
+$EOD_CUTOFF_MIN  = 16 * 60 + 30   # stop attempting after 16:30 ET
+$eodFlattenedDate = ''
+
+function Invoke-EodFlatten {
+    if (-not $AlpacaBase) { Write-Host "[watchdog] EOD flatten skipped — no Alpaca creds loaded"; return }
+    try {
+        $pos = Invoke-RestMethod -Uri "$AlpacaBase/v2/positions" -Headers $AlpacaHeaders -TimeoutSec 10 -ErrorAction Stop
+    } catch { Write-Host "[watchdog] $(Get-Date -Format HH:mm:ss) EOD: could not read positions ($($_.Exception.Message))"; return }
+    if (-not $pos -or $pos.Count -eq 0) { Write-Host "[watchdog] $(Get-Date -Format HH:mm:ss) EOD: no open positions — daemon already flat ✓"; return }
+
+    Write-Host "[watchdog] $(Get-Date -Format HH:mm:ss) EOD SAFETY FLATTEN — $($pos.Count) position(s) still open, closing at market:"
+    foreach ($p in $pos) { Write-Host "    $($p.symbol) $($p.side) $($p.qty) (unrealized $($p.unrealized_pl))" }
+    # 1. cancel resting bracket/OCO orders so shares are free to liquidate
+    try { Invoke-RestMethod -Uri "$AlpacaBase/v2/orders" -Method Delete -Headers $AlpacaHeaders -TimeoutSec 10 -ErrorAction Stop | Out-Null } catch {}
+    Start-Sleep -Seconds 1
+    # 2. liquidate all positions at market (DELETE = close, Alpaca's REST convention)
+    try {
+        Invoke-RestMethod -Uri "$AlpacaBase/v2/positions" -Method Delete -Headers $AlpacaHeaders -TimeoutSec 15 -ErrorAction Stop | Out-Null
+        Write-Host "[watchdog] $(Get-Date -Format HH:mm:ss) EOD flatten submitted — positions closing at market"
+    } catch { Write-Host "[watchdog] $(Get-Date -Format HH:mm:ss) EOD flatten FAILED: $($_.Exception.Message)" }
+}
+
+Write-Host "[watchdog] external health-check armed — poll $HealthUrl every ${IntervalSec}s, kill after $FailsToKill consecutive failures (~$($FailsToKill*$IntervalSec)s wedge). EOD safety-flatten at 15:52 ET."
 
 $fails = 0
 while ($true) {
     Start-Sleep -Seconds $IntervalSec
+
+    # EOD safety-flatten (independent of daemon health) — fires once per ET day in the window.
+    $etMin = Get-ETMinutes
+    $etDay = ([System.TimeZoneInfo]::ConvertTime([DateTime]::UtcNow, [System.TimeZoneInfo]::Utc, [System.TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time'))).ToString('yyyy-MM-dd')
+    if ($etMin -ge $EOD_FLATTEN_MIN -and $etMin -lt $EOD_CUTOFF_MIN -and $eodFlattenedDate -ne $etDay) {
+        Invoke-EodFlatten
+        $eodFlattenedDate = $etDay
+    }
+
     $ok = $false
     try {
         $resp = Invoke-RestMethod -Uri $HealthUrl -TimeoutSec $TimeoutSec -ErrorAction Stop
