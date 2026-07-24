@@ -21,4 +21,8 @@ data/universe-cache.json
 # analysis scratch caches
 bars_cache.json
 daily_cache.json
+
+# trade-data backups (timestamped, machine-local audit copies — never commit)
 data/*.bak-*
+data/*.pre-restate-*
+data/*.backup
