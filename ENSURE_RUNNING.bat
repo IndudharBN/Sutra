@@ -37,5 +37,16 @@ if errorlevel 1 (
   echo [ENSURE] UI already running on 3006 -- leaving it alone.
 )
 
+:: -- External watchdog --------------------------------------------------------
+:: Not a listening port, so detect by command line. Kills a wedged daemon and
+:: runs the independent 15:52 ET EOD flatten (the overnight-carry safety net).
+PowerShell -NoProfile -Command "if (Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { $_.CommandLine -match 'watchdog-external' }) { exit 0 } else { exit 1 }"
+if errorlevel 1 (
+  echo [ENSURE] Watchdog not running -- starting self-restarting wrapper window...
+  start "Sutra Watchdog [3001]" "%~dp0RUN_WATCHDOG.bat"
+) else (
+  echo [ENSURE] Watchdog already running -- leaving it alone.
+)
+
 echo [ENSURE] Done.
 exit /b 0
