@@ -8,7 +8,7 @@ import { buildPaperTrade, canPaperTradeRow } from './engine/buildPaperTrade';
 import { isTideBlocked } from './engine/isTideBlocked';
 import { checkGroupCircuitBreaker, checkStrategyCircuitBreaker, checkDailyLossLimit, recordGroupTradeResult, recordTradeResult } from './riskManager';
 import { checkSectorConcentration, checkPortfolioBeta } from './portfolioRisk';
-import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperPosition, closeAllPaperPositions, syncPartialAndBreakeven } from './alpacaBroker';
+import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperPosition, closeAllPaperPositions, syncPartialAndBreakeven, awaitEntryFill } from './alpacaBroker';
 import { env } from './env';
 import { emit } from './httpServer';
 import { loadTrades, saveTrades, appendLedger } from './tradeStore';
@@ -131,9 +131,12 @@ function tryFireTrades(): void {
   const etMins = etMinutes();
   if (etMins < 9 * 60 + 30 || etMins >= 15 * 60 + 45) return;
 
+  // Snapshot of current trades for gate checks (open-position count, sector/beta caps).
+  // Note: newly-fired trades are booked asynchronously after Alpaca confirms the fill,
+  // so they are NOT pushed into this local array — the executor's own firedToday guard
+  // prevents re-firing the same symbol before the async booking completes.
   const trades = loadTrades();
   const state = getState();
-  let tradesFired = false;
 
   for (const row of snapshot.rows) {
     if (!row.qualified || !row.tradePlan) continue;
@@ -187,36 +190,61 @@ function tryFireTrades(): void {
       continue;
     }
 
-    trades.push(newTrade);
-    tradesFired = true;
-    emit('trade_opened', newTrade);
-    console.log(`[executor] FIRE ${row.symbol} ${sig.strategyId} ${row.direction} entry=${newTrade.entry} stop=${newTrade.stop} target=${newTrade.target} qty=${newTrade.quantity} notional=$${newTrade.notional.toFixed(0)}`);
-
-    // Submit bracket order to Alpaca paper account — async, does not block executor
-    if (newTrade.direction !== 'NEUTRAL') {
-      placePaperBracketOrder({
-        symbol: newTrade.symbol,
-        direction: newTrade.direction as 'BULL' | 'BEAR',
-        entry: newTrade.entry,
-        stop: newTrade.stop,
-        target: newTrade.target2 || newTrade.target,
-        notional: newTrade.notional,
-      }).then((order) => {
-        const ts = loadTrades();
-        const idx = ts.findIndex((t: { id: string }) => t.id === newTrade.id);
-        if (idx !== -1) { ts[idx] = { ...ts[idx], alpacaOrderId: order.id }; saveTrades(ts); }
-        console.log(`[alpaca] order placed ${newTrade.symbol} id=${order.id}`);
-      }).catch((err: Error) => {
-        console.warn(`[alpaca] order failed ${newTrade.symbol}:`, err.message);
-      });
-    }
-
-    // Mark fired so we don't double-fire this session
+    // Mark fired immediately so a slow fill-confirm can't double-fire this symbol.
     setState((s) => ({ ...s, firedToday: [...s.firedToday, row.symbol] }));
     saveState();
-  }
 
-  if (tradesFired) saveTrades(trades);
+    // FILL-FIRST BOOKING: the ledger must record what Alpaca ACTUALLY did, not what
+    // we planned. Previously the trade was pushed to the ledger before Alpaca was
+    // even called, so a rejected order (fractional-bracket error, insufficient BP)
+    // left a phantom trade with fictional entry/qty/pnl — the root cause of the
+    // ledger-vs-broker divergence. Now we place, wait for the real fill, and only
+    // book the trade if Alpaca confirms it — using the real fill qty and price.
+    if (newTrade.direction === 'NEUTRAL') continue;
+    // Reconcile asynchronously so one slow fill doesn't stall the executor loop.
+    void (async () => {
+      try {
+        const order = await placePaperBracketOrder({
+          symbol: newTrade.symbol,
+          direction: newTrade.direction as 'BULL' | 'BEAR',
+          entry: newTrade.entry,
+          stop: newTrade.stop,
+          target: newTrade.target2 || newTrade.target,
+          notional: newTrade.notional,
+        });
+        const fill = await awaitEntryFill(order.id);
+        if (!fill.filled || fill.qty <= 0) {
+          console.warn(`[alpaca] ${newTrade.symbol} NOT booked — order ${fill.status} (no fill). Ledger stays clean.`);
+          return;
+        }
+        // Rebuild the trade from the REAL fill: actual entry price, whole-share qty,
+        // notional recomputed. Stop/target keep their planned distances relative to
+        // the real entry so the R:R stays intact.
+        const realEntry = fill.avgPrice;
+        const realQty = fill.qty;
+        const drift = realEntry - newTrade.entry; // slippage vs plan
+        const booked: PaperTrade = {
+          ...newTrade,
+          entry: Number(realEntry.toFixed(4)),
+          stop: Number((newTrade.stop + drift).toFixed(4)),
+          target: Number((newTrade.target + drift).toFixed(4)),
+          target1: Number((newTrade.target1 + drift).toFixed(4)),
+          target2: Number((newTrade.target2 + drift).toFixed(4)),
+          trailingStop: Number((newTrade.stop + drift).toFixed(4)),
+          quantity: realQty,
+          notional: Number((realQty * realEntry).toFixed(2)),
+          alpacaOrderId: order.id,
+        };
+        const ts = loadTrades();
+        ts.push(booked);
+        saveTrades(ts);
+        emit('trade_opened', booked);
+        console.log(`[executor] BOOKED ${newTrade.symbol} ${sig.strategyId} ${newTrade.direction} realEntry=${realEntry} qty=${realQty} (plan entry ${newTrade.entry}, slip ${drift.toFixed(3)})`);
+      } catch (err) {
+        console.warn(`[alpaca] order failed ${newTrade.symbol} — not booked:`, (err as Error).message);
+      }
+    })();
+  }
 }
 
 // Pull a usable last price out of an Alpaca snapshot, preferring the most

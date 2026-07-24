@@ -24,11 +24,42 @@ export interface AlpacaOrderResult {
   client_order_id: string;
   symbol: string;
   qty: string;
+  filled_qty: string;
   side: string;
   type: string;
   status: string;
   order_class: string;
   filled_avg_price: string | null;
+}
+
+export interface FillResult {
+  filled: boolean;
+  qty: number;
+  avgPrice: number;
+  status: string;
+}
+
+// Poll an order until its entry leg fills (market entries fill in <1s, but the
+// bracket parent needs a moment to report). Returns the REAL filled qty and
+// avg price so the ledger records what Alpaca actually did, not what we planned.
+// If it never fills (rejected — e.g. fractional-bracket error, insufficient BP),
+// filled=false and the caller must NOT book the trade.
+export async function awaitEntryFill(orderId: string, tries = 6, delayMs = 1000): Promise<FillResult> {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const o = await paperFetch<AlpacaOrderResult>(`/v2/orders/${orderId}`);
+      const status = o.status;
+      const fq = Number(o.filled_qty || 0);
+      if (status === 'filled' || (fq > 0 && ['partially_filled', 'done_for_day'].includes(status))) {
+        return { filled: fq > 0, qty: fq, avgPrice: Number(o.filled_avg_price || 0), status };
+      }
+      if (['rejected', 'canceled', 'expired', 'suspended'].includes(status)) {
+        return { filled: false, qty: 0, avgPrice: 0, status };
+      }
+    } catch { /* transient — retry */ }
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return { filled: false, qty: 0, avgPrice: 0, status: 'timeout' };
 }
 
 export interface AlpacaPosition {
