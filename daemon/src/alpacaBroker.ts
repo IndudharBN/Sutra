@@ -192,14 +192,24 @@ export async function closeAllPaperPositions(): Promise<void> {
   await paperFetch('/v2/positions', { method: 'DELETE' }).catch(() => {});
 }
 
-export async function closePaperPosition(symbol: string): Promise<void> {
+// Closes a position and returns the ACTUAL exit fill (price + qty) so the ledger
+// can book the real P&L instead of the monitor's planned exit price. Cancels the
+// resting bracket legs first (frees the shares), submits the market close, then
+// reads back the fill it produced. Returns filled=false if there was no position
+// or the close produced no fill (already flat).
+export async function closePaperPosition(symbol: string): Promise<FillResult> {
   try {
     const orders = await paperFetch<{ id: string; status: string }[]>(
       `/v2/orders?symbols=${encodeURIComponent(symbol)}&status=open&limit=20`,
     );
     await Promise.allSettled(orders.map((o) => paperFetch(`/v2/orders/${o.id}`, { method: 'DELETE' })));
   } catch { /* best-effort */ }
-  await paperFetch(`/v2/positions/${symbol}`, { method: 'DELETE' }).catch(() => {});
+  try {
+    // DELETE /v2/positions/{symbol} returns the closing order object.
+    const closeOrder = await paperFetch<{ id: string }>(`/v2/positions/${encodeURIComponent(symbol)}`, { method: 'DELETE' });
+    if (closeOrder?.id) return await awaitEntryFill(closeOrder.id);
+  } catch { /* no position / already flat */ }
+  return { filled: false, qty: 0, avgPrice: 0, status: 'no_position' };
 }
 
 export async function getPaperAccount(): Promise<AlpacaAccount> {

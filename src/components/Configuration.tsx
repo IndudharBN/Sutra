@@ -71,7 +71,7 @@ function usePaperStats() {
   const isWin = (t: PaperTradeRecord) => (t.pnl ?? 0) > 0;
   const isLoss = (t: PaperTradeRecord) => (t.pnl ?? 0) < 0;
 
-  const closed = trades.filter((t) => t.status === 'Closed');
+  const closed = trades.filter((t) => t.status === 'Closed' && !(t as { phantom?: boolean }).phantom);
   const open = trades.filter((t) => t.status === 'Open');
   const today = todayET();
   const todayClosed = closed.filter((t) => t.closedAt && toETDate(t.closedAt) === today);

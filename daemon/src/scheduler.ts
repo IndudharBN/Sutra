@@ -8,7 +8,7 @@ import { buildPaperTrade, canPaperTradeRow } from './engine/buildPaperTrade';
 import { isTideBlocked } from './engine/isTideBlocked';
 import { checkGroupCircuitBreaker, checkStrategyCircuitBreaker, checkDailyLossLimit, recordGroupTradeResult, recordTradeResult } from './riskManager';
 import { checkSectorConcentration, checkPortfolioBeta } from './portfolioRisk';
-import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperPosition, closeAllPaperPositions, syncPartialAndBreakeven, awaitEntryFill } from './alpacaBroker';
+import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperPosition, closeAllPaperPositions, syncPartialAndBreakeven, awaitEntryFill, getRecentFilledOrders } from './alpacaBroker';
 import { env } from './env';
 import { emit } from './httpServer';
 import { loadTrades, saveTrades, appendLedger } from './tradeStore';
@@ -106,14 +106,40 @@ async function monitorLoop(): Promise<void> {
         }
       }
       if (before.status === 'Open' && after.status === 'Closed' && after.pnl !== undefined) {
-        recordGroupTradeResult((after.signalGroup ?? 'UNCLASSIFIED') as import('./types').SignalGroup, after.pnl);
-        recordTradeResult(after.strategyId ?? 'unknown', after.pnl, accountBalance);
         emit('trade_closed', after);
-        emit('risk_update', { dailyPnl: getState().riskState.dailyRealizedPnl });
-        console.log(`[monitor] ${after.symbol} closed — ${after.outcome} pnl=$${after.pnl?.toFixed(2)}`);
-        closePaperPosition(after.symbol).catch((err: Error) =>
-          console.warn(`[alpaca] position close failed ${after.symbol}:`, err.message),
-        );
+        console.log(`[monitor] ${after.symbol} closing — ${after.outcome} (planned pnl=$${after.pnl?.toFixed(2)}), reconciling actual fill…`);
+        // Close at the broker and reconcile: re-book this trade's exit at Alpaca's
+        // ACTUAL fill price, then record P&L to risk state from the real number.
+        // Risk-state recording is deferred into the callback so the daily P&L that
+        // circuit breakers see is the real one, not the monitor's planned estimate.
+        void (async () => {
+          const fill = await closePaperPosition(after.symbol).catch(() => null);
+          const ts = loadTrades();
+          const idx = ts.findIndex((t) => t.id === after.id);
+          let finalPnl = after.pnl ?? 0;
+          if (fill && fill.filled && fill.avgPrice > 0 && idx !== -1) {
+            const t = ts[idx];
+            const remainingQty = t.quantity - (t.partialQty ?? 0);
+            const move = t.direction === 'BEAR' ? (t.entry - fill.avgPrice) : (fill.avgPrice - t.entry);
+            finalPnl = Number((move * remainingQty + (t.realizedPnl ?? 0)).toFixed(2));
+            ts[idx] = {
+              ...t,
+              exitPrice: Number(fill.avgPrice.toFixed(4)),
+              pnl: finalPnl,
+              pnlPercent: Number((finalPnl / t.notional * 100).toFixed(2)),
+            };
+            saveTrades(ts);
+            emit('trade_closed', ts[idx]);
+            if (Math.abs(finalPnl - (after.pnl ?? 0)) > 0.01) {
+              console.log(`[monitor] ${after.symbol} RECONCILED — real exit ${fill.avgPrice} pnl=$${finalPnl} (planned was $${after.pnl?.toFixed(2)})`);
+            }
+          } else {
+            console.warn(`[monitor] ${after.symbol} exit fill unavailable — ledger keeps planned pnl=$${after.pnl?.toFixed(2)}`);
+          }
+          recordGroupTradeResult((after.signalGroup ?? 'UNCLASSIFIED') as import('./types').SignalGroup, finalPnl);
+          recordTradeResult(after.strategyId ?? 'unknown', finalPnl, accountBalance);
+          emit('risk_update', { dailyPnl: getState().riskState.dailyRealizedPnl });
+        })();
       }
     }
 
@@ -335,13 +361,40 @@ async function eodClose(): Promise<void> {
 
   if (changed) {
     saveTrades(updated as PaperTrade[]);
-    console.log('[eod] all open trades closed at market');
+    console.log('[eod] all open trades closed at market (planned prices) — reconciling actual fills…');
     if (unresolved.length) {
       console.warn(`[eod] no live price for ${unresolved.join(', ')} — booked at entry (P&L $0); rerun backfill once data is available`);
     }
-    closeAllPaperPositions().catch((err: Error) =>
-      console.warn('[alpaca] EOD closeAll failed:', err.message),
-    );
+    // Bulk-close at the broker, then reconcile each EOD trade's exit to the ACTUAL
+    // fill price Alpaca produced. Without this, EOD trades keep the snapshot/last-
+    // price estimate, which is a primary source of the ledger-vs-broker divergence.
+    void (async () => {
+      await closeAllPaperPositions().catch((err: Error) => console.warn('[alpaca] EOD closeAll failed:', err.message));
+      // Give fills a moment to settle, then read the day's closing fills per symbol.
+      await new Promise((r) => setTimeout(r, 4000));
+      const justClosed = (updated as PaperTrade[]).filter((t) => t.outcome === 'EOD' && t.closedAt?.slice(0, 10) === today);
+      const ts = loadTrades();
+      let reconciled = 0;
+      for (const t of justClosed) {
+        try {
+          const fills = await getRecentFilledOrders(t.symbol);
+          // The closing fill is the opposite side of the trade, filled today.
+          const exitSide = t.direction === 'BEAR' ? 'buy' : 'sell';
+          const todayFill = fills.find((f) => f.side === exitSide && (f.filled_at ?? '').slice(0, 10) === today && f.filled_avg_price);
+          if (!todayFill?.filled_avg_price) continue;
+          const px = Number(todayFill.filled_avg_price);
+          const idx = ts.findIndex((x) => x.id === t.id);
+          if (idx === -1) continue;
+          const cur = ts[idx];
+          const remainingQty = cur.quantity - (cur.partialQty ?? 0);
+          const move = cur.direction === 'BEAR' ? (cur.entry - px) : (px - cur.entry);
+          const pnl = Number((move * remainingQty + (cur.realizedPnl ?? 0)).toFixed(2));
+          ts[idx] = { ...cur, exitPrice: Number(px.toFixed(4)), pnl, pnlPercent: Number((pnl / cur.notional * 100).toFixed(2)) };
+          reconciled++;
+        } catch { /* leave planned price */ }
+      }
+      if (reconciled) { saveTrades(ts); console.log(`[eod] reconciled ${reconciled}/${justClosed.length} EOD exits to actual fills`); }
+    })();
   }
 
   state.eodFiredDate = today;

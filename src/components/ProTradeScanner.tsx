@@ -100,6 +100,11 @@ interface PaperTrade {
   // Excursion instrumentation written by the daemon (analysis only)
   mfe?: number;
   mae?: number;
+  // Flagged by the restatement script: a closed trade with NO matching Alpaca fill
+  // (a rejected/phantom order the old book-first executor recorded anyway). Excluded
+  // from all P&L and win-rate math so the dashboard reflects real broker results.
+  phantom?: boolean;
+  restatedFromFills?: boolean;
   // 1R partial exit (set by the daemon): half banked at +1R, stop → breakeven, runner to T2
   partialExitAt?: string;
   partialExitPrice?: number;
@@ -1015,7 +1020,7 @@ function PaperTradeMonitor({
   const filteredTrades = trades.filter((t) => tradeDateET(t) === monitorDate);
   const sortedTrades = [...filteredTrades].sort((a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime());
   const open = filteredTrades.filter((trade) => trade.status === 'Open');
-  const closed = filteredTrades.filter((trade) => trade.status === 'Closed');
+  const closed = filteredTrades.filter((trade) => trade.status === 'Closed' && !trade.phantom);
   const isToday = monitorDate === todayET();
   // Sum the STORED realized trade.pnl for closed trades on the SELECTED DAY only
   // (filteredTrades is scoped to monitorDate via the date picker). This must use
@@ -1874,7 +1879,7 @@ export function ProTradeScannerScreen() {
       {/* === Trading HUD — critical session metrics === */}
       {(() => {
         const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-        const todayClosed = paperTrades.filter((t) => t.status === 'Closed' && new Date(t.openedAt).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === todayET);
+        const todayClosed = paperTrades.filter((t) => t.status === 'Closed' && !t.phantom && new Date(t.openedAt).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === todayET);
         const todayWins = todayClosed.filter((t) =>
           t.outcome === 'Target' || t.outcome === 'T1 Profit' ||
           ((t.outcome === 'Manual' || t.outcome === 'EOD') && (t.pnl ?? 0) > 0)
