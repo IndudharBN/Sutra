@@ -25,4 +25,5 @@ daily_cache.json
 # trade-data backups (timestamped, machine-local audit copies — never commit)
 data/*.bak-*
 data/*.pre-restate-*
+data/*.pre-reconcile-*
 data/*.backup

@@ -104,7 +104,11 @@ export function monitorPaperTrades(
     }
     if (!trade.t1HitAt && hit1R) {
       changed = true;
-      const partialQty = Number((trade.quantity / 2).toFixed(4));
+      // Whole-share partial to match Alpaca (alpacaBroker banks Math.floor(held/2)).
+      // A fractional half (quantity/2 on an odd lot) desyncs the ledger from the real
+      // fill: e.g. 25 sh -> ledger banked 12.5/ran 12.5 while Alpaca banked 12/ran 13,
+      // so both legs' P&L drifted from the broker's realized number.
+      const partialQty = Math.floor(trade.quantity / 2);
       const banked = trade.direction === 'BEAR'
         ? (trade.entry - current) * partialQty
         : (current - trade.entry) * partialQty;
