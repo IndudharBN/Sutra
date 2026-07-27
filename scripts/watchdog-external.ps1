@@ -61,6 +61,22 @@ $EOD_FLATTEN_MIN = 15 * 60 + 52   # 15:52 ET - 2 min after the daemon's 15:50, s
 $EOD_CUTOFF_MIN  = 16 * 60 + 30   # stop attempting after 16:30 ET
 $eodFlattenedDate = ''
 
+# POST-EOD RECONCILE - after the close settles, converge the ledger's P&L onto
+# Alpaca's real matched fills (fixes partial-exit whole-share drift). Runs once
+# per ET day at 16:05 ET, well after all EOD fills have settled at the broker.
+$RECONCILE_MIN   = 16 * 60 + 5    # 16:05 ET
+$reconciledDate  = ''
+
+function Invoke-Reconcile {
+    $script = Join-Path $PSScriptRoot 'reconcile-daily.mjs'
+    if (-not (Test-Path $script)) { Write-Host "[watchdog] reconcile skipped - $script not found"; return }
+    Write-Host "[watchdog] $(Get-Date -Format HH:mm:ss) running daily Alpaca reconcile --apply"
+    try {
+        $out = & node $script '--apply' 2>&1 | Out-String
+        Write-Host $out.Trim()
+    } catch { Write-Host "[watchdog] reconcile FAILED: $($_.Exception.Message)" }
+}
+
 function Invoke-EodFlatten {
     if (-not $AlpacaBase) { Write-Host "[watchdog] EOD flatten skipped - no Alpaca creds loaded"; return }
     try {
@@ -92,6 +108,12 @@ while ($true) {
     if ($etMin -ge $EOD_FLATTEN_MIN -and $etMin -lt $EOD_CUTOFF_MIN -and $eodFlattenedDate -ne $etDay) {
         Invoke-EodFlatten
         $eodFlattenedDate = $etDay
+    }
+
+    # Post-EOD reconcile (once per ET day, after the flatten settles).
+    if ($etMin -ge $RECONCILE_MIN -and $etMin -lt $EOD_CUTOFF_MIN -and $reconciledDate -ne $etDay) {
+        Invoke-Reconcile
+        $reconciledDate = $etDay
     }
 
     $ok = $false
