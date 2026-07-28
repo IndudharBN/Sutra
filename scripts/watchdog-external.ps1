@@ -58,8 +58,7 @@ function Get-ETMinutes {
 # Idempotent: if the daemon already flattened, there is nothing to close.
 $EOD_FLATTEN_MIN = 15 * 60 + 52   # 15:52 ET - 2 min after the daemon's 15:50, so the
                                   # daemon gets first crack and we only backstop.
-$EOD_CUTOFF_MIN  = 16 * 60 + 30   # stop attempting after 16:30 ET
-$eodFlattenedDate = ''
+$EOD_CUTOFF_MIN  = 16 * 60 + 30   # stop attempting after 16:30 ET (retries every poll until flat)
 
 # POST-EOD RECONCILE - after the close settles, converge the ledger's P&L onto
 # Alpaca's real matched fills (fixes partial-exit whole-share drift). Runs once
@@ -102,12 +101,16 @@ $fails = 0
 while ($true) {
     Start-Sleep -Seconds $IntervalSec
 
-    # EOD safety-flatten (independent of daemon health) - fires once per ET day in the window.
+    # EOD safety-flatten (independent of daemon health). RETRIES on EVERY poll in
+    # the 15:52-16:30 ET window while ANY position is still open - not once/day.
+    # On 2026-07-28 the daemon was DEAD at 15:50 and only respawned at 16:10, so a
+    # single 15:52 shot could miss entirely and 13 positions carried overnight.
+    # Invoke-EodFlatten is a no-op when Alpaca is already flat, so repeated calls
+    # are safe and cheap; it self-stops once the account has zero open positions.
     $etMin = Get-ETMinutes
     $etDay = ([System.TimeZoneInfo]::ConvertTime([DateTime]::UtcNow, [System.TimeZoneInfo]::Utc, [System.TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time'))).ToString('yyyy-MM-dd')
-    if ($etMin -ge $EOD_FLATTEN_MIN -and $etMin -lt $EOD_CUTOFF_MIN -and $eodFlattenedDate -ne $etDay) {
+    if ($etMin -ge $EOD_FLATTEN_MIN -and $etMin -lt $EOD_CUTOFF_MIN) {
         Invoke-EodFlatten
-        $eodFlattenedDate = $etDay
     }
 
     # Post-EOD reconcile (once per ET day, after the flatten settles).

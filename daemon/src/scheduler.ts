@@ -359,43 +359,71 @@ async function eodClose(): Promise<void> {
     return closed;
   });
 
-  if (changed) {
-    saveTrades(updated as PaperTrade[]);
-    console.log('[eod] all open trades closed at market (planned prices) — reconciling actual fills…');
-    if (unresolved.length) {
-      console.warn(`[eod] no live price for ${unresolved.join(', ')} — booked at entry (P&L $0); rerun backfill once data is available`);
-    }
-    // Bulk-close at the broker, then reconcile each EOD trade's exit to the ACTUAL
-    // fill price Alpaca produced. Without this, EOD trades keep the snapshot/last-
-    // price estimate, which is a primary source of the ledger-vs-broker divergence.
-    void (async () => {
-      await closeAllPaperPositions().catch((err: Error) => console.warn('[alpaca] EOD closeAll failed:', err.message));
-      // Give fills a moment to settle, then read the day's closing fills per symbol.
-      await new Promise((r) => setTimeout(r, 4000));
-      const justClosed = (updated as PaperTrade[]).filter((t) => t.outcome === 'EOD' && t.closedAt?.slice(0, 10) === today);
-      const ts = loadTrades();
-      let reconciled = 0;
-      for (const t of justClosed) {
-        try {
-          const fills = await getRecentFilledOrders(t.symbol);
-          // The closing fill is the opposite side of the trade, filled today.
-          const exitSide = t.direction === 'BEAR' ? 'buy' : 'sell';
-          const todayFill = fills.find((f) => f.side === exitSide && (f.filled_at ?? '').slice(0, 10) === today && f.filled_avg_price);
-          if (!todayFill?.filled_avg_price) continue;
-          const px = Number(todayFill.filled_avg_price);
-          const idx = ts.findIndex((x) => x.id === t.id);
-          if (idx === -1) continue;
-          const cur = ts[idx];
-          const remainingQty = cur.quantity - (cur.partialQty ?? 0);
-          const move = cur.direction === 'BEAR' ? (cur.entry - px) : (px - cur.entry);
-          const pnl = Number((move * remainingQty + (cur.realizedPnl ?? 0)).toFixed(2));
-          ts[idx] = { ...cur, exitPrice: Number(px.toFixed(4)), pnl, pnlPercent: Number((pnl / cur.notional * 100).toFixed(2)) };
-          reconciled++;
-        } catch { /* leave planned price */ }
-      }
-      if (reconciled) { saveTrades(ts); console.log(`[eod] reconciled ${reconciled}/${justClosed.length} EOD exits to actual fills`); }
-    })();
+  if (!changed) {
+    state.eodFiredDate = today;
+    saveState();
+    return;
   }
+
+  // ── Alpaca is the authority. Close at the broker FIRST, then VERIFY the
+  //    account is flat, and only mark the ledger closed + set the done flag
+  //    once Alpaca confirms zero open positions. If the broker still holds
+  //    anything (or the close call failed), we DO NOT set eodFiredDate — the
+  //    30s EOD loop then retries on the next tick until Alpaca is actually
+  //    flat. This is what prevents the "app shows closed but Alpaca still
+  //    holds" carry that stranded 13 positions on 2026-07-28.
+  await closeAllPaperPositions().catch((err: Error) => console.warn('[alpaca] EOD closeAll failed:', err.message));
+  // Let the market-close fills settle before we verify + read them back.
+  await new Promise((r) => setTimeout(r, 4000));
+
+  let stillOpen: string[] = [];
+  try {
+    const positions = await getPaperPositions();
+    stillOpen = (positions ?? []).map((p) => p.symbol);
+  } catch (err) {
+    // Could not verify — treat as NOT confirmed flat so we retry next tick.
+    console.warn('[eod] could not verify positions after close — will retry:', (err as Error).message);
+    stillOpen = ['<unverified>'];
+  }
+
+  if (stillOpen.length > 0) {
+    // Broker not confirmed flat. Leave the ledger untouched and the flag unset
+    // so the next 30s tick re-attempts the whole close. Do NOT book fictional
+    // EOD exits while Alpaca still holds the shares.
+    console.warn(`[eod] Alpaca NOT flat after close (${stillOpen.join(', ')}) — retrying next tick, ledger left OPEN`);
+    return;
+  }
+
+  // Alpaca confirmed flat — now it is safe to mark the ledger closed and book
+  // exits, then reconcile each EOD exit to the ACTUAL fill Alpaca produced.
+  saveTrades(updated as PaperTrade[]);
+  console.log('[eod] Alpaca confirmed FLAT — ledger closed, reconciling actual fills…');
+  if (unresolved.length) {
+    console.warn(`[eod] no live price for ${unresolved.join(', ')} — booked at entry (P&L $0); rerun backfill once data is available`);
+  }
+
+  const justClosed = (updated as PaperTrade[]).filter((t) => t.outcome === 'EOD' && t.closedAt?.slice(0, 10) === today);
+  const ts = loadTrades();
+  let reconciled = 0;
+  for (const t of justClosed) {
+    try {
+      const fills = await getRecentFilledOrders(t.symbol);
+      // The closing fill is the opposite side of the trade, filled today.
+      const exitSide = t.direction === 'BEAR' ? 'buy' : 'sell';
+      const todayFill = fills.find((f) => f.side === exitSide && (f.filled_at ?? '').slice(0, 10) === today && f.filled_avg_price);
+      if (!todayFill?.filled_avg_price) continue;
+      const px = Number(todayFill.filled_avg_price);
+      const idx = ts.findIndex((x) => x.id === t.id);
+      if (idx === -1) continue;
+      const cur = ts[idx];
+      const remainingQty = cur.quantity - (cur.partialQty ?? 0);
+      const move = cur.direction === 'BEAR' ? (cur.entry - px) : (px - cur.entry);
+      const pnl = Number((move * remainingQty + (cur.realizedPnl ?? 0)).toFixed(2));
+      ts[idx] = { ...cur, exitPrice: Number(px.toFixed(4)), pnl, pnlPercent: Number((pnl / cur.notional * 100).toFixed(2)) };
+      reconciled++;
+    } catch { /* leave planned price */ }
+  }
+  if (reconciled) { saveTrades(ts); console.log(`[eod] reconciled ${reconciled}/${justClosed.length} EOD exits to actual fills`); }
 
   state.eodFiredDate = today;
   saveState();
