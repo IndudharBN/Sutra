@@ -202,7 +202,9 @@ function tryFireTrades(): void {
 
     if (!canPaperTradeRow(row, trades, accountBalance)) continue;
 
-    const newTrade = buildPaperTrade(row, trades, new Date().toISOString(), accountBalance, snapshot.spyTrend5m, snapshot.spyTrend15m);
+    // Regime governor scales size by SPY-200EMA/VIX (BULL 1.0 / SIDEWAYS 0.75 / BEAR 0.5).
+    const regimeSizeMult = snapshot.regime?.sizeMult ?? 1.0;
+    const newTrade = buildPaperTrade(row, trades, new Date().toISOString(), accountBalance, snapshot.spyTrend5m, snapshot.spyTrend15m, 1.0, regimeSizeMult);
     if (!newTrade) continue;
 
     const betaCheck = checkPortfolioBeta(

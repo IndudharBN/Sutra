@@ -534,7 +534,7 @@ export function PerformanceScreen() {
                     // Retired strategies still show their historical P&L here, but are
                     // flagged so the table matches the Day Trader Rules notices above
                     // and the engine's RETIRED_STRATEGIES list (they no longer fire).
-                    const RETIRED_CODES = ['S2', 'S7', 'S1'];
+                    const RETIRED_CODES = ['S2', 'S7', 'S1', 'S14'];
                     const isRetired = RETIRED_CODES.includes(s.code);
                     return (
                     <tr key={s.id} className={`border-b border-white/5 hover:bg-white/5 ${isRetired ? 'opacity-60' : ''}`}>
@@ -624,8 +624,16 @@ export function PerformanceScreen() {
                 <span className="text-rose-300 font-bold">S1 ORB Retest: DISABLED (Jul 28) — −$1,196 over 30 trades, 37% WR; avg loss (−$111) &gt; avg win ($83). Most active loser at retirement</span>
               </div>
               <div className="flex items-start gap-2">
+                <AlertTriangle size={11} className="text-rose-500 mt-0.5 shrink-0" />
+                <span className="text-rose-300 font-bold">S14 1m Sniper: DISABLED (Jul 28) — −$623 over 4 trades, 0% WR (0-for-4); 1m entries fire too late on the IEX feed</span>
+              </div>
+              <div className="flex items-start gap-2">
                 <CheckCircle2 size={11} className="text-emerald-500 mt-0.5 shrink-0" />
                 <span className="text-emerald-300">S9 Flag Break: freed (Jul 12) — S1 handcuff removed + break-bar volume now projected to full 5m; first standalone trial</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <AlertTriangle size={11} className="text-amber-400 mt-0.5 shrink-0" />
+                <span className="text-amber-300">S5 OB/FVG Retest: REBUILT (Jul 28) — ON TRIAL. Entry kept (54% WR); capped stop (1.5×ATR) + reversal dollar-risk cap (0.25% acct) fix the exits (losers were 4.7× winners). Watch forward results.</span>
               </div>
               {[
                 'S3: 15m trend must align — hard fail if counter-trend',

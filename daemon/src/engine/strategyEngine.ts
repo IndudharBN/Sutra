@@ -864,7 +864,16 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const rawStop = structureLow !== null && structureHigh !== null
     ? (dir === 'BULL' ? structureLow - input.atr20 * STOP_BUFFER_ATR : structureHigh + input.atr20 * STOP_BUFFER_ATR)
     : entry;
-  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, input.atr20, input.vixLevel), input.atr20);
+  // Cap the stop DISTANCE at 1.5×ATR (S5 fix, 2026-07-28). Wide structural zones
+  // (OB/FVG up to 8.6% away) made S5's losers average -$113 vs +$68 winners. Rather
+  // than reject wide-stop setups (the old riskOk gate did, losing the trade), pull
+  // the stop in to the 1.5×ATR ceiling so the setup still fires with controlled
+  // loss size. Paired with the reversal dollar-risk cap in buildPaperTrade, this
+  // is the "capped stop + risk-parity" rebuild. structuralT2 uses the capped risk.
+  const STOP_CAP_ATR_S5 = 1.5;
+  const cappedStopDist = Math.min(Math.abs(entry - rawStop), input.atr20 * STOP_CAP_ATR_S5);
+  const cappedStop = dir === 'BULL' ? entry - cappedStopDist : entry + cappedStopDist;
+  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, cappedStop, input.atr20, input.vixLevel), input.atr20);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
@@ -921,7 +930,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
     ema1mCheck(input),
     spyTapeCheck(selfInput),
   ];
-  const sig = signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5: OB or FVG retest. Hard gates: OB needs rejection candle; FVG solo needs RVOL≥1.2× + gap ≥ 0.25×ATR; BOTH paths need 15m trend aligned + stop ≤1.5×ATR + longTax (BULL: above VWAP + RS≥1.0); blocked after 15:00 ET.', false, [], planCandidate);
+  const sig = signal('ob_fvg_retest', selfInput, checklist, tradePlan, 'S5 (REBUILT Jul 28 — on trial): OB or FVG retest with capped stop (1.5×ATR) + reversal dollar-risk cap (0.25% acct). Entry had 54% WR; the rebuild fixes the exit geometry (losers were 4.7× winners). Hard gates: OB needs rejection candle; FVG solo needs RVOL≥1.2× + gap ≥ 0.25×ATR; BOTH paths need 15m trend aligned + longTax (BULL: above VWAP + RS≥1.0); blocked after 15:00 ET.', false, [], planCandidate);
   return { ...sig, enginePath: (atOb ? 'ob' : atFvg ? 'fvg' : undefined) as StrategySignal['enginePath'] };
 }
 

@@ -27,6 +27,16 @@ const STRATEGY_NOTIONAL_CAP_USD: Record<string, number> = {
   liquidity_sweep: 15_000,
 };
 
+// ─── Reversal dollar-risk cap (S5 fix, 2026-07-28) ───────────────────────────
+// Sizing is notional-based and, because riskPerTradePct (3%) == the group cap
+// (3%), the risk-parity term in computeNotional() is ALWAYS >= the cap, so the
+// cap always binds and wide-stop trades are NOT sized down for their risk. On
+// S5 that made losers 4.7× its winners: CRCL risked $637 (8.6% stop) vs a $220
+// median. For zone/reversal strategies we cap the per-trade dollar risk
+// (stopDist × qty) to REVERSAL_MAX_DOLLAR_RISK, scaling the notional down when a
+// wide structural stop would otherwise blow past it. 0.25% of a $100k account.
+const REVERSAL_MAX_DOLLAR_RISK_PCT = 0.0025;
+
 // Minimum viable notional — skip the trade entirely rather than fire a token position.
 // Two floors, whichever is higher:
 //   1. one share's price — the Alpaca bracket path rounds qty up to 1 whole share, so an
@@ -81,6 +91,7 @@ export function buildPaperTrade(
   spyTrend5m?: 'UP' | 'DOWN' | 'FLAT',
   spyTrend15m?: 'UP' | 'DOWN' | 'FLAT',
   cbSizeMult = 1.0,
+  regimeSizeMult = 1.0,
 ): PaperTrade | null {
   const plan = effectiveTradePlan(row);
   if (!plan || plan.rr <= 0) return null;  // structural R:R floor already applied at plan build
@@ -117,9 +128,28 @@ export function buildPaperTrade(
   const sigGroupSizeMult = row.primaryStrategy?.groupSizeMult ?? 1.0;
   const baseNotional = computeNotional(accountBalance, plan.entry, plan.stop, signalGroup, sigGroupSizeMult);
   const usdCap = STRATEGY_NOTIONAL_CAP_USD[strategyId ?? ''] ?? Infinity;
-  const adjustedNotional = Math.min(baseNotional * effectiveMult * cbSizeMult, usdCap);
+  // Market-regime governor: scale every trade by SPY-200EMA/VIX regime
+  // (BULL 1.0× / SIDEWAYS 0.75× / BEAR 0.5×). Applied to all strategies so risk
+  // contracts automatically on chop/downtrend days without touching entries.
+  if (regimeSizeMult < 0.99) heatNote += ` [regime → ${(regimeSizeMult * 100).toFixed(0)}% size]`;
+  const adjustedNotional = Math.min(baseNotional * effectiveMult * cbSizeMult * regimeSizeMult, usdCap);
   const budgetCap = availablePaperNotional(currentTrades, accountBalance);
-  const notional = Math.min(budgetCap, adjustedNotional);
+  let notional = Math.min(budgetCap, adjustedNotional);
+  // Reversal dollar-risk cap: for zone strategies (S5 OB/FVG, S4 sweep) a wide
+  // structural stop must not translate into an oversized dollar loss. If the
+  // implied per-trade risk (stopDist × qty) exceeds the ceiling, scale notional
+  // down so risk == ceiling. This is the true risk-parity the group cap defeats.
+  if (isReversal) {
+    const stopDist = Math.abs(plan.entry - plan.stop);
+    if (stopDist > 0) {
+      const impliedRisk = (notional / plan.entry) * stopDist;
+      const maxRisk = accountBalance * REVERSAL_MAX_DOLLAR_RISK_PCT;
+      if (impliedRisk > maxRisk) {
+        notional = (maxRisk / stopDist) * plan.entry;
+        heatNote += ` [risk-cap → $${maxRisk.toFixed(0)} max loss]`;
+      }
+    }
+  }
   if (notional < minViableNotional(accountBalance, plan.entry)) return null;
   const quantity = Math.round((notional / plan.entry) * 10000) / 10000;
   if (quantity <= 0) return null;

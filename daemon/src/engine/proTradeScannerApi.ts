@@ -21,8 +21,10 @@ import { computeBeta } from '../portfolioRisk';
 // - orb_retest (S1, Jul 28): -$1,196 over 30 trades, 37% WR; avg loss (-$111) >
 //   avg win ($83). Weak edge + adverse geometry. Most active loser at retirement
 //   (19 fires in the prior 14 days), so this removes the largest ongoing bleed.
+// - sniper_1m (S14, Jul 28): -$623 over 4 trades, 0% WR (0-for-4), avg loss
+//   -$156. 1m entries fire too late on the IEX feed; no positive trade ever.
 // Remove an id from this list to trial that strategy again.
-const RETIRED_STRATEGIES: string[] = ['vwap_pullback', 's7_volume_surge', 'orb_retest'];
+const RETIRED_STRATEGIES: string[] = ['vwap_pullback', 's7_volume_surge', 'orb_retest', 'sniper_1m'];
 import { fetchSharesOutstanding, getFloatFromCache } from '../alpacaBroker';
 import { fetchEarningsCalendar, getEarningsDays } from '../finnhubClient';
 

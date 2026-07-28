@@ -1,9 +1,13 @@
 import type { MarketRegime, MarketRegimeName } from './marketRegimeTypes';
 
+// Size multiplier by regime. BEAR downsizes to 0.5× to protect capital when SPY
+// is below its 200 EMA or VIX > 30 — chop/downtrend days are where oversized
+// losers (2-4× winners) do the damage (see 2026-07-28). Was mistakenly 1.0×,
+// which left the governor toothless in exactly the conditions it exists for.
 export const REGIME_MULT: Record<MarketRegimeName, number> = {
-  BULL: 1,
+  BULL: 1.0,
   SIDEWAYS: 0.75,
-  BEAR: 1.0,
+  BEAR: 0.5,
 };
 
 export const REGIME_COLOR: Record<MarketRegimeName, string> = {
