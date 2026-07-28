@@ -18,8 +18,11 @@ import { computeBeta } from '../portfolioRisk';
 //   (cushioned reclaim, 10:45 gate, buffered rescue exit) remains in strategyEngine.ts.
 // - s7_volume_surge (S7, Jul 12): handcuffed-by-design to S8 via capScoutSignals, 1W/5L
 //   standalone record, and honest surge detection needs tick data, not 5m polling.
+// - orb_retest (S1, Jul 28): -$1,196 over 30 trades, 37% WR; avg loss (-$111) >
+//   avg win ($83). Weak edge + adverse geometry. Most active loser at retirement
+//   (19 fires in the prior 14 days), so this removes the largest ongoing bleed.
 // Remove an id from this list to trial that strategy again.
-const RETIRED_STRATEGIES: string[] = ['vwap_pullback', 's7_volume_surge'];
+const RETIRED_STRATEGIES: string[] = ['vwap_pullback', 's7_volume_surge', 'orb_retest'];
 import { fetchSharesOutstanding, getFloatFromCache } from '../alpacaBroker';
 import { fetchEarningsCalendar, getEarningsDays } from '../finnhubClient';
 

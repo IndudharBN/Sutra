@@ -19,8 +19,11 @@ import { fetchEarningsCalendar, getEarningsDays } from '../../lib/finnhubClient'
 // so it survives state saves and restarts. Mirrors daemon/src/engine/proTradeScannerApi.ts.
 // - vwap_pullback (S2, Jul 10): v1 retune 25 trades, 8% WR / PF 0.36; v2 rehab parked.
 // - s7_volume_surge (S7, Jul 12): handcuffed to S8 by design, 1W/5L standalone record.
+// - orb_retest (S1, Jul 28): -$1,196 over 30 trades, 37% WR; avg loss (-$111) >
+//   avg win ($83). Weak edge + adverse geometry. Most active loser at retirement
+//   (19 fires in the prior 14 days), so this removes the largest ongoing bleed.
 // Remove an id from this list to trial that strategy again.
-const RETIRED_STRATEGIES: string[] = ['vwap_pullback', 's7_volume_surge'];
+const RETIRED_STRATEGIES: string[] = ['vwap_pullback', 's7_volume_surge', 'orb_retest'];
 
 // S7 (s7_volume_surge) is a scout strategy — it needs its partner (S8) active before
 // it can progress past forming. S9's flag_break handcuff was removed 2026-07-12

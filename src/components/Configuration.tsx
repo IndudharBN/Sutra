@@ -530,12 +530,19 @@ export function PerformanceScreen() {
                   </tr>
                 </thead>
                 <tbody className="text-[11px] font-mono">
-                  {stats.byStrategy.map((s) => (
-                    <tr key={s.id} className="border-b border-white/5 hover:bg-white/5">
+                  {stats.byStrategy.map((s) => {
+                    // Retired strategies still show their historical P&L here, but are
+                    // flagged so the table matches the Day Trader Rules notices above
+                    // and the engine's RETIRED_STRATEGIES list (they no longer fire).
+                    const RETIRED_CODES = ['S2', 'S7', 'S1'];
+                    const isRetired = RETIRED_CODES.includes(s.code);
+                    return (
+                    <tr key={s.id} className={`border-b border-white/5 hover:bg-white/5 ${isRetired ? 'opacity-60' : ''}`}>
                       <td className="py-3 px-3">
                         <span className="inline-flex items-center gap-2">
                           <span className="text-[9px] font-black text-indigo-400 border border-indigo-400/40 bg-indigo-500/10 px-1.5 py-0.5 rounded">{s.code}</span>
                           <span className="text-slate-300">{s.name}</span>
+                          {isRetired && <span className="text-[8px] font-black text-rose-400 border border-rose-400/40 bg-rose-500/10 px-1.5 py-0.5 rounded uppercase tracking-wider">Retired</span>}
                         </span>
                       </td>
                       <td className="py-3 px-3 text-right text-slate-300">{s.trades}</td>
@@ -544,7 +551,8 @@ export function PerformanceScreen() {
                       <td className="py-3 px-3 text-right text-white">{s.trades > 0 ? `${Math.round((s.wins / s.trades) * 100)}%` : '--'}</td>
                       <td className={`py-3 px-3 text-right font-black ${pnlColor(s.pnl)}`}>{fmtPnl(s.pnl)}</td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -610,6 +618,10 @@ export function PerformanceScreen() {
               <div className="flex items-start gap-2">
                 <AlertTriangle size={11} className="text-rose-500 mt-0.5 shrink-0" />
                 <span className="text-rose-300 font-bold">S7 Volume Surge: DISABLED (Jul 12) — S8-handcuffed by design, 1W/5L standalone; needs tick data to trade honestly</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <AlertTriangle size={11} className="text-rose-500 mt-0.5 shrink-0" />
+                <span className="text-rose-300 font-bold">S1 ORB Retest: DISABLED (Jul 28) — −$1,196 over 30 trades, 37% WR; avg loss (−$111) &gt; avg win ($83). Most active loser at retirement</span>
               </div>
               <div className="flex items-start gap-2">
                 <CheckCircle2 size={11} className="text-emerald-500 mt-0.5 shrink-0" />
