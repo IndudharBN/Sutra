@@ -1020,7 +1020,11 @@ function PaperTradeMonitor({
   const filteredTrades = trades.filter((t) => tradeDateET(t) === monitorDate);
   const sortedTrades = [...filteredTrades].sort((a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime());
   const open = filteredTrades.filter((trade) => trade.status === 'Open');
-  const closed = filteredTrades.filter((trade) => trade.status === 'Closed' && !trade.phantom);
+  // Equity anchor (__ALPACA_ANCHOR__): accounting row from reconcile-daily.mjs that
+  // keeps total P&L == Alpaca equity. Counts toward P&L but is not a trade.
+  const dayAnchor = filteredTrades.find((t) => t.id === '__ALPACA_ANCHOR__');
+  const anchorPnl = dayAnchor?.pnl ?? 0;
+  const closed = filteredTrades.filter((trade) => trade.status === 'Closed' && !trade.phantom && trade.id !== '__ALPACA_ANCHOR__');
   const isToday = monitorDate === todayET();
   // Sum the STORED realized trade.pnl for closed trades on the SELECTED DAY only
   // (filteredTrades is scoped to monitorDate via the date picker). This must use
@@ -1029,7 +1033,7 @@ function PaperTradeMonitor({
   // 0, which made the Monitor disagree with Performance for EOD trades booked at a
   // flat exit. If a trade shows $0 the honest fix is to repair the stored exit
   // price (the "Fix P&L" button / daemon backfill), not to fabricate a number here.
-  const totalPnl = closed.reduce((total, trade) => total + (trade.pnl ?? 0), 0);
+  const totalPnl = closed.reduce((total, trade) => total + (trade.pnl ?? 0), 0) + anchorPnl;
 
   return (
     <div className="glass rounded-xl overflow-hidden">

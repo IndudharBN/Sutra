@@ -165,6 +165,57 @@ if (orphanRows.length) {
   if (orphanRows.length > 20) console.log(`   ... +${orphanRows.length - 20} more`);
 }
 
+// ── Equity anchor: guarantee ledger total == Alpaca truth ───────────────────
+// Per-day/per-symbol matching cannot capture positions opened one day and closed
+// another (the buy and sell land on different days), nor multi-episode symbols
+// with imperfect VWAP pairing. Alpaca's account equity is the DEFINITIVE realized
+// P&L when the account is flat (0 open positions). So after the per-trade pass we
+// read equity, compute realized = equity - STARTING_EQUITY, and if the ledger's
+// non-phantom total still differs we write/update ONE __ALPACA_ANCHOR__ row that
+// absorbs the residual. This makes the dashboard total ALWAYS equal Alpaca — the
+// user's standing requirement that the two never diverge. Only runs when flat;
+// with open positions equity includes unrealized marks, so we skip the anchor.
+const STARTING_EQUITY = 100_000;
+let anchorNote = '';
+try {
+  const acct = await (await fetch(`${BASE}/v2/account`, { headers: H })).json();
+  const positions = await (await fetch(`${BASE}/v2/positions`, { headers: H })).json();
+  const flat = Array.isArray(positions) && positions.length === 0;
+  if (!flat) {
+    anchorNote = `\nEquity anchor SKIPPED — ${Array.isArray(positions) ? positions.length : '?'} open position(s); equity includes unrealized marks. Re-run when flat.`;
+  } else {
+    const alpacaRealized = Number((Number(acct.equity) - STARTING_EQUITY).toFixed(2));
+    const nonPhantom = trades.filter((t) => !t.phantom && (t.pnl != null || t.status === 'Closed'));
+    const ledgerTotal = Number(nonPhantom.reduce((s, t) => s + Number(t.pnl || 0), 0).toFixed(2));
+    let anchor = trades.find((t) => t.id === '__ALPACA_ANCHOR__');
+    const priorAnchor = anchor ? Number(anchor.pnl || 0) : 0;
+    // ledgerTotal already includes any prior anchor; the residual is what's still off.
+    const residual = Number((alpacaRealized - ledgerTotal).toFixed(2));
+    const newAnchorPnl = Number((priorAnchor + residual).toFixed(2));
+    if (Math.abs(residual) > 0.01) {
+      if (!anchor) {
+        anchor = {
+          id: '__ALPACA_ANCHOR__', symbol: 'ANCHOR', company: 'Alpaca equity reconciliation',
+          strategyCode: 'SYS', strategyName: 'Equity Anchor', direction: 'NEUTRAL',
+          status: 'Closed', outcome: 'Anchor', quantity: 0, notional: 0,
+          entry: 0, exitPrice: 0, pnlPercent: 0,
+          openedAt: new Date().toISOString(),
+        };
+        trades.push(anchor);
+      }
+      anchor.pnl = newAnchorPnl;
+      anchor.closedAt = new Date().toISOString();
+      anchor.reason = `Reconciles ledger to Alpaca equity (${alpacaRealized}) — absorbs cross-day/multi-episode residual the per-symbol matcher can't attribute.`;
+      anchorNote = `\nEquity anchor: ledger ${ledgerTotal} -> Alpaca ${alpacaRealized} (residual ${residual >= 0 ? '+' : ''}${residual}); anchor row now ${newAnchorPnl}.`;
+    } else {
+      anchorNote = `\nEquity anchor: ledger already matches Alpaca (${alpacaRealized}) within $0.01.`;
+    }
+  }
+} catch (err) {
+  anchorNote = `\nEquity anchor SKIPPED — could not read account: ${err.message}`;
+}
+console.log(anchorNote);
+
 if (APPLY) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const bak = path.join(ROOT, 'data', `trades.json.pre-reconcile-${stamp}`);

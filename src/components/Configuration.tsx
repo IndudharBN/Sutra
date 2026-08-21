@@ -71,12 +71,19 @@ function usePaperStats() {
   const isWin = (t: PaperTradeRecord) => (t.pnl ?? 0) > 0;
   const isLoss = (t: PaperTradeRecord) => (t.pnl ?? 0) < 0;
 
-  const closed = trades.filter((t) => t.status === 'Closed' && !(t as { phantom?: boolean }).phantom);
+  // The equity anchor (__ALPACA_ANCHOR__) is an accounting adjustment written by
+  // reconcile-daily.mjs so the total P&L always equals Alpaca's real equity — it
+  // absorbs cross-day/multi-episode residual the per-symbol matcher can't attribute.
+  // It counts toward P&L totals but is NOT a trade: exclude it from counts/WR/strategy.
+  const anchor = trades.find((t) => t.id === '__ALPACA_ANCHOR__');
+  const anchorPnl = anchor?.pnl ?? 0;
+  const closed = trades.filter((t) => t.status === 'Closed' && !(t as { phantom?: boolean }).phantom && t.id !== '__ALPACA_ANCHOR__');
   const open = trades.filter((t) => t.status === 'Open');
   const today = todayET();
   const todayClosed = closed.filter((t) => t.closedAt && toETDate(t.closedAt) === today);
-  const todayPnl = todayClosed.reduce((s, t) => s + (t.pnl ?? 0), 0);
-  const totalPnl = closed.reduce((s, t) => s + (t.pnl ?? 0), 0);
+  const anchorIsToday = anchor?.closedAt ? toETDate(anchor.closedAt) === today : false;
+  const todayPnl = todayClosed.reduce((s, t) => s + (t.pnl ?? 0), 0) + (anchorIsToday ? anchorPnl : 0);
+  const totalPnl = closed.reduce((s, t) => s + (t.pnl ?? 0), 0) + anchorPnl;
   const wins = closed.filter(isWin).length;
   const losses = closed.filter(isLoss).length;
   const winRate = (wins + losses) > 0 ? Math.round((wins / (wins + losses)) * 100) : 0;
