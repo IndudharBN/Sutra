@@ -774,7 +774,12 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   const avg5Vol = prior3Vol.length >= 2
     ? prior3Vol.reduce((s, c) => s + c.volume, 0) / prior3Vol.length
     : 0;
-  const reclaimVolOk = avg5Vol > 0 && trigger != null && trigger.volume >= avg5Vol * 0.8;
+  // Light grip (2026-08-25): reclaim volume 0.8x -> 1.0x of 5-bar avg. S4's losers
+  // (22W/51L into EOD, -$2,511) were weak reclaims that never reached T1; when they
+  // DID reach T1 they went 12-1. Requiring an at-or-above-average reclaim bar filters
+  // the low-conviction sweeps that rot to EOD, without the aggressive 1.2x that
+  // choked S5. Trades that reach T1 are ~100% winners, so gate for follow-through.
+  const reclaimVolOk = avg5Vol > 0 && trigger != null && trigger.volume >= avg5Vol * 1.0;
 
   const selfInput = selfDir
     ? {
@@ -1118,7 +1123,11 @@ export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
   const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
-  const tradePlan = emaRising && touchedEma && reclaimed && input.rvol >= 0.8 ? planCandidate : null;
+  // Light grip (2026-08-25): RVOL 0.8x -> 1.0x. S8's losers (37W/66L into EOD,
+  // -$1,765) were low-volume bounces that stalled; T1-reachers went 15-0. Requiring
+  // at-or-above-average volume filters the dead-tape chop without over-tightening
+  // (kept at 1.0x, not S5's 1.2x, so the strategy still fires).
+  const tradePlan = emaRising && touchedEma && reclaimed && input.rvol >= 1.0 ? planCandidate : null;
 
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from EMA20 slope`) : fail('Directional bias', 'EMA20 flat — no slope to define bounce direction'),
@@ -1133,7 +1142,7 @@ export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
       : fail('Recovery candle', 'Waiting for bar to close back through EMA20'),
     htfTrendContext(selfInput),
     pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP misaligned — watch'} — informational`),
-    input.rvol >= 0.8 ? pass('RVOL ≥0.8×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥0.8×', `${round(input.rvol, 2)}× — EMA bounce in low volume is chop, not trend`),
+    input.rvol >= 1.0 ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — EMA bounce in low volume is chop, not trend`),
     ema1mCheck(input),
     spySessionCheck(selfInput),
   ];
