@@ -87,14 +87,27 @@ function planFromLevelsT1T2(
   // Caps only ever pull targets CLOSER; a structural level nearer than the cap wins.
   const atrCapDist = input.atr20 > 0 ? input.atr20 * T2_ATR_CAP : Infinity;
   const pctCapDist = entry * T2_PCT_CAP;
-  const capDist = Math.min(risk * PREFERRED_RR, atrCapDist, pctCapDist);
+  // Bug fix 2026-08-25: the ATR/pct caps are meant to pull an unreachably-far target
+  // CLOSER, but for wide-stop REVERSAL strategies (S4 sweep, S5 OB/FVG) they pulled
+  // the target INSIDE the stop distance — capDist fell to ~half the risk, so T2/T1
+  // sat at a losing R:R and S4 collapsed 56%/+$620 -> 18%/-$1,605 after the Jul 28
+  // caps shipped. Never let the cap compress the target below MIN_RR × risk: the
+  // caps may shorten a 2R+ target toward the intraday-reachable zone, but not below
+  // the R:R that makes the setup worth taking in the first place.
+  const capDist = Math.max(
+    Math.min(risk * PREFERRED_RR, atrCapDist, pctCapDist),
+    risk * MIN_RR,
+  );
   const t2Capped = input.direction === 'BULL'
     ? Math.min(t2, entry + capDist)
     : Math.max(t2, entry - capDist);
-  // T1 must stay inside T2 — otherwise the trail ratchet sits beyond the exit.
+  // T1 sits at 60% of the (now MIN_RR-floored) capDist — stays inside T2 while
+  // keeping a real R:R vs the stop. With capDist floored at MIN_RR×risk (1.5R),
+  // T1 lands at ≥0.9R; the structural t1 wins when it is nearer than that.
+  const t1CapDist = capDist * 0.6;
   const t1Capped = input.direction === 'BULL'
-    ? Math.min(t1, entry + capDist * 0.6)
-    : Math.max(t1, entry - capDist * 0.6);
+    ? Math.min(t1, entry + t1CapDist)
+    : Math.max(t1, entry - t1CapDist);
 
   // Gate on the UNCAPPED structural R:R. The caps express what price can realistically
   // reach intraday, not whether the setup is worth taking — gating on the capped value
