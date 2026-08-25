@@ -141,6 +141,20 @@ function enforceMinStop(direction: 'BULL' | 'BEAR', entry: number, stop: number,
   return Number.isFinite(enforced) ? enforced : entry + minDist;
 }
 
+// Entry-thrust filter (2026-08-25): the S4/S8 EOD losers NEVER reached +0.5R
+// (0 of 95 with excursion data) — they were no-momentum entries that stalled and
+// died flat at EOD. Require the entry bar to close in the favorable 40% of its
+// range (BULL: top 40%, BEAR: bottom 40%) so we only take bars with real thrust
+// in the trade's direction. Light: a doji/rejection bar fails, a decisive bar
+// passes. Zero-range bars pass (can't judge). Returns true when thrust is present.
+function entryThrustOk(direction: 'BULL' | 'BEAR', bar: Candle | null): boolean {
+  if (!bar) return true;
+  const range = bar.high - bar.low;
+  if (range <= 0) return true;
+  const closePos = (bar.close - bar.low) / range; // 0 = closed at low, 1 = at high
+  return direction === 'BULL' ? closePos >= 0.6 : closePos <= 0.4;
+}
+
 // SPY 5m tape check — for BREAKOUT strategies (S1, S3, S6, S7, S9).
 // Counter-tape breakout: fails checklist → stays 'forming', not auto-traded.
 function spyTapeCheck(input: StrategyInput): StrategyChecklistItem {
@@ -790,7 +804,14 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
       }
     : input;
   const planCandidate = planFromLevelsT1T2(selfInput, entry, stop, t1, t2, trigger);
-  const tradePlan = swept && reclaimed && nearLevel && sweepWickOk && reclaimVolOk ? planCandidate : null;
+  // Two light grips added 2026-08-25 (S4's entire loss was on the LONG side:
+  // BULL 35% WR -$2,062 vs BEAR 48% WR +$1,077):
+  //  1. tape gate — require 15m trend aligned (no counter-tape reversals, which
+  //     is where the bull-into-downtrend losers lived).
+  //  2. thrust gate — entry bar must close in the favorable 40% of its range.
+  const s4TapeOk = input.trend15mAligned;
+  const s4ThrustOk = entryThrustOk(dir, trigger);
+  const tradePlan = swept && reclaimed && nearLevel && sweepWickOk && reclaimVolOk && s4TapeOk && s4ThrustOk ? planCandidate : null;
   const sweepDetail = sweptLevel !== null
     ? (sweepSource === 'ORB'
         ? `ORB ${dir === 'BULL' ? 'low' : 'high'} ${round(sweptLevel, 2)}`
@@ -803,6 +824,8 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
       : pass('Opening range', 'Not formed — using intraday pivot fallback'),
     swept ? pass('Liquidity swept', sweepDetail) : fail('Liquidity swept', 'No sweep below/above ORB or intraday pivot'),
     sweepWickOk ? pass('Sweep rejection wick', 'Candle closed back inside level') : fail('Sweep rejection wick', 'No rejection — likely continuation'),
+    s4TapeOk ? pass('15m tape aligned', `${input.trend15m} ✓`) : fail('15m tape aligned', `${input.trend15m} — counter-tape sweep (S4 longs into downtrend were 35% WR / -$2,062)`),
+    s4ThrustOk ? pass('Entry thrust', 'Bar closed in favorable 40% of range ✓') : fail('Entry thrust', 'Weak/doji entry bar — no momentum (EOD-rot losers never reached +0.5R)'),
     reclaimed ? pass('Level reclaimed', `Close back ${dir === 'BULL' ? 'above' : 'below'} ${sweptLevel ? round(sweptLevel, 2) : '--'}`) : fail('Level reclaimed', 'Waiting for close back through swept level'),
     nearLevel ? pass('Entry proximity', 'Price within 1.5×ATR of level ✓') : fail('Entry proximity', 'Price too far from swept level — do not chase'),
     reclaimVolOk
@@ -1127,7 +1150,13 @@ export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
   // -$1,765) were low-volume bounces that stalled; T1-reachers went 15-0. Requiring
   // at-or-above-average volume filters the dead-tape chop without over-tightening
   // (kept at 1.0x, not S5's 1.2x, so the strategy still fires).
-  const tradePlan = emaRising && touchedEma && reclaimed && input.rvol >= 1.0 ? planCandidate : null;
+  // Two light grips added 2026-08-25 (S8's loss was also all on the LONG side:
+  // BULL 34% WR -$414 vs BEAR 53% WR ~flat):
+  //  1. tape gate — 15m trend aligned (no counter-tape bounces).
+  //  2. thrust gate — entry bar closes in the favorable 40% of its range.
+  const s8TapeOk = input.trend15mAligned;
+  const s8ThrustOk = entryThrustOk(dir, trigger);
+  const tradePlan = emaRising && touchedEma && reclaimed && input.rvol >= 1.0 && s8TapeOk && s8ThrustOk ? planCandidate : null;
 
   const checklist = [
     selfDir ? pass('Directional bias', `${selfDir} — self-determined from EMA20 slope`) : fail('Directional bias', 'EMA20 flat — no slope to define bounce direction'),
@@ -1143,6 +1172,8 @@ export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
     htfTrendContext(selfInput),
     pass('VWAP context', `${selfInput.vwapAligned ? (dir === 'BULL' ? 'Above VWAP ✓' : 'Below VWAP ✓') : 'VWAP misaligned — watch'} — informational`),
     input.rvol >= 1.0 ? pass('RVOL ≥1.0×', `${round(input.rvol, 2)}× ✓`) : fail('RVOL ≥1.0×', `${round(input.rvol, 2)}× — EMA bounce in low volume is chop, not trend`),
+    s8TapeOk ? pass('15m tape aligned', `${input.trend15m} ✓`) : fail('15m tape aligned', `${input.trend15m} — counter-tape bounce (S8 longs into downtrend were 34% WR / -$414)`),
+    s8ThrustOk ? pass('Entry thrust', 'Bar closed in favorable 40% of range ✓') : fail('Entry thrust', 'Weak/doji entry bar — no momentum (EOD-rot losers never reached +0.5R)'),
     ema1mCheck(input),
     spySessionCheck(selfInput),
   ];
