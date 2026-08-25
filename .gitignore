@@ -26,4 +26,5 @@ daily_cache.json
 data/*.bak-*
 data/*.pre-restate-*
 data/*.pre-reconcile-*
+data/*.pre-orphan-cleanup-*
 data/*.backup
