@@ -34,59 +34,48 @@ function row(price: number, vwap = 99): ProTradeRow {
   return { symbol: 'TEST', price, vwap } as unknown as ProTradeRow;
 }
 
-describe('1R partial exit engine', () => {
-  it('banks half at +1R and moves the stop to breakeven', () => {
-    const { trades, changed } = monitorPaperTrades([openTrade()], [row(102)]);
+describe('full-exit-at-T1 engine', () => {
+  // Model (2026-08-27): the WHOLE position exits at T1 — no partial, no runner, no T2.
+  // Alpaca holds a resting take-profit at T1; the monitor mirrors the full close.
+  it('closes the full position at T1 (BULL)', () => {
+    const { trades, changed } = monitorPaperTrades([openTrade()], [row(103)]); // T1 = 103
     const t = trades[0];
     expect(changed).toBe(true);
-    expect(t.status).toBe('Open');
-    expect(t.partialExitAt).toBeTruthy();
-    expect(t.partialQty).toBe(50);
-    expect(t.realizedPnl).toBe(100);        // (102-100) × 50
-    expect(t.trailingStop).toBe(100);       // breakeven
-    expect(t.t1HitAt).toBeTruthy();
-  });
-
-  it('runner stopped at breakeven keeps the banked partial (worst case +0.5R)', () => {
-    const afterPartial = monitorPaperTrades([openTrade()], [row(102)]).trades[0];
-    const { trades } = monitorPaperTrades([afterPartial], [row(100)]); // pulls back to entry
-    const t = trades[0];
-    expect(t.status).toBe('Closed');
-    expect(t.outcome).toBe('T1 Profit');
-    expect(t.pnl).toBe(100);                // banked partial only; runner flat at BE
-  });
-
-  it('runner reaching T2 books remainder at target plus the banked partial', () => {
-    const afterPartial = monitorPaperTrades([openTrade()], [row(102)]).trades[0];
-    const { trades } = monitorPaperTrades([afterPartial], [row(105.2)]);
-    const t = trades[0];
     expect(t.status).toBe('Closed');
     expect(t.outcome).toBe('Target');
-    expect(t.pnl).toBe(100 + (105 - 100) * 50); // 100 banked + 5×50 runner = 350
+    expect(t.pnl).toBe((103 - 100) * 100);   // full 100 shares × 3 = 300
+    expect(t.partialExitAt).toBeUndefined(); // no partial ever fires
+    expect(t.partialQty).toBeUndefined();
   });
 
-  it('full stop-out before 1R loses on the whole position (no partial)', () => {
+  it('does NOT exit before T1 — stays open between entry and T1', () => {
+    const { trades } = monitorPaperTrades([openTrade()], [row(102)]); // +1R but below T1(103)
+    const t = trades[0];
+    expect(t.status).toBe('Open');
+    expect(t.partialExitAt).toBeUndefined();
+  });
+
+  it('full stop-out loses on the whole position', () => {
     const { trades } = monitorPaperTrades([openTrade()], [row(97.9)]);
     const t = trades[0];
     expect(t.status).toBe('Closed');
     expect(t.outcome).toBe('Stop');
-    expect(t.partialExitAt).toBeUndefined();
     expect(t.pnl).toBeCloseTo((97.9 - 100) * 100, 2);
   });
 
-  it('BEAR trade banks the partial on a downward 1R move', () => {
+  it('closes the full position at T1 (BEAR)', () => {
     const bear = openTrade({ direction: 'BEAR', entry: 100, stop: 102, target1: 97, target2: 95, trailingStop: 102 });
-    const { trades } = monitorPaperTrades([bear], [row(98, 101)]); // 1R = 98
+    const { trades } = monitorPaperTrades([bear], [row(97, 101)]); // T1 = 97
     const t = trades[0];
-    expect(t.partialQty).toBe(50);
-    expect(t.realizedPnl).toBe(100);        // (100-98) × 50
-    expect(t.trailingStop).toBe(100);
+    expect(t.status).toBe('Closed');
+    expect(t.outcome).toBe('Target');
+    expect(t.pnl).toBe((100 - 97) * 100);    // full 100 shares × 3 = 300
   });
 
   it('legacy trades without partial fields close with the original full-quantity math', () => {
-    const legacy = openTrade({ t1HitAt: new Date().toISOString(), trailingStop: 100 });
+    const legacy = openTrade({ trailingStop: 100 });
     const closed = closePaperTrade(legacy, 101, 'EOD');
-    expect(closed.pnl).toBe((101 - 100) * 100); // no partialQty → full qty, no realizedPnl
+    expect(closed.pnl).toBe((101 - 100) * 100); // full qty, no realizedPnl
   });
 });
 

@@ -42,10 +42,6 @@ function paperTarget1(trade: PaperTrade) {
   return Number(trade.target1 || trade.target || 0);
 }
 
-function paperTarget2(trade: PaperTrade) {
-  return Number(trade.target2 || trade.target || paperTarget1(trade));
-}
-
 function paperTrailingStop(trade: PaperTrade) {
   return Number(trade.trailingStop || trade.stop || 0);
 }
@@ -80,70 +76,26 @@ export function monitorPaperTrades(
     if (now - new Date(trade.openedAt).getTime() < 60_000) return trade;
 
     const target1 = paperTarget1(trade);
-    const target2 = paperTarget2(trade);
     const trailingStop = paperTrailingStop(trade);
-    const hitTarget2 = trade.direction === 'BEAR' ? current <= target2 : current >= target2;
-    // 1R trigger (was T1 = 1.5R): 448-trade sample showed the median winner never
-    // travelled 1.5R before EOD — winners round-tripped into losses. At +1R we bank
-    // half the position (realizedPnl), move the stop to breakeven on the runner,
-    // and let it work toward T2. Worst case after the partial is +0.5R.
-    const initialRisk = Math.abs(trade.entry - Number(trade.stop || 0));
-    // Partial distance is capped the same way the take-profit is: a full 1R sits
-    // ~5% away (stops are daily-ATR denominated) and fired on only 8% of trades.
-    // Half of the capped T2 distance keeps the ladder proportional — bank at the
-    // midpoint of a reachable target — lifting partial fires to ~35% in replay.
-    const t2Dist = Math.abs(paperTarget2(trade) - trade.entry);
-    const partialDist = t2Dist > 0 ? Math.min(initialRisk, t2Dist / 2) : initialRisk;
-    const oneR = trade.direction === 'BEAR' ? trade.entry - partialDist : trade.entry + partialDist;
-    const hit1R = partialDist > 0 && (trade.direction === 'BEAR' ? current <= oneR : current >= oneR);
+    // FULL EXIT AT T1 (user directive 2026-08-27): the whole position exits at T1 —
+    // no partial, no runner, no T2. Alpaca holds a resting take-profit limit at T1
+    // (set in scheduler's placePaperBracketOrder), and this monitor mirrors the same
+    // full close. Rationale: T1-reachers were 98% WR while runners rarely reached T2,
+    // so banking the whole position at T1 captures the edge without round-tripping.
+    const hitTarget1 = trade.direction === 'BEAR' ? current <= target1 : current >= target1;
     const hitStop = trade.direction === 'BEAR' ? current >= trailingStop : current <= trailingStop;
 
-    if (hitTarget2) {
+    if (hitTarget1) {
       changed = true;
-      return closePaperTrade(trade, target2, 'Target');
+      return closePaperTrade(trade, target1, 'Target');
     }
-    if (!trade.t1HitAt && hit1R) {
-      changed = true;
-      // Whole-share partial to match Alpaca (alpacaBroker banks Math.floor(held/2)).
-      // A fractional half (quantity/2 on an odd lot) desyncs the ledger from the real
-      // fill: e.g. 25 sh -> ledger banked 12.5/ran 12.5 while Alpaca banked 12/ran 13,
-      // so both legs' P&L drifted from the broker's realized number.
-      const partialQty = Math.floor(trade.quantity / 2);
-      const banked = trade.direction === 'BEAR'
-        ? (trade.entry - current) * partialQty
-        : (current - trade.entry) * partialQty;
-      const nowIso = new Date().toISOString();
-      return {
-        ...trade,
-        t1HitAt: nowIso,
-        partialExitAt: nowIso,
-        partialExitPrice: Number(current.toFixed(2)),
-        partialQty,
-        realizedPnl: Number(banked.toFixed(2)),
-        trailingStop: trade.entry,
-      };
-    }
-    if (trade.t1HitAt) {
-      const t1Level = target1;
-      const slAtEntry = Math.abs(trailingStop - trade.entry) < 0.01;
-      if (slAtEntry) {
-        const pulledBackToT1 = trade.direction === 'BULL'
-          ? current >= t1Level * 0.997 && current > trade.entry
-          : current <= t1Level * 1.003 && current < trade.entry;
-        if (pulledBackToT1) {
-          changed = true;
-          return { ...trade, trailingStop: t1Level };
-        }
-      }
-    }
+    // Full-exit-at-T1 model: no partial/runner, so a trade is only ever Open until it
+    // hits T1 (win) or the stop (loss). The stop is the ORIGINAL stop the whole time.
     if (hitStop) {
       changed = true;
-      const exitPrice = trade.t1HitAt
-        ? (trade.direction === 'BEAR' ? Math.min(trailingStop, current) : Math.max(trailingStop, current))
-        : current;
-      return closePaperTrade(trade, exitPrice, trade.t1HitAt ? 'T1 Profit' : 'Stop');
+      return closePaperTrade(trade, current, 'Stop');
     }
-    if ((trade.strategyId === 'vwap_pullback' || trade.strategyId === 'rs_continuation') && !trade.t1HitAt) {
+    if (trade.strategyId === 'vwap_pullback' || trade.strategyId === 'rs_continuation') {
       const vwap = vwapBySymbol.get(baseSymbol(trade.symbol));
       // Buffered re-cross (was one tick through VWAP): S2 enters just above VWAP by
       // construction, so a zero-tolerance re-cross executed 23/25 trades at avg -0.12R

@@ -8,7 +8,7 @@ import { buildPaperTrade, canPaperTradeRow } from './engine/buildPaperTrade';
 import { isTideBlocked } from './engine/isTideBlocked';
 import { checkGroupCircuitBreaker, checkStrategyCircuitBreaker, checkDailyLossLimit, recordGroupTradeResult, recordTradeResult } from './riskManager';
 import { checkSectorConcentration, checkPortfolioBeta } from './portfolioRisk';
-import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperPosition, closeAllPaperPositions, syncPartialAndBreakeven, awaitEntryFill, getRecentFilledOrders } from './alpacaBroker';
+import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperPosition, closeAllPaperPositions, awaitEntryFill, getRecentFilledOrders } from './alpacaBroker';
 import { env } from './env';
 import { emit } from './httpServer';
 import { loadTrades, saveTrades, appendLedger } from './tradeStore';
@@ -88,23 +88,10 @@ async function monitorLoop(): Promise<void> {
     for (let i = 0; i < trades.length; i++) {
       const before = trades[i];
       const after = updated[i];
-      // 1R partial fired: mirror it at the broker — bank half, move the stop to
-      // breakeven on the runner. Async best-effort; internal ledger is the truth.
-      if (before.status === 'Open' && after.status === 'Open' && !before.partialExitAt && after.partialExitAt) {
-        emit('trade_partial', after);
-        appendLedger('trade_partial', after);
-        console.log(`[monitor] ${after.symbol} 1R partial — banked $${after.realizedPnl?.toFixed(2)} (${after.partialQty} sh), stop → BE`);
-        if (after.direction !== 'NEUTRAL') {
-          syncPartialAndBreakeven({
-            symbol: after.symbol,
-            direction: after.direction as 'BULL' | 'BEAR',
-            entry: after.entry,
-            target2: after.target2 || after.target,
-          }).catch((err: Error) =>
-            console.warn(`[alpaca] 1R partial sync failed ${after.symbol}:`, err.message),
-          );
-        }
-      }
+      // Full-exit-at-T1 model (2026-08-27): no partial/runner. Alpaca's bracket
+      // take-profit is set to T1, so the broker closes the whole position at T1 on
+      // its own; the monitor's closePaperTrade path reconciles the exit below. The
+      // old 1R-partial + breakeven-sync mirror was removed with the runner.
       if (before.status === 'Open' && after.status === 'Closed' && after.pnl !== undefined) {
         emit('trade_closed', after);
         console.log(`[monitor] ${after.symbol} closing — ${after.outcome} (planned pnl=$${after.pnl?.toFixed(2)}), reconciling actual fill…`);
@@ -237,7 +224,11 @@ function tryFireTrades(): void {
           direction: newTrade.direction as 'BULL' | 'BEAR',
           entry: newTrade.entry,
           stop: newTrade.stop,
-          target: newTrade.target2 || newTrade.target,
+          // T1 is the take-profit (user directive 2026-08-27): full position exits at
+          // T1 as a resting limit on Alpaca. No T2 runner — T1-reachers were 98% WR
+          // while runners rarely reached T2. The daemon's T1-partial/breakeven sync is
+          // disabled below so it does not conflict with this full-exit bracket.
+          target: newTrade.target1 || newTrade.target,
           notional: newTrade.notional,
         });
         const fill = await awaitEntryFill(order.id);
