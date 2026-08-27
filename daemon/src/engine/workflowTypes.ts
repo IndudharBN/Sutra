@@ -113,6 +113,12 @@ export interface StrategyInput {
   rvol: number;
   gapPct: number;
   atr20: number;
+  // 15-minute ATR (ATR14 on 15m bars). Stops are anchored to THIS, not daily atr20,
+  // because trades are entered on 5m signals and flattened same-day — a daily-ATR
+  // stop is sized for a full-day move and never gets reached intraday, which is why
+  // realized payoff was 0.89 (winners +0.31R, losers -0.35R). Falls back to a
+  // fraction of atr20 when 15m bars are unavailable. Added 2026-08-27.
+  atr15?: number;
   atrPct: number;
   rsVsBenchmark: number;
   vwap: number;

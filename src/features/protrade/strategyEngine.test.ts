@@ -147,14 +147,18 @@ describe('ProTrade strategy engine', () => {
 });
 
 describe('intraday take-profit caps', () => {
-  it('pulls T2 to the ATR/percent cap and still produces a tradeable plan', () => {
-    // atr20 0.6 on an ~11 price: 0.8xATR = 0.48, 3% = 0.33 -> 3% cap binds
+  it('pulls T2 toward the intraday cap but never below the MIN_RR floor', () => {
+    // atr20 0.6 on an ~11 price: 0.8xATR = 0.48, 3% = 0.33. The ATR/pct caps pull a
+    // far 2R target closer, BUT capDist is floored at MIN_RR × risk (fix 2026-08-25)
+    // so wide-stop trades keep a tradeable R:R instead of a target inside the stop.
     const result = evaluateOrbRetest(baseInput({ price: 10.6 }));
     const plan = result.tradePlan ?? result.provisionalPlan;
     expect(plan).not.toBeNull();
-    const dist = Math.abs(plan!.target2 - plan!.entry);
-    expect(dist).toBeLessThanOrEqual(plan!.entry * 0.03 + 0.01);
-    expect(plan!.rr).toBeGreaterThan(0);   // must stay tradeable after capping
+    const risk = Math.abs(plan!.entry - plan!.stop);
+    const t2Dist = Math.abs(plan!.target2 - plan!.entry);
+    // T2 sits at max(reachable cap, MIN_RR × risk) — so R:R is never below MIN_RR (1.5)
+    expect(t2Dist / risk).toBeGreaterThanOrEqual(1.5 - 0.01);
+    expect(plan!.rr).toBeGreaterThanOrEqual(1.5 - 0.01);
   });
 
   it('keeps T1 inside T2 so the trail ratchet cannot sit beyond the exit', () => {

@@ -113,6 +113,7 @@ export interface StrategyInput {
   rvol: number;
   gapPct: number;
   atr20: number;
+  atr15?: number;
   atrPct: number;
   rsVsBenchmark: number;
   vwap: number;

@@ -134,6 +134,7 @@ export interface ProTradeRow {
   qualified: boolean;
   reason: string;
   atr20: number;
+  atr15: number;
   atrPct: number;
   dollarVolM: number;
   mktCapB: number | null;
@@ -290,6 +291,23 @@ function computeAtr20(daily: Candle[]): number {
   return count > 0 ? total / count : 0;
 }
 
+// True-range ATR over the last `period` bars of any timeframe. Used for the 15m
+// ATR that anchors intraday stops (see StrategyInput.atr15). Returns 0 if there
+// aren't enough bars so the caller can fall back to a daily-ATR fraction.
+function computeAtr(bars: Candle[], period = 14): number {
+  if (bars.length < 2) return 0;
+  const recent = bars.slice(-(period + 1));
+  let total = 0;
+  let count = 0;
+  for (let i = 1; i < recent.length; i++) {
+    const c = recent[i];
+    const p = recent[i - 1];
+    total += Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close));
+    count++;
+  }
+  return count > 0 ? total / count : 0;
+}
+
 function computePrevDay(daily: Candle[]): { high: number; low: number; close: number } {
   const bar = daily.length >= 2 ? daily[daily.length - 2] : null;
   return { high: bar?.high ?? 0, low: bar?.low ?? 0, close: bar?.close ?? 0 };
@@ -424,6 +442,11 @@ function buildRowFromAlpaca(
 
   const price = meta.price;
   const atr20 = computeAtr20(daily);
+  // 15m ATR for intraday stop anchoring. When 15m bars are too shallow, fall back
+  // to ~30% of daily ATR (empirically ≈ a 15m ATR on liquid names) so the stop is
+  // still intraday-scaled rather than reverting to the full daily-ATR width.
+  const atr15raw = computeAtr(fifteen, 14);
+  const atr15 = atr15raw > 0 ? atr15raw : atr20 * 0.3;
   const atrPct = price > 0 ? (atr20 / price) * 100 : 0;
   const dollarVolM = (price * meta.todayVolume) / 1_000_000;
 
@@ -494,6 +517,7 @@ function buildRowFromAlpaca(
     rvol: meta.rvolEst,
     gapPct: meta.gapPct,
     atr20: round(atr20, 3),
+    atr15: round(atr15, 3),
     atrPct: round(atrPct, 2),
     rsVsBenchmark,
     vwap,
@@ -526,6 +550,7 @@ function buildRowFromAlpaca(
     qualified: basePass && scored.score >= 65 && meta.rvolEst >= 0.8 && vwapAligned && trendAligned && trend15mAligned,
     reason: `${baseReason} | ${scored.reason}`,
     atr20: round(atr20, 3),
+    atr15: round(atr15, 3),
     atrPct: round(atrPct, 2),
     dollarVolM: round(dollarVolM, 1),
     mktCapB: null,
