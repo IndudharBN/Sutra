@@ -77,12 +77,36 @@ app.use((_req, res, next) => {
 });
 
 // GET /api/health
+// ok reflects whether the daemon is actually DOING ITS JOB, not just whether the
+// HTTP server answers. A daemon whose fetch agent has wedged (transient network
+// blip leaves the keep-alive pool stuck) keeps serving this endpoint while every
+// scan times out — a zombie that the old `ok:true` masked, so the watchdog never
+// killed it (2026-09-01 incident). Now: during market hours, if the last scan is
+// older than STALE_SCAN_MS the daemon reports ok:false, and the external watchdog
+// (which polls resp.ok) force-restarts it to get a fresh fetch agent.
+const STALE_SCAN_MS = 3 * 60_000; // 3 min — scans run every ~30-60s, so this is ~3-6 missed cycles
+function marketHoursET(): boolean {
+  const now = new Date();
+  const h = parseInt(now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
+  const m = parseInt(now.toLocaleString('en-US', { timeZone: 'America/New_York', minute: '2-digit' }), 10);
+  const mins = h * 60 + m;
+  const day = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' })).getDay();
+  const weekday = day >= 1 && day <= 5;
+  return weekday && mins >= 9 * 60 + 30 && mins < 16 * 60;
+}
 app.get('/api/health', (_req, res) => {
   const snapshot = getCurrentSnapshot();
+  const lastScanAt = snapshot?.fetchedAt ?? null;
+  const scanAgeMs = lastScanAt ? Date.now() - new Date(lastScanAt).getTime() : Infinity;
+  // Fresh in the first 90s after boot (no scan completed yet is not a wedge).
+  const booting = process.uptime() < 90;
+  const scanStale = marketHoursET() && !booting && scanAgeMs > STALE_SCAN_MS;
   res.json({
-    ok: true,
+    ok: !scanStale,
+    scanStale,
+    scanAgeSec: Number.isFinite(scanAgeMs) ? Math.round(scanAgeMs / 1000) : null,
     uptime: process.uptime(),
-    lastScanAt: snapshot?.fetchedAt ?? null,
+    lastScanAt,
     wsClients: wss ? wss.clients.size : 0,
   });
 });
