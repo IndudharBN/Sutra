@@ -31969,9 +31969,10 @@
     "entry": 0,
     "exitPrice": 0,
     "pnlPercent": 0,
-    "openedAt": "2026-09-10T19:56:25.210Z",
+    "openedAt": "2026-09-10T20:14:49.833Z",
+    "phantom": false,
     "pnl": -3493.22,
-    "closedAt": "2026-09-10T19:56:25.213Z",
-    "reason": "Reconciles ledger to Alpaca equity (-10083.11) — absorbs cross-day/multi-episode residual the per-symbol matcher can't attribute."
+    "closedAt": "2026-09-10T20:14:57.927Z",
+    "reason": "Reconciles ledger to Alpaca equity (-10083.11) — absorbs cross-day/multi-episode residual the per-symbol matcher can't attribute. Set absolutely (not incrementally)."
   }
 ]

@@ -112,6 +112,10 @@ for (const day of days) {
 
   let ledgerDay = 0, alpacaDay = 0;
   for (const t of dayTrades) {
+    // The equity anchor is a synthetic accounting row, not a trade — it has no
+    // Alpaca fill by design, so the phantom pass must NEVER flag it (doing so
+    // dropped it from the total and corrupted parity, 2026-09-10).
+    if (t.id === '__ALPACA_ANCHOR__') continue;
     ledgerDay += Number(t.pnl || 0);
     const r = real[t.symbol];
     if (!r || r.matched === 0) {
@@ -185,14 +189,16 @@ try {
     anchorNote = `\nEquity anchor SKIPPED — ${Array.isArray(positions) ? positions.length : '?'} open position(s); equity includes unrealized marks. Re-run when flat.`;
   } else {
     const alpacaRealized = Number((Number(acct.equity) - STARTING_EQUITY).toFixed(2));
-    const nonPhantom = trades.filter((t) => !t.phantom && (t.pnl != null || t.status === 'Closed'));
-    const ledgerTotal = Number(nonPhantom.reduce((s, t) => s + Number(t.pnl || 0), 0).toFixed(2));
+    // Ledger total EXCLUDING the anchor — the real trades only. The anchor is then
+    // set ABSOLUTELY so the grand total equals Alpaca. Bug fixed 2026-09-10: the old
+    // code computed residual against a total that (once the anchor was mis-flagged
+    // phantom) excluded the anchor, then ADDED residual to the prior anchor — so the
+    // anchor compounded (-3,493 → -13,972 → …). Absolute set can never compound.
     let anchor = trades.find((t) => t.id === '__ALPACA_ANCHOR__');
-    const priorAnchor = anchor ? Number(anchor.pnl || 0) : 0;
-    // ledgerTotal already includes any prior anchor; the residual is what's still off.
-    const residual = Number((alpacaRealized - ledgerTotal).toFixed(2));
-    const newAnchorPnl = Number((priorAnchor + residual).toFixed(2));
-    if (Math.abs(residual) > 0.01) {
+    const realTrades = trades.filter((t) => !t.phantom && t.id !== '__ALPACA_ANCHOR__' && (t.pnl != null || t.status === 'Closed'));
+    const ledgerExAnchor = Number(realTrades.reduce((s, t) => s + Number(t.pnl || 0), 0).toFixed(2));
+    const anchorNeeded = Number((alpacaRealized - ledgerExAnchor).toFixed(2));
+    if (Math.abs(anchorNeeded) > 0.01) {
       if (!anchor) {
         anchor = {
           id: '__ALPACA_ANCHOR__', symbol: 'ANCHOR', company: 'Alpaca equity reconciliation',
@@ -203,10 +209,15 @@ try {
         };
         trades.push(anchor);
       }
-      anchor.pnl = newAnchorPnl;
+      anchor.phantom = false; // never phantom — it must count toward the total
+      anchor.pnl = anchorNeeded;
       anchor.closedAt = new Date().toISOString();
-      anchor.reason = `Reconciles ledger to Alpaca equity (${alpacaRealized}) — absorbs cross-day/multi-episode residual the per-symbol matcher can't attribute.`;
-      anchorNote = `\nEquity anchor: ledger ${ledgerTotal} -> Alpaca ${alpacaRealized} (residual ${residual >= 0 ? '+' : ''}${residual}); anchor row now ${newAnchorPnl}.`;
+      anchor.reason = `Reconciles ledger to Alpaca equity (${alpacaRealized}) — absorbs cross-day/multi-episode residual the per-symbol matcher can't attribute. Set absolutely (not incrementally).`;
+      anchorNote = `\nEquity anchor: real trades ${ledgerExAnchor} + anchor ${anchorNeeded} = Alpaca ${alpacaRealized}.`;
+    } else if (anchor) {
+      anchor.phantom = false;
+      anchor.pnl = 0;
+      anchorNote = `\nEquity anchor: real trades already match Alpaca (${alpacaRealized}); anchor set to 0.`;
     } else {
       anchorNote = `\nEquity anchor: ledger already matches Alpaca (${alpacaRealized}) within $0.01.`;
     }
