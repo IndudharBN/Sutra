@@ -1,4 +1,4 @@
-import { fetchBars, fetchYahooDailyBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNewsFlags, fetchSectorTrends, fetchSpyDailyBars, buildDynamicUniverse, clearUniverseCache, getUniverseBuiltAt, SYMBOL_SECTOR, UNIVERSE_TARGET, type CatalystTier } from '../alpacaClient';
+import { fetchBars, fetchYahooDailyBars, fetchUniverseMeta, buildCandleSet, selectTopSymbols, fetchNewsFlags, fetchNewsContext, type NewsContext, fetchSectorTrends, fetchSpyDailyBars, buildDynamicUniverse, clearUniverseCache, getUniverseBuiltAt, SYMBOL_SECTOR, UNIVERSE_TARGET, type CatalystTier } from '../alpacaClient';
 import { classifyMarketRegime } from './marketRegimeLogic';
 import type { MarketRegime } from './marketRegimeTypes';
 import type { SymbolMeta } from '../alpacaClient';
@@ -140,6 +140,8 @@ export interface ProTradeRow {
   mktCapB: number | null;
   sharesOutstanding: number;
   catalyst: CatalystTier;
+  newsFreshMin: number | null;   // minutes since the most recent relevant headline (null = none today)
+  newsHeadline: string | null;   // that headline, for display
   beta: number;
   betaMax: number;
   rsVsBenchmark: number;
@@ -420,7 +422,7 @@ function buildRowFromAlpaca(
   meta: SymbolMeta,
   candleSet: CandleSet,
   providerStatus: MarketDataProviderStatus,
-  catalyst: CatalystTier,
+  news: NewsContext,
   sectorTrends: Record<string, 'UP' | 'DOWN' | 'FLAT'>,
   earningsDays: number | null,
   spyChangePct: number,
@@ -433,6 +435,12 @@ function buildRowFromAlpaca(
   qqqTrend15m?: 'UP' | 'DOWN' | 'FLAT',
   qqqDailyBars?: Candle[],
 ): ProTradeRow {
+  // Catalyst tier drives scoring (as before). freshMin/headline are the intraday
+  // freshness signal: a hard catalyst < ~90 min old is a LIVE mover; the same tier
+  // hours old is stale context. Downstream/UI can gate or annotate on freshMin.
+  const catalyst = news.tier;
+  const newsFreshMin = news.freshMin;
+  const newsHeadline = news.headline;
   const allOne = (candleSet['1m'] || []);
   const one = allOne.slice(-120);
   const five = (candleSet['5m'] || []).slice(-120);
@@ -556,6 +564,8 @@ function buildRowFromAlpaca(
     mktCapB: null,
     sharesOutstanding: getFloatFromCache(symbol),
     catalyst,
+    newsFreshMin,
+    newsHeadline,
     beta: spyDailyBars?.length ? computeBeta(daily, spyDailyBars) : 1.0,
     betaMax: 2.8,
     rsVsBenchmark: round(rsVsBenchmark, 3),
@@ -599,14 +609,14 @@ export { clearUniverseCache };
 export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRow[]> {
   if (!symbols.length) return [];
   const metas = await fetchUniverseMeta(symbols);
-  const [bars1m, bars5m, bars15m, bars1h, bars1d, sectorTrends, newsFlags, spy5mBars, spy15mBars, spyH1Bars, spyRegimeData, qqq5mBars, qqq15mBars, qqqH1Bars] = await Promise.all([
+  const [bars1m, bars5m, bars15m, bars1h, bars1d, sectorTrends, newsCtx, spy5mBars, spy15mBars, spyH1Bars, spyRegimeData, qqq5mBars, qqq15mBars, qqqH1Bars] = await Promise.all([
     fetchBars(symbols, '1m'),
     fetchBars(symbols, '5m'),
     fetchBars(symbols, '15m'),
     fetchBars(symbols, '1h'),
     fetchYahooDailyBars([...symbols, 'QQQ']),
     fetchSectorTrends(),
-    fetchNewsFlags(symbols),
+    fetchNewsContext(symbols),
     fetchBars(['SPY'], '5m'),
     fetchBars(['SPY'], '15m'),
     fetchBars(['SPY'], '1h'),
@@ -639,7 +649,7 @@ export async function fetchHotSetSnapshot(symbols: string[]): Promise<ProTradeRo
     if (!meta) return [];
     const candleSet = buildCandleSet(sym, { '1m': bars1m, '5m': bars5m, '15m': bars15m, '1h': bars1h, '1d': bars1d });
     const earningsDays = getEarningsDays(sym);
-    return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m, spyRegimeData.spyBars, qqqChangePct, qqqTrend5m, qqqTrend15m, qqqDailyBars)];
+    return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsCtx[sym] ?? { tier: 'none', freshMin: null, headline: null }, sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m, spyRegimeData.spyBars, qqqChangePct, qqqTrend5m, qqqTrend15m, qqqDailyBars)];
   });
 }
 
@@ -664,13 +674,13 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
   // Guarantee pinned watchlist symbols are always scanned regardless of score rank
   const top = [...new Set([...scored, ...pinnedSymbols])];
 
-  const [bars1m, bars5m, bars15m, bars1h, bars1d, newsFlags, sectorTrends, spyBars, spyRegimeData, spy5mBars, spy15mBars, qqqBars, qqq5mBars, qqq15mBars] = await Promise.all([
+  const [bars1m, bars5m, bars15m, bars1h, bars1d, newsCtx, sectorTrends, spyBars, spyRegimeData, spy5mBars, spy15mBars, qqqBars, qqq5mBars, qqq15mBars] = await Promise.all([
     fetchBars(top, '1m'),
     fetchBars(top, '5m'),
     fetchBars(top, '15m'),
     fetchBars(top, '1h'),
     fetchYahooDailyBars([...top, 'QQQ']),
-    fetchNewsFlags(top),
+    fetchNewsContext(top),
     fetchSectorTrends(),
     fetchBars(['SPY'], '1h'),
     fetchSpyDailyBars(),
@@ -721,7 +731,7 @@ export async function fetchProTradeScannerSnapshot(pinnedSymbols: string[] = [])
       if (!meta) return [];
       const candleSet = buildCandleSet(sym, { '1m': bars1m, '5m': bars5m, '15m': bars15m, '1h': bars1h, '1d': bars1d });
       const earningsDays = getEarningsDays(sym);
-      return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsFlags[sym] ?? 'none', sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m, spyRegimeData.spyBars, qqqChangePct, qqqTrend5m, qqqTrend15m, qqqDailyBars)];
+      return [buildRowFromAlpaca(sym, meta, candleSet, providerStatus, newsCtx[sym] ?? { tier: 'none', freshMin: null, headline: null }, sectorTrends, earningsDays, spyChangePct, vixLevel, spyTrend5m, spyTrend15m, spyRegimeData.spyBars, qqqChangePct, qqqTrend5m, qqqTrend15m, qqqDailyBars)];
     })
     .sort((a, b) => b.confidence - a.confidence || b.score - a.score);
 

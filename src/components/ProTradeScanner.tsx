@@ -516,7 +516,13 @@ function DetailPanel({ row }: { row: ProTradeRow }) {
               ['PM Low', row.premarketLow > 0 ? fmtMoney(row.premarketLow) : '--'],
               ['PM Vol', row.premarketVolume > 0 ? `${(row.premarketVolume / 1000).toFixed(1)}K` : '--'],
               ['Float', row.sharesOutstanding > 0 ? `${(row.sharesOutstanding / 1e6).toFixed(1)}M` : '--'],
-              ['Catalyst', row.catalyst === 'hard' ? '🔥 Hard' : row.catalyst === 'soft' ? 'Soft' : '--'],
+              ['Catalyst', (() => {
+                const base = row.catalyst === 'hard' ? '🔥 Hard' : row.catalyst === 'soft' ? 'Soft' : '--';
+                if (row.catalyst === 'none' || row.newsFreshMin == null) return base;
+                // Freshness: < 90 min = LIVE (price still reacting); older = stale context.
+                const fresh = row.newsFreshMin <= 90;
+                return `${base} · ${fresh ? '🟢' : '⚪'}${row.newsFreshMin}m ago`;
+              })()],
               ['Earnings', row.earningsChecked ? row.earningsStatus : 'Not checked'],
             ].map(([label, value]) => (
               <div key={label} className="rounded-lg border border-white/10 bg-white/5 p-2">

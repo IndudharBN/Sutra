@@ -142,6 +142,10 @@ export interface ProTradeRow {
   mktCapB: number | null;
   sharesOutstanding: number;
   catalyst: CatalystTier;
+  // News freshness (populated by the daemon scanner; optional in the UI-side copy).
+  // freshMin = minutes since the most recent relevant headline; null = none today.
+  newsFreshMin?: number | null;
+  newsHeadline?: string | null;
   beta: number;
   betaMax: number;
   rsVsBenchmark: number;

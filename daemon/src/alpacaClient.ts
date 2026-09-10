@@ -566,28 +566,59 @@ function classifyCatalyst(headline: string): CatalystTier {
   return 'none';
 }
 
-export async function fetchNewsFlags(symbols: string[]): Promise<Record<string, CatalystTier>> {
+// Per-symbol news context. `tier` = catalyst strength (hard/soft/none); `freshMin` =
+// minutes since the most recent RELEVANT (hard/soft) headline, or null if none today
+// — this is the intraday signal: news from 20 min ago is actionable, news from this
+// morning is stale. `headline` = that most-recent relevant headline for display.
+export interface NewsContext {
+  tier: CatalystTier;
+  freshMin: number | null;
+  headline: string | null;
+}
+
+// Fetch news for the universe once and derive both the catalyst tier AND freshness.
+// The old fetchNewsFlags flagged any headline since 00:00 ET as a "catalyst" all day,
+// with no recency — so a 9:30am upgrade still scored +12 at 3pm. This adds freshMin
+// so downstream can distinguish a LIVE catalyst (price still reacting) from stale news.
+export async function fetchNewsContext(symbols: string[]): Promise<Record<string, NewsContext>> {
+  const empty = () => { const r: Record<string, NewsContext> = {}; for (const s of symbols) r[s] = { tier: 'none', freshMin: null, headline: null }; return r; };
   if (!symbols.length) return {};
-  const cacheKey = `news2:${symbols.slice().sort().join(',')}`;
-  const hit = cacheGet<Record<string, CatalystTier>>(cacheKey);
+  const cacheKey = `newsctx:${symbols.slice().sort().join(',')}`;
+  const hit = cacheGet<Record<string, NewsContext>>(cacheKey);
   if (hit) return hit;
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const data = await alpacaGet<{ news: Array<{ headline: string; symbols: string[] }> }>('/v1beta1/news', {
+  const data = await alpacaGet<{ news: Array<{ headline: string; symbols: string[]; created_at: string }> }>('/v1beta1/news', {
     symbols: symbols.join(','),
     limit: '50',
     start: `${todayET}T00:00:00Z`,
-  }).catch(() => ({ news: [] as Array<{ headline: string; symbols: string[] }> }));
-  const result: Record<string, CatalystTier> = {};
-  for (const sym of symbols) result[sym] = 'none';
+    sort: 'desc', // newest first, so the first relevant hit per symbol IS the freshest
+  }).catch(() => ({ news: [] as Array<{ headline: string; symbols: string[]; created_at: string }> }));
+  const result = empty();
+  const now = Date.now();
   for (const article of data.news) {
     const tier = classifyCatalyst(article.headline ?? '');
+    if (tier === 'none') continue;
+    const ageMin = article.created_at ? Math.max(0, Math.round((now - new Date(article.created_at).getTime()) / 60_000)) : null;
     for (const sym of article.symbols) {
-      if (tier === 'hard') result[sym] = 'hard';
-      else if (tier === 'soft' && result[sym] === 'none') result[sym] = 'soft';
+      const cur = result[sym];
+      if (!cur) continue;
+      // hard beats soft; among same tier, keep the freshest (news is desc, so first wins).
+      const upgrade = (tier === 'hard' && cur.tier !== 'hard') || (tier === 'soft' && cur.tier === 'none');
+      if (upgrade || cur.freshMin === null) {
+        result[sym] = { tier: tier === 'hard' ? 'hard' : (cur.tier === 'hard' ? 'hard' : 'soft'), freshMin: ageMin, headline: article.headline ?? null };
+      }
     }
   }
-  cacheSet(cacheKey, result, 300_000);
+  cacheSet(cacheKey, result, 180_000); // 3-min cache — news moves faster than the 5-min old one
   return result;
+}
+
+// Back-compat: the tier-only view many call sites still use.
+export async function fetchNewsFlags(symbols: string[]): Promise<Record<string, CatalystTier>> {
+  const ctx = await fetchNewsContext(symbols);
+  const out: Record<string, CatalystTier> = {};
+  for (const s of symbols) out[s] = ctx[s]?.tier ?? 'none';
+  return out;
 }
 
 const SECTOR_ETFS = ['XLF', 'XLK', 'XLY', 'XLE', 'XLV', 'XLI', 'XLB', 'XLP', 'XLU', 'XLRE', 'XLC'];
