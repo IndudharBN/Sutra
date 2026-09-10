@@ -1,4 +1,5 @@
 import { runFullScan, runHotSetScan, getCurrentSnapshot } from './scanLoop';
+import { runReconcile } from './reconcileRunner';
 import { clearUniverseCache } from './engine/proTradeScannerApi';
 import { isUniverseFallback, clearUniverseCache as clearUniverseCacheClient, fetchSnapshots } from './alpacaClient';
 import { alpacaBarStream } from './alpacaBarStream';
@@ -420,6 +421,13 @@ async function eodClose(): Promise<void> {
 
   state.eodFiredDate = today;
   saveState();
+
+  // Account is now FLAT (verified above). Fire the full ledger↔Alpaca reconcile —
+  // this is the run where the equity anchor can lock EXACT parity (it skips while
+  // positions are open). Delayed 8s so the just-submitted EOD close fills settle
+  // into Alpaca's activities feed before the reconcile reads them. This is the
+  // primary parity guarantee; the 16:05 watchdog + startup runs are backups.
+  setTimeout(() => runReconcile('eod-close'), 8_000);
 }
 
 let schedulerStarted = false;

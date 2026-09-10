@@ -226,3 +226,32 @@ if (APPLY) {
 } else {
   console.log('\nDry-run only. Re-run with --apply to write.');
 }
+
+// ── Alpaca cross-check: prove parity after the run ──────────────────────────
+// Re-read the ledger total and Alpaca account, and print a clear PARITY verdict.
+// When flat this should be exact (anchor active); with open positions it reports
+// the realized match + the unrealized marks so the residual is explained, not a
+// silent gap. This line is what you (and logs/reconcile.log) read to confirm.
+try {
+  const acct = await (await fetch(`${BASE}/v2/account`, { headers: H })).json();
+  const positions = await (await fetch(`${BASE}/v2/positions`, { headers: H })).json();
+  const openN = Array.isArray(positions) ? positions.length : 0;
+  const unreal = (Array.isArray(positions) ? positions : []).reduce((s, p) => s + Number(p.unrealized_pl || 0), 0);
+  const equityPnl = Number((Number(acct.equity) - STARTING_EQUITY).toFixed(2));
+  const alpacaRealized = Number((equityPnl - unreal).toFixed(2));
+  const ledgerNow = Number(trades.filter((t) => !t.phantom && (t.pnl != null || t.status === 'Closed'))
+    .reduce((s, t) => s + Number(t.pnl || 0), 0).toFixed(2));
+  const gap = Number((alpacaRealized - ledgerNow).toFixed(2));
+  console.log('\n── ALPACA CROSS-CHECK ──');
+  console.log(`  Alpaca equity P&L: ${equityPnl}  (realized ${alpacaRealized} + unrealized ${unreal.toFixed(2)} on ${openN} open)`);
+  console.log(`  Ledger total:      ${ledgerNow}`);
+  if (Math.abs(gap) <= 0.5) {
+    console.log(`  ✓ PARITY — ledger matches Alpaca realized (gap ${gap}).`);
+  } else if (openN > 0) {
+    console.log(`  ~ ${openN} position(s) open — realized gap ${gap} will close on the flat EOD run (anchor).`);
+  } else {
+    console.log(`  ✗ GAP ${gap} while FLAT — anchor should have closed this; investigate.`);
+  }
+} catch (err) {
+  console.log(`\n── ALPACA CROSS-CHECK skipped — ${err.message}`);
+}

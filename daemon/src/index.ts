@@ -4,6 +4,7 @@ import { loadState, saveState, getState } from './stateStore';
 import { startScheduler } from './scheduler';
 import { startHttpServer } from './httpServer';
 import { startWatchdog } from './watchdog';
+import { runReconcile } from './reconcileRunner';
 
 // Safety net: a transient network timeout (AbortSignal.timeout) or any stray async
 // rejection must never hard-kill the trading daemon. Node 24 crashes the process on
@@ -47,6 +48,11 @@ async function main() {
   startHttpServer();
   startScheduler();
   startWatchdog();
+
+  // Self-healing parity: reconcile the ledger to Alpaca fills on every boot (catch-up
+  // for any day the 16:05 watchdog reconcile missed). Delayed 20s so it doesn't
+  // contend with the startup scan's data fetches. Detached + logged; never blocks.
+  setTimeout(() => runReconcile('startup'), 20_000);
 }
 
 main().catch((err) => {
