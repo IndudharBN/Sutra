@@ -135,20 +135,31 @@ function planFromLevelsT1T2(
 // For BULL: picks the lower of (structural stop, noise floor) — more room wins.
 // For BEAR: picks the higher of (structural stop, noise floor) — more room wins.
 // atrIntraday is the 15m ATR (input.atr15), NOT daily atr20 — stops are anchored to
-// the timeframe actually traded. A daily-ATR noise floor put the stop a full-day move
-// away (~3.8% of price median), so intraday winners were flattened at EOD before
-// reaching target (realized payoff 0.89). Re-anchored to 15m 2026-08-27.
+// the timeframe actually traded. A daily-ATR stop sat a full-day move away (~3.8% of
+// price median), so intraday winners were flattened at EOD before reaching target
+// (realized payoff 0.89). Re-anchored to 15m 2026-08-27.
 //
-// CALIBRATION: a single 15m bar's true range is ~1/10th of daily ATR, so 15mATR × the
-// old 0.75 noiseFloor would give a ~0.3% stop — far too tight, wicked out on noise.
-// INTRADAY_ATR_MULT scales it back to a sane intraday width: net ≈ 15mATR × 3 at base
-// VIX → median stop ~1.2% of price (p25 0.95%, p75 1.79%), about a third of the old
-// daily width. Tight enough to ~triple realized R:R, wide enough to survive 5m noise.
+// BUG FIXED 2026-09-10: this function used Math.min/Math.max as a FLOOR (widen a
+// too-tight structural stop). That logic was written for DAILY ATR (wide). With a
+// NARROW 15m ATR it did the opposite of the intent: min(wideStructural, narrowFloor)
+// on a BULL kept the WIDER structural stop and discarded the tight 15m level, so the
+// median stop stayed 4.5% and realized payoff never moved (1.00→1.03). Now it CAPS:
+// the 15m-ATR distance is a CEILING on stop width. If the structural stop is wider
+// than the cap, pull it IN to the cap (tighter wins); if it is already tighter,
+// keep it. This is what actually anchors the stop to the intraday timeframe.
+//
+// CALIBRATION: a single 15m bar's TR is ~1/10th of daily ATR, so 15mATR × the old
+// 0.75 noiseFloor = ~0.3% stop — too tight, wicked out. INTRADAY_ATR_MULT scales the
+// cap to a sane width: net ≈ 15mATR × 3 at base VIX → cap ~1.2% of price (p25 0.95%,
+// p75 1.79%). Tight enough to ~triple realized R:R, wide enough to survive 5m noise.
 const INTRADAY_ATR_MULT = 4;
-function noiseFlooredStop(direction: 'BULL' | 'BEAR', entry: number, rawStop: number, atrIntraday: number, vixLevel?: number | null): number {
+function intradayCappedStop(direction: 'BULL' | 'BEAR', entry: number, rawStop: number, atrIntraday: number, vixLevel?: number | null): number {
   const nf = noiseFloor(vixLevel) * INTRADAY_ATR_MULT;
-  const floor = direction === 'BULL' ? entry - atrIntraday * nf : entry + atrIntraday * nf;
-  return direction === 'BULL' ? Math.min(rawStop, floor) : Math.max(rawStop, floor);
+  const capDist = atrIntraday * nf;
+  if (!(capDist > 0)) return rawStop; // no valid 15m ATR — fall back to structural stop
+  const cap = direction === 'BULL' ? entry - capDist : entry + capDist;
+  // Tighter of the two wins: for BULL the higher stop price is tighter (closer to entry).
+  return direction === 'BULL' ? Math.max(rawStop, cap) : Math.min(rawStop, cap);
 }
 
 // Hard minimum stop distance — prevents $0.01-$0.07 stops when ATR is near-zero
@@ -507,7 +518,7 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const rawStop = dir === 'BULL'
     ? (range?.high ?? entry) - input.atr20 * 1.0
     : (range?.low ?? entry) + input.atr20 * 1.0;
-  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
+  const stop = enforceMinStop(dir, entry, intradayCappedStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
   // Hard gate: no S1 entries before 10:15 AM ET — ORB structure unreliable, H1 bar not closed,
   // institutional opening flow not absorbed. earlySession (9:45–10:15) still requires higher RVOL.
   const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
@@ -626,7 +637,7 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   const rawStop = dir === 'BULL'
     ? input.vwap - input.atr20 * STOP_BUFFER_ATR
     : input.vwap + input.atr20 * STOP_BUFFER_ATR;
-  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
+  const stop = enforceMinStop(dir, entry, intradayCappedStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
@@ -689,7 +700,7 @@ export function evaluateRsContinuation(input: StrategyInput): StrategySignal {
     : input;
   const entry = input.price;
   const rawStop = dir === 'BULL' ? microLow - input.atr20 * STOP_BUFFER_ATR : microHigh + input.atr20 * STOP_BUFFER_ATR;
-  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
+  const stop = enforceMinStop(dir, entry, intradayCappedStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
   // Guard: stop must be on the correct side of entry. Bad price data (wrong API tick) can invert this.
   const stopSide = dir === 'BULL' ? stop < entry : stop > entry;
   const risk = Math.abs(entry - stop);
@@ -788,7 +799,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     : false;
   const sweepRef = dir === 'BULL' ? (sweepCandle ? sweepCandle.low : entry) : (sweepCandle ? sweepCandle.high : entry);
   const rawStop = dir === 'BULL' ? sweepRef - input.atr20 * STOP_BUFFER_ATR : sweepRef + input.atr20 * STOP_BUFFER_ATR;
-  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
+  const stop = enforceMinStop(dir, entry, intradayCappedStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
   const risk = Math.abs(entry - stop);
   const orOpposite = range ? (dir === 'BULL' ? range.high : range.low) : null;
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
@@ -926,7 +937,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const STOP_CAP_ATR_S5 = 1.5;
   const cappedStopDist = Math.min(Math.abs(entry - rawStop), input.atr20 * STOP_CAP_ATR_S5);
   const cappedStop = dir === 'BULL' ? entry - cappedStopDist : entry + cappedStopDist;
-  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, cappedStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
+  const stop = enforceMinStop(dir, entry, intradayCappedStop(dir, entry, cappedStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
@@ -1030,7 +1041,7 @@ export function evaluateMssBreakout(input: StrategyInput): StrategySignal {
   const swingStop = dir === 'BULL'
     ? Math.min(...five.slice(-5).map((c) => c.low)) - input.atr20 * STOP_BUFFER_ATR
     : Math.max(...five.slice(-5).map((c) => c.high)) + input.atr20 * STOP_BUFFER_ATR;
-  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, swingStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
+  const stop = enforceMinStop(dir, entry, intradayCappedStop(dir, entry, swingStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
@@ -1095,7 +1106,7 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
     trendAligned: dir === 'BULL' ? input.trend5m === 'UP' : input.trend5m === 'DOWN',
   };
   const rawStop = dir === 'BULL' ? bar.low : bar.high;
-  const stop = enforceMinStop(dir, price, noiseFlooredStop(dir, price, rawStop, (atr15 ?? input.atr20 * 0.3), input.vixLevel), (atr15 ?? input.atr20 * 0.3));
+  const stop = enforceMinStop(dir, price, intradayCappedStop(dir, price, rawStop, (atr15 ?? input.atr20 * 0.3), input.vixLevel), (atr15 ?? input.atr20 * 0.3));
   const risk = Math.abs(price - stop);
   const t1 = dir === 'BULL' ? price + risk * T1_RR : price - risk * T1_RR;
   const t2 = dir === 'BULL' ? price + risk * PREFERRED_RR : price - risk * PREFERRED_RR;
@@ -1166,7 +1177,7 @@ export function evaluateEma20Bounce(input: StrategyInput): StrategySignal {
   const swingStop = dir === 'BULL'
     ? Math.min(...five.slice(-4).map((c) => c.low)) - input.atr20 * STOP_BUFFER_ATR
     : Math.max(...five.slice(-4).map((c) => c.high)) + input.atr20 * STOP_BUFFER_ATR;
-  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, swingStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
+  const stop = enforceMinStop(dir, entry, intradayCappedStop(dir, entry, swingStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
@@ -1255,7 +1266,7 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
   const rawStop = dir === 'BULL'
     ? flagLow - input.atr20 * STOP_BUFFER_ATR
     : flagHigh + input.atr20 * STOP_BUFFER_ATR;
-  const stop = enforceMinStop(dir, entry, noiseFlooredStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
+  const stop = enforceMinStop(dir, entry, intradayCappedStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
@@ -1341,7 +1352,7 @@ export function evaluateOrb15mRetest(input: StrategyInput): StrategySignal {
   const rawStop = ob && atOb
     ? (dir === 'BULL' ? ob.low - input.atr20 * STOP_BUFFER_15M : ob.high + input.atr20 * STOP_BUFFER_15M)
     : entry;
-  const stop = noiseFlooredStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel);
+  const stop = intradayCappedStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
@@ -1431,7 +1442,7 @@ export function evaluateVwap15mPullback(input: StrategyInput): StrategySignal {
   const entry = input.price;
   const swing = dir === 'BULL' ? Math.min(...recent4.map(c => c.low)) : Math.max(...recent4.map(c => c.high));
   const rawStop = dir === 'BULL' ? swing - input.atr20 * STOP_BUFFER_15M : swing + input.atr20 * STOP_BUFFER_15M;
-  const stop = noiseFlooredStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel);
+  const stop = intradayCappedStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
@@ -1503,7 +1514,7 @@ export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
   const rawStop = dir === 'BULL'
     ? ema20Now - input.atr20 * STOP_BUFFER_15M
     : ema20Now + input.atr20 * STOP_BUFFER_15M;
-  const stop = noiseFlooredStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel);
+  const stop = intradayCappedStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = dir === 'BULL' ? entry + risk * T1_RR : entry - risk * T1_RR;
   const t2 = structuralT2(selfInput, entry, risk, t1);
@@ -1586,7 +1597,7 @@ export function evaluateRangeBoundReversion(input: StrategyInput): StrategySigna
   const rawStop = dir === 'BULL'
     ? rangeLow - input.atr20 * 0.3
     : rangeHigh + input.atr20 * 0.3;
-  const stop = noiseFlooredStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel);
+  const stop = intradayCappedStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel);
   const risk = Math.abs(entry - stop);
   const t1 = input.vwap; // scale out 50% at VWAP (mean reversion achieved)
   const t2 = dir === 'BULL' ? entry + risk * 2.0 : entry - risk * 2.0; // hold 50% for potential trend continuation
@@ -1714,7 +1725,7 @@ export function evaluateSniper1m(input: StrategyInput): StrategySignal {
   const rawStop = ob1m && atOb1m
     ? (dir === 'BULL' ? ob1m.low - input.atr20 * STOP_BUFFER_1M : ob1m.high + input.atr20 * STOP_BUFFER_1M)
     : entry;
-  // Sniper-scale stop floor — deliberately NOT the book-wide noiseFlooredStop. That
+  // Sniper-scale stop floor — deliberately NOT the book-wide intradayCappedStop. That
   // floor (0.75×ATR, built for 5m strategies) silently inflated S14's "0.3×ATR sniper
   // stop" to a full-width stop, destroying the tight-stop/2R thesis that justifies the
   // strategy (its 6 historical stops averaged -$176 — full-width losses, not sniper

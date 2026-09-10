@@ -101,11 +101,19 @@ describe('ProTrade strategy engine', () => {
     expect(result.tradePlan).toBeNull();
   });
 
-  it('blocks ORB retest when the stop width exceeds the 1.5×ATR asymmetry cap', () => {
-    // Entry 0.73 above the ORB high + 1×ATR stop anchor = 1.33 risk > 0.9 cap (chase entry)
+  it('caps a wide structural stop to the intraday (15m-ATR) width instead of blocking', () => {
+    // Entry 0.73 above the ORB high: the structural stop anchor is ~1.33 wide, but
+    // intradayCappedStop (fix 2026-09-10) pulls it IN to the 15m-ATR cap rather than
+    // rejecting the trade. Result: a tradeable plan with a TIGHTER stop (risk < the
+    // raw structural distance), which is what makes T1 reachable and R:R real.
     const result = evaluateOrbRetest(baseInput({ price: 11.08 }));
-    expect(result.tradePlan).toBeNull();
-    expect(result.missing).toContain('Stop width ≤1.5×ATR');
+    const plan = result.tradePlan ?? result.provisionalPlan;
+    expect(plan).not.toBeNull();
+    const risk = Math.abs(plan!.entry - plan!.stop);
+    // stop was pulled inside the wide structural anchor (raw ~1.33); capped risk is smaller
+    expect(risk).toBeLessThan(1.33);
+    // and the R:R stays tradeable (>= MIN_RR floor)
+    expect(plan!.rr).toBeGreaterThanOrEqual(1.5 - 0.01);
   });
 
   it('confirms or locks RS continuation when setup is valid (session gate may apply)', () => {
