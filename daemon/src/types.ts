@@ -57,6 +57,10 @@ export interface PaperTrade {
   signalGroup?: SignalGroup;
   beta?: number;
   alpacaOrderId?: string;
+  // Entry-time filter context for offline filter A/B on real fills (advisory only).
+  rvolAtEntry?: number;
+  tape15mAligned?: boolean;
+  newsFreshMin?: number | null;
 }
 
 export interface RiskSettings {

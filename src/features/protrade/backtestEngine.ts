@@ -25,6 +25,8 @@ export interface BacktestTrade {
   pnlPct: number;
   rrActual: number;
   win: boolean;
+  rvolAtEntry: number;      // RVOL at entry — for offline filter A/B
+  tape15mAligned: boolean;  // 15m tape aligned at entry — for offline filter A/B
 }
 
 export interface BacktestSummary {
@@ -179,6 +181,8 @@ export function runBacktest(
       target: number;
       entryTime: string;
       t1Hit: boolean;
+      rvolAtEntry: number;
+      tape15mAligned: boolean;
     } | null = null;
 
     for (let i = 0; i < dayBars.length; i++) {
@@ -187,7 +191,7 @@ export function runBacktest(
 
       // ── Manage open position ───────────────────────────────────────────────
       if (openPos) {
-        const { direction, effectiveStop, t1, t2, target, entry, stop, strategyId, entryTime, t1Hit } = openPos;
+        const { direction, effectiveStop, t1, t2, target, entry, stop, strategyId, entryTime, t1Hit, rvolAtEntry, tape15mAligned } = openPos;
 
         // Check T1 hit first (partial exit — move stop to breakeven)
         if (!t1Hit) {
@@ -251,6 +255,7 @@ export function runBacktest(
             shares, dollarPnl, pnlPct,
             rrActual: risk > 0 ? round(reward / risk, 2) : 0,
             win: dollarPnl > 0,
+            rvolAtEntry, tape15mAligned,
           });
           openPos = null;
         }
@@ -347,13 +352,15 @@ export function runBacktest(
         target: round(target, 2),
         entryTime: nextBar.time,
         t1Hit: false,
+        rvolAtEntry: round(rvol, 2),          // for offline filter A/B (RVOL floor)
+        tape15mAligned: trend15mAligned,       // for offline filter A/B (tape gate)
       };
     }
 
     // Force-close any position still open at EOD
     if (openPos) {
       const lastBar = dayBars[dayBars.length - 1];
-      const { direction, entry, stop, t1, t2, target, strategyId, entryTime, t1Hit } = openPos;
+      const { direction, entry, stop, t1, t2, target, strategyId, entryTime, t1Hit, rvolAtEntry, tape15mAligned } = openPos;
       const exitPrice = lastBar.close;
       const risk = Math.abs(entry - stop);
       const reward = Math.abs(exitPrice - entry);
@@ -386,6 +393,7 @@ export function runBacktest(
         shares, dollarPnl, pnlPct,
         rrActual: risk > 0 ? round(reward / risk, 2) : 0,
         win: dollarPnl > 0,
+        rvolAtEntry, tape15mAligned,
       });
     }
   }

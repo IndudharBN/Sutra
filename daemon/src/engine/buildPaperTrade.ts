@@ -178,5 +178,11 @@ export function buildPaperTrade(
     reason: (row.primaryStrategy?.reason || row.reason) + heatNote,
     signalGroup: row.primaryStrategy?.signalGroup,
     beta: row.beta,
+    // Entry-time filter context — captured so future filter A/B runs on REAL fills
+    // (not a backtest). rvol / 15m-tape were NOT stored before, which blocked the
+    // 2026-09-15 cross-check. Advisory only; never read by exit/P&L logic.
+    rvolAtEntry: row.rvol,
+    tape15mAligned: row.trend15mAligned,
+    newsFreshMin: row.newsFreshMin ?? null,
   };
 }
