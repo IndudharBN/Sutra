@@ -73,7 +73,13 @@ const TECH_SECTORS = new Set(['XLK', 'XLC']);
 // reversible — REVERSAL_STRATEGIES is the single switch. NOTE: backtest-driven; the
 // shipped trade instrumentation (rvolAtEntry/tape15mAligned) will confirm on real
 // fills in ~2-3 weeks — flip back if real data disagrees.
-const REVERSAL_STRATEGIES = new Set(['liquidity_sweep', 'ob_fvg_retest', 'mss_breakout']);
+// NOTE (2026-09-16): liquidity_sweep (S4) was REMOVED from this set. The Q3 fix
+// exempted all reversals from the 15m-tape requirement, but S4 has its OWN documented
+// tape gate (s4TapeOk in strategyEngine) added Aug 25 for a live −$2,062 reason: S4
+// longs into a downtrend were 35% WR. Live proof beats backtest — S4 keeps its gate.
+// S5/S6 stay exempt (no such adverse history). Re-add S4 here only if real fills prove
+// its counter-tape sweeps actually win.
+const REVERSAL_STRATEGIES = new Set(['ob_fvg_retest', 'mss_breakout']);
 const QUALIFIED_RVOL_MIN = 1.2; // raised from 0.8 — backtest: 0.8 floor let low-vol junk through
 const TECH_SYMBOLS = new Set([
   // Semis / AI hardware

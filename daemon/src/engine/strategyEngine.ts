@@ -847,7 +847,14 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   //  2. thrust gate — entry bar must close in the favorable 40% of its range.
   const s4TapeOk = input.trend15mAligned;
   const s4ThrustOk = entryThrustOk(dir, trigger);
-  const tradePlan = swept && reclaimed && nearLevel && sweepWickOk && reclaimVolOk && s4TapeOk && s4ThrustOk ? planCandidate : null;
+  // Time gate: no S4 entries before 10:30 ET (2026-09-16). S4's entire 30d loss lived
+  // in the 10:00 hour: 64 trades / 33% WR / -$1,994, vs everything after 11:00 net
+  // POSITIVE. The "sweep" detected in opening-range chaos is mostly a false sweep that
+  // rots flat to EOD (60 EOD losers at MFE <0.5R, -$1,831). Let the opening range
+  // finish forming before trusting a reversal off it.
+  const etNowS4 = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const s4TimeGateOk = etNowS4.getHours() * 60 + etNowS4.getMinutes() >= 10 * 60 + 30;
+  const tradePlan = swept && reclaimed && nearLevel && sweepWickOk && reclaimVolOk && s4TapeOk && s4ThrustOk && s4TimeGateOk ? planCandidate : null;
   const sweepDetail = sweptLevel !== null
     ? (sweepSource === 'ORB'
         ? `ORB ${dir === 'BULL' ? 'low' : 'high'} ${round(sweptLevel, 2)}`
@@ -862,6 +869,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
     sweepWickOk ? pass('Sweep rejection wick', 'Candle closed back inside level') : fail('Sweep rejection wick', 'No rejection — likely continuation'),
     s4TapeOk ? pass('15m tape aligned', `${input.trend15m} ✓`) : fail('15m tape aligned', `${input.trend15m} — counter-tape sweep (S4 longs into downtrend were 35% WR / -$2,062)`),
     s4ThrustOk ? pass('Entry thrust', 'Bar closed in favorable 40% of range ✓') : fail('Entry thrust', 'Weak/doji entry bar — no momentum (EOD-rot losers never reached +0.5R)'),
+    s4TimeGateOk ? pass('Time gate ≥10:30 AM', 'Opening range settled ✓') : fail('Time gate ≥10:30 AM', `${etNowS4.getHours()}:${String(etNowS4.getMinutes()).padStart(2, '0')} ET — 10:00-hour sweeps were 33% WR / -$1,994 (false sweeps in open chaos)`),
     reclaimed ? pass('Level reclaimed', `Close back ${dir === 'BULL' ? 'above' : 'below'} ${sweptLevel ? round(sweptLevel, 2) : '--'}`) : fail('Level reclaimed', 'Waiting for close back through swept level'),
     nearLevel ? pass('Entry proximity', 'Price within 1.5×ATR of level ✓') : fail('Entry proximity', 'Price too far from swept level — do not chase'),
     reclaimVolOk
