@@ -64,6 +64,14 @@ const DEFAULT_LIVE_UNIVERSE = [
 // market: on a day when QQQ trends hard and SPY chops, a lagging semi scores as
 // "strong vs SPY" and SPY's tide sits FLAT. Tech names are benchmarked to QQQ.
 const TECH_SECTORS = new Set(['XLK', 'XLC']);
+
+// Q3 fix (2026-09-16) — tape-alignment is strategy-aware, not a blanket gate.
+// Reversal strategies (sweep/OB-FVG/MSS) enter counter to the tape by design and
+// were the higher-WR bucket in backtest (39% vs 19%); requiring tape alignment
+// selected the worst trades. Reversal = skip the 15m-tape requirement; momentum
+// still requires it. RVOL floor raised 0.8 -> 1.2. Reversible via these two consts.
+const REVERSAL_STRATEGIES = new Set(['liquidity_sweep', 'ob_fvg_retest', 'mss_breakout']);
+const QUALIFIED_RVOL_MIN = 1.2;
 const TECH_SYMBOLS = new Set([
   // Semis / AI hardware
   'NVDA','AMD','AVGO','MU','AMAT','LRCX','KLAC','INTC','QCOM','MRVL','ON','MCHP','ADI','SMCI','ARM','TSM','GFS','WOLF','ALGM','SMTC','SNDK','STX','LITE','VIAV','CIEN','GLW','TXN','NXPI',
@@ -539,7 +547,8 @@ function buildRowFromAlpaca(
     direction,
     price: round(price, 2),
     score: scored.score,
-    qualified: basePass && scored.score >= 65 && meta.rvolEst >= 0.8 && vwapAligned && trendAligned && trend15mAligned,
+    qualified: basePass && scored.score >= 65 && meta.rvolEst >= QUALIFIED_RVOL_MIN && vwapAligned && trendAligned
+      && (REVERSAL_STRATEGIES.has(primaryStrategy?.strategyId ?? '') ? true : trend15mAligned),
     reason: `${baseReason} | ${scored.reason}`,
     atr20: round(atr20, 3),
     atr15: round(atr15, 3),

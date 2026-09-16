@@ -62,6 +62,19 @@ const DEFAULT_LIVE_UNIVERSE = [
 // market: on a day when QQQ trends hard and SPY chops, a lagging semi scores as
 // "strong vs SPY" and SPY's tide sits FLAT. Tech names are benchmarked to QQQ.
 const TECH_SECTORS = new Set(['XLK', 'XLC']);
+
+// ── Q3 fix (2026-09-16): tape-alignment is strategy-aware, not a blanket gate ──
+// The `qualified` gate required trend15mAligned for ALL strategies. But S4/S5/S6 are
+// REVERSAL/structure plays that enter AGAINST the immediate move by design (buy the
+// sweep of lows, short the break of a level). Backtest (627 trades): tape-aligned
+// trades were 19% WR / -$32.6 exp, counter-tape 39% / -$7.9 — i.e. the gate was
+// selecting the WORST trades and blocking the best. So: reversal strategies do NOT
+// require 15m-tape alignment; momentum/breakout strategies still do. This is
+// reversible — REVERSAL_STRATEGIES is the single switch. NOTE: backtest-driven; the
+// shipped trade instrumentation (rvolAtEntry/tape15mAligned) will confirm on real
+// fills in ~2-3 weeks — flip back if real data disagrees.
+const REVERSAL_STRATEGIES = new Set(['liquidity_sweep', 'ob_fvg_retest', 'mss_breakout']);
+const QUALIFIED_RVOL_MIN = 1.2; // raised from 0.8 — backtest: 0.8 floor let low-vol junk through
 const TECH_SYMBOLS = new Set([
   // Semis / AI hardware
   'NVDA','AMD','AVGO','MU','AMAT','LRCX','KLAC','INTC','QCOM','MRVL','ON','MCHP','ADI','SMCI','ARM','TSM','GFS','WOLF','ALGM','SMTC','SNDK','STX','LITE','VIAV','CIEN','GLW','TXN','NXPI',
@@ -555,7 +568,11 @@ function buildRowFromAlpaca(
     direction,
     price: round(price, 2),
     score: scored.score,
-    qualified: basePass && scored.score >= 65 && meta.rvolEst >= 0.8 && vwapAligned && trendAligned && trend15mAligned,
+    // Q3 fix: reversal strategies (sweep/OB-FVG/MSS) skip the 15m-tape requirement —
+    // they trade counter to the tape by design and were the higher-WR bucket. Momentum
+    // strategies still require it. RVOL floor raised 0.8 -> 1.2 (see QUALIFIED_RVOL_MIN).
+    qualified: basePass && scored.score >= 65 && meta.rvolEst >= QUALIFIED_RVOL_MIN && vwapAligned && trendAligned
+      && (REVERSAL_STRATEGIES.has(primaryStrategy?.strategyId ?? '') ? true : trend15mAligned),
     reason: `${baseReason} | ${scored.reason}`,
     atr20: round(atr20, 3),
     atr15: round(atr15, 3),
