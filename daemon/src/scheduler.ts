@@ -26,7 +26,20 @@ function etMinutes(): number {
   return h * 60 + m;
 }
 
+// Weekend guard (2026-10-04). US equities trade Mon–Fri only. Without this the
+// daemon kept scanning/fetching all weekend — burning the Yahoo/Alpaca fetch loop
+// and heap for zero tradable edge (markets closed). getDay() in ET: 0=Sun, 6=Sat.
+// NOTE: does NOT account for market holidays (Thanksgiving, July 4, etc.) — those
+// are rare, the session gate + Alpaca "market closed" rejection already no-op any
+// stray order, and a hardcoded holiday table rots. Weekends are the 2/7 win.
+function isTradingDay(): boolean {
+  const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const day = etNow.getDay();
+  return day >= 1 && day <= 5;
+}
+
 function isMarketHours(): boolean {
+  if (!isTradingDay()) return false;
   const mins = etMinutes();
   return mins >= 9 * 60 + 30 && mins < 16 * 60;
 }
@@ -36,11 +49,13 @@ function isMarketHours(): boolean {
 // so no entries fire before 9:30 ET.
 const PREMARKET_SCAN_START_MIN = 8 * 60; // 08:00 ET — pre-market scan begins
 function isScanWindow(): boolean {
+  if (!isTradingDay()) return false;
   const mins = etMinutes();
   return mins >= PREMARKET_SCAN_START_MIN && mins < 16 * 60;
 }
 
 function isEODWindow(): boolean {
+  if (!isTradingDay()) return false; // Fri is a trading day → Fri EOD still flattens before the weekend
   const mins = etMinutes();
   return mins >= 15 * 60 + 50; // no upper bound — eodFiredDate guard prevents double-fire
 }
