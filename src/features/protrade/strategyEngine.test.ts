@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Candle } from '../scanner/ohlcv';
 import { evaluateOrbRetest, evaluateRsContinuation, evaluateVwapPullback } from './strategyEngine';
 import type { StrategyInput } from './workflowTypes';
@@ -65,6 +65,10 @@ function baseInput(overrides: Partial<StrategyInput> = {}): StrategyInput {
 }
 
 describe('ProTrade strategy engine', () => {
+  // Pin the wall clock to mid-session (11:00 ET) so the session gate doesn't make results depend on when tests run.
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-04-22T15:00:00Z')); });
+  afterEach(() => { vi.useRealTimers(); });
+
   it('moves ORB retest to trade_ready or locked (session gate) when live data and risk checks pass', () => {
     const result = evaluateOrbRetest(baseInput());
     expect(result.strategyId).toBe('orb_retest');

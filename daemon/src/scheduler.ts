@@ -502,8 +502,11 @@ export function startScheduler(): void {
     monitorLoop().catch((err) => console.warn('[monitor] error:', err));
   }, 10_000);
 
-  // Account sync every 30s
+  // Account sync every 30s during the session (07:55-16:35 ET, weekdays); idle otherwise
+  // so a daemon left up overnight/weekends makes no broker calls.
   setInterval(() => {
+    const m = etMinutes();
+    if (!isTradingDay() || m < 7 * 60 + 55 || m >= 16 * 60 + 35) return;
     syncAccount().catch(() => {/* silent */});
   }, 30_000);
 

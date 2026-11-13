@@ -14,10 +14,10 @@
 
 $ErrorActionPreference = 'Stop'
 $root     = Split-Path -Parent $MyInvocation.MyCommand.Path
-$script   = Join-Path $root 'ENSURE_RUNNING.bat'
+$script   = Join-Path $root 'run_ensure_hidden.vbs'
 $taskName = 'Sutra-EnsureRunning'
 
-if (-not (Test-Path $script)) { throw "ENSURE_RUNNING.bat not found at $script" }
+if (-not (Test-Path $script)) { throw "run_ensure_hidden.vbs not found at $script" }
 
 $svc = New-Object -ComObject Schedule.Service
 $svc.Connect()
@@ -43,10 +43,22 @@ $tLogon         = $def.Triggers.Create(9)
 $tLogon.UserId  = "$env:USERDOMAIN\$env:USERNAME"
 $tLogon.Enabled = $true
 
-# Action: run the guarded starter
+# Trigger 3: Mon-Fri session poll (TASK_TRIGGER_WEEKLY = 3). NOT 24/7: starts 11:50 local
+# and repeats every 15 min for 10h. The machine is on GMT while the US session moves with
+# US DST (07:55 ET = 11:55 BST / 12:55 GMT), so 11:50 local covers both; the exact
+# 07:55-16:35 ET gate lives in scripts\ensure-running.ps1 (off-window ticks are instant no-ops).
+$tDaily = $def.Triggers.Create(3)
+$tDaily.DaysOfWeek   = 62          # Mon(2)+Tue(4)+Wed(8)+Thu(16)+Fri(32)
+$tDaily.WeeksInterval = 1
+$tDaily.StartBoundary = (Get-Date '11:50').ToString('yyyy-MM-ddTHH:mm:ss')
+$tDaily.Repetition.Interval = 'PT15M'
+$tDaily.Repetition.Duration = 'PT10H'
+$tDaily.Enabled = $true
+
+# Action: hidden launcher (wscript -> powershell -WindowStyle Hidden): no console flash
 $action                  = $def.Actions.Create(0)  # TASK_ACTION_EXEC
-$action.Path             = "$env:SystemRoot\System32\cmd.exe"
-$action.Arguments        = "/c `"$script`""
+$action.Path             = "$env:SystemRoot\System32\wscript.exe"
+$action.Arguments        = "//nologo `"$root\run_ensure_hidden.vbs`""
 $action.WorkingDirectory = $root
 
 # Register (create or replace if exists)

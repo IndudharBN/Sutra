@@ -26,5 +26,5 @@ echo [%date% %time%] starting Sutra daemon on port 3001...
 node --max-old-space-size=1024 daemon\dist\index.js
 echo.
 echo [%date% %time%] daemon exited (code %errorlevel%) -- restarting in 3s.  (close window or Ctrl+C to stop)
-timeout /t 3 /nobreak >nul
+ping -n 4 127.0.0.1 >nul
 goto loop

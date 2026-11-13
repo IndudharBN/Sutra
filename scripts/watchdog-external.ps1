@@ -101,6 +101,16 @@ $fails = 0
 while ($true) {
     Start-Sleep -Seconds $IntervalSec
 
+    # Session-bound: exit (code 0 => RUN_WATCHDOG.bat does NOT relaunch) once the
+    # session is over (past 16:35 ET) or on a weekend. ensure-running.ps1 starts
+    # us again at 07:55 ET next trading day. No 24/7 polling.
+    $nowEt = [System.TimeZoneInfo]::ConvertTime([DateTime]::UtcNow, [System.TimeZoneInfo]::Utc, [System.TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time'))
+    $isWeekend = $nowEt.DayOfWeek -eq 'Saturday' -or $nowEt.DayOfWeek -eq 'Sunday'
+    if ($isWeekend -or ($nowEt.Hour * 60 + $nowEt.Minute) -ge $EOD_CUTOFF_MIN) {
+        Write-Host "[watchdog] $(Get-Date -Format HH:mm:ss) session over - exiting until next trading day"
+        exit 0
+    }
+
     # EOD safety-flatten (independent of daemon health). RETRIES on EVERY poll in
     # the 15:52-16:30 ET window while ANY position is still open - not once/day.
     # On 2026-07-28 the daemon was DEAD at 15:50 and only respawned at 16:10, so a

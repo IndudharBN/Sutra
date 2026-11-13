@@ -35,7 +35,8 @@ timeout /t 2 /nobreak >nul
 
 :: -- Start a fresh daemon window ------------------------------------------
 echo  [3/3] Starting daemon on port 3001...
-start "Sutra Daemon [3001]" cmd /k "cd /d "%~dp0" && node daemon\dist\index.js || (echo. & echo [DAEMON CRASHED -- check error above] & pause)"
+:: Hidden, self-restarting; output goes to logs\daemon-out.log (no console window).
+wscript //nologo "%~dp0run_ensure_hidden_force.vbs"
 
 echo.
 echo  =====================================================

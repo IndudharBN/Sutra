@@ -17,6 +17,8 @@ echo.
 echo [%date% %time%] starting external watchdog...
 PowerShell -NoProfile -ExecutionPolicy Bypass -File "scripts\watchdog-external.ps1"
 echo.
+:: Exit code 0 = session over (past 16:35 ET / weekend) -- stop, don't relaunch.
+if %errorlevel%==0 exit /b 0
 echo [%date% %time%] watchdog exited (code %errorlevel%) -- restarting in 5s.  (close window or Ctrl+C to stop)
-timeout /t 5 /nobreak >nul
+ping -n 6 127.0.0.1 >nul
 goto loop

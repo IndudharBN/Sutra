@@ -35,19 +35,12 @@ echo  [2/4] Restarting daemon (wrapper window) on port 3001...
 taskkill /F /FI "WINDOWTITLE eq Sutra Daemon [3001]" >nul 2>&1
 PowerShell -NoProfile -Command "$ls = netstat -ano | Select-String ':3001\s' | Where-Object { $_ -match 'LISTENING' }; $procIds = $ls | ForEach-Object { ($_.ToString().Trim() -split '\s+')[-1] } | Where-Object { [int]$_ -gt 4 } | Sort-Object -Unique; if ($procIds) { foreach ($p in $procIds) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; Write-Host ('  Cleared port holder PID ' + $p + '.') } }"
 timeout /t 2 /nobreak >nul
-start "Sutra Daemon [3001]" "%~dp0RUN_DAEMON.bat"
-timeout /t 3 /nobreak >nul
-
-:: -- Restart the UI via pm2 (start it if pm2 has no entry yet) -------------
-echo  [3/4] Restarting UI (pm2) on port 3006...
-call pm2 restart sutra-ui
-if errorlevel 1 (
-  call pm2 start ecosystem.config.cjs --only sutra-ui
-)
-
-:: -- Persist the pm2 process list so both survive a reboot ----------------
-echo  [4/4] Saving pm2 process list...
-call pm2 save
+:: Daemon + watchdog + UI are all launched HIDDEN by ensure-running.ps1 -Force
+:: (no pm2, no console windows; logs in .\logs).
+PowerShell -NoProfile -Command "$ls = netstat -ano | Select-String ':3006\s' | Where-Object { $_ -match 'LISTENING' }; $ls | ForEach-Object { ($_.ToString().Trim() -split '\s+')[-1] } | Where-Object { [int]$_ -gt 4 } | Sort-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
+echo  [3/4] Starting daemon + watchdog + UI (hidden)...
+wscript //nologo "%~dp0run_ensure_hidden_force.vbs"
+echo  [4/4] Done.
 
 timeout /t 3 /nobreak >nul
 start "" "http://localhost:3006"
