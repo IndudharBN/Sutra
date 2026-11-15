@@ -6,6 +6,7 @@ import { ema, sessionCandles, sessionVwap, sessionVwapSlope } from './indicators
 import type { Candle, CandleSet } from './ohlcv';
 import { closes, last, round } from './ohlcv';
 import { evaluateStrategies } from './strategyEngine';
+import { RETIRED_STRATEGIES, computeAtr, isQualified } from './entryGate';
 import { stampGroupClassification } from './confluenceClassifier';
 import type { MarketDataProviderStatus, StrategySignal, WorkflowStage } from './workflowTypes';
 import { workflowStageRank } from './workflowTypes';
@@ -24,7 +25,7 @@ import { computeBeta } from '../portfolioRisk';
 // - sniper_1m (S14, Jul 28): -$623 over 4 trades, 0% WR (0-for-4), avg loss
 //   -$156. 1m entries fire too late on the IEX feed; no positive trade ever.
 // Remove an id from this list to trial that strategy again.
-const RETIRED_STRATEGIES: string[] = ['vwap_pullback', 's7_volume_surge', 'orb_retest', 'sniper_1m'];
+// RETIRED_STRATEGIES lives in ./entryGate (shared with the backtest).
 import { fetchSharesOutstanding, getFloatFromCache } from '../alpacaBroker';
 import { fetchEarningsCalendar, getEarningsDays } from '../finnhubClient';
 
@@ -79,8 +80,7 @@ const TECH_SECTORS = new Set(['XLK', 'XLC']);
 // longs into a downtrend were 35% WR. Live proof beats backtest — S4 keeps its gate.
 // S5/S6 stay exempt (no such adverse history). Re-add S4 here only if real fills prove
 // its counter-tape sweeps actually win.
-const REVERSAL_STRATEGIES = new Set(['ob_fvg_retest', 'mss_breakout']);
-const QUALIFIED_RVOL_MIN = 1.2; // raised from 0.8 — backtest: 0.8 floor let low-vol junk through
+// REVERSAL_STRATEGIES / QUALIFIED_RVOL_MIN live in ./entryGate (shared with the backtest).
 const TECH_SYMBOLS = new Set([
   // Semis / AI hardware
   'NVDA','AMD','AVGO','MU','AMAT','LRCX','KLAC','INTC','QCOM','MRVL','ON','MCHP','ADI','SMCI','ARM','TSM','GFS','WOLF','ALGM','SMTC','SNDK','STX','LITE','VIAV','CIEN','GLW','TXN','NXPI',
@@ -312,23 +312,7 @@ function computeAtr20(daily: Candle[]): number {
   return count > 0 ? total / count : 0;
 }
 
-// True-range ATR over the last `period` bars of any timeframe. Used for the 15m
-// ATR that anchors intraday stops (see StrategyInput.atr15). Returns 0 if there
-// aren't enough bars so the caller can fall back to a daily-ATR fraction.
-function computeAtr(bars: Candle[], period = 14): number {
-  if (bars.length < 2) return 0;
-  const recent = bars.slice(-(period + 1));
-  let total = 0;
-  let count = 0;
-  for (let i = 1; i < recent.length; i++) {
-    const c = recent[i];
-    const p = recent[i - 1];
-    total += Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close));
-    count++;
-  }
-  return count > 0 ? total / count : 0;
-}
-
+// (computeAtr — true-range ATR for the 15m stop anchor — lives in ./entryGate.)
 function computePrevDay(daily: Candle[]): { high: number; low: number; close: number } {
   const bar = daily.length >= 2 ? daily[daily.length - 2] : null;
   return { high: bar?.high ?? 0, low: bar?.low ?? 0, close: bar?.close ?? 0 };
@@ -577,8 +561,7 @@ function buildRowFromAlpaca(
     // Q3 fix: reversal strategies (sweep/OB-FVG/MSS) skip the 15m-tape requirement —
     // they trade counter to the tape by design and were the higher-WR bucket. Momentum
     // strategies still require it. RVOL floor raised 0.8 -> 1.2 (see QUALIFIED_RVOL_MIN).
-    qualified: basePass && scored.score >= 65 && meta.rvolEst >= QUALIFIED_RVOL_MIN && vwapAligned && trendAligned
-      && (REVERSAL_STRATEGIES.has(primaryStrategy?.strategyId ?? '') ? true : trend15mAligned),
+    qualified: isQualified({ basePass, score: scored.score, rvol: meta.rvolEst, vwapAligned, trendAligned, trend15mAligned, primaryStrategyId: primaryStrategy?.strategyId ?? '' }),
     reason: `${baseReason} | ${scored.reason}`,
     atr20: round(atr20, 3),
     atr15: round(atr15, 3),

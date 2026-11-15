@@ -14,7 +14,7 @@ describe('trading costs', () => {
   });
 
   it('stop fills cost more than plain market fills', () => {
-    const c = { ...DEFAULT_COSTS, impactY: 0 };
+    const c = { ...DEFAULT_COSTS, stopSlipBps: 5, impactY: 0 };
     expect(fillPrice('sell', 100, 'stop', ctx, c)).toBeCloseTo(99.9, 6);
     expect(fillPrice('sell', 100, 'stop', ctx, c)).toBeLessThan(fillPrice('sell', 100, 'market', ctx, c));
   });

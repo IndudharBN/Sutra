@@ -13,6 +13,7 @@ import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperP
 import { env } from './env';
 import { emit } from './httpServer';
 import { loadTrades, saveTrades, appendLedger } from './tradeStore';
+import { evaluateProtections, readControlFile } from './protections';
 import type { PaperTrade } from './types';
 
 function toETDate(): string {
@@ -152,6 +153,8 @@ async function monitorLoop(): Promise<void> {
   }
 }
 
+let lastProtectionLog = '';
+
 function tryFireTrades(): void {
   if (!env.AUTO_EXECUTE) return;
   const snapshot = getCurrentSnapshot();
@@ -166,6 +169,17 @@ function tryFireTrades(): void {
   // prevents re-firing the same symbol before the async booking completes.
   const trades = loadTrades();
   const state = getState();
+
+  // Portfolio-level protections (kill-switch file, cross-strategy loss streak, rolling drawdown).
+  // Shrink-only: can block new entries or halve size; never touches open positions.
+  const prot = evaluateProtections({ nowMs: Date.now(), trades, accountBalance, control: readControlFile() });
+  const protKey = `${prot.ok}|${prot.sizeMult}|${prot.reasons.join(';')}`;
+  if (protKey !== lastProtectionLog) {
+    lastProtectionLog = protKey;
+    if (prot.reasons.length) console.log(`[protections] ${prot.ok ? 'size x' + prot.sizeMult : 'ENTRIES BLOCKED'} — ${prot.reasons.join(' | ')}`);
+    else console.log('[protections] clear');
+  }
+  if (!prot.ok) return;
 
   for (const row of snapshot.rows) {
     if (!row.qualified || !row.tradePlan) continue;
@@ -207,7 +221,7 @@ function tryFireTrades(): void {
 
     // Regime governor scales size by SPY-200EMA/VIX (BULL 1.0 / SIDEWAYS 0.75 / BEAR 0.5).
     const regimeSizeMult = snapshot.regime?.sizeMult ?? 1.0;
-    const newTrade = buildPaperTrade(row, trades, new Date().toISOString(), accountBalance, snapshot.spyTrend5m, snapshot.spyTrend15m, 1.0, regimeSizeMult);
+    const newTrade = buildPaperTrade(row, trades, new Date().toISOString(), accountBalance, snapshot.spyTrend5m, snapshot.spyTrend15m, prot.sizeMult, regimeSizeMult);
     if (!newTrade) continue;
 
     const betaCheck = checkPortfolioBeta(

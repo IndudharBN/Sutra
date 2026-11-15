@@ -13,10 +13,16 @@
 //     Negligible at our sizes but kept so larger sizing can't silently look free.
 //   - Alpaca is commission-free, so commissionPerShare defaults to 0.
 //
-// DEFAULTS ARE UNCALIBRATED GUESSES for liquid US small/mid caps on the IEX feed.
-// Calibrate halfSpreadBps / stopSlipBps from real Alpaca fills (entry drift vs the
-// planned price) before trusting absolute P&L; relative strategy comparisons are
-// still meaningful because the same costs hit every strategy.
+// DEFAULTS CALIBRATED 2026-11-15 from 428 real Alpaca-reconciled fills since 2026-08-27
+// (scripts/calibrate-costs.mjs; re-run it as more fills accumulate):
+//   - ENTRY fill vs prior 1m close: median 3.8 bps, mean 7.3 bps (proxy, includes noise) -> halfSpreadBps 5.
+//   - STOP exit vs planned stop (n=65): median 3.0 bps adverse, mean -3.3 bps (outliers fill BETTER),
+//     p75 12 bps. The half-spread already charged on a stop covers the median, so stopSlipBps = 0
+//     (the engine separately fills at the bar OPEN when a bar gaps through the stop).
+//   - TARGET exits: NOT clean limit fills — 37% at/above T1, the rest below it (e.g. exits between
+//     entry and T1 labelled 'Target'). Something closes winners before T1; that is an exit-logic
+//     difference to investigate, not slippage, so limit fills stay free here.
+// Same costs hit every strategy, so relative comparisons are meaningful regardless.
 
 export interface TradingCosts {
   /** $ per share per side (Alpaca equities: 0). */
@@ -32,7 +38,7 @@ export interface TradingCosts {
 export const DEFAULT_COSTS: TradingCosts = {
   commissionPerShare: 0,
   halfSpreadBps: 5,
-  stopSlipBps: 5,
+  stopSlipBps: 0,
   impactY: 0.5,
 };
 

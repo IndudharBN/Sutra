@@ -6,6 +6,7 @@ import { ema, sessionCandles, sessionVwap, sessionVwapSlope } from '../scanner/i
 import type { Candle, CandleSet } from '../scanner/ohlcv';
 import { closes, last, round } from '../scanner/ohlcv';
 import { evaluateStrategies } from './strategyEngine';
+import { RETIRED_STRATEGIES, computeAtr, isQualified } from './entryGate';
 import { stampGroupClassification } from './confluenceClassifier';
 import type { MarketDataProviderStatus, StrategySignal, WorkflowStage } from './workflowTypes';
 import { workflowStageRank } from './workflowTypes';
@@ -25,7 +26,7 @@ import { fetchEarningsCalendar, getEarningsDays } from '../../lib/finnhubClient'
 // - sniper_1m (S14, Jul 28): -$623 over 4 trades, 0% WR (0-for-4), avg loss
 //   -$156. 1m entries fire too late on the IEX feed; no positive trade ever.
 // Remove an id from this list to trial that strategy again.
-const RETIRED_STRATEGIES: string[] = ['vwap_pullback', 's7_volume_surge', 'orb_retest', 'sniper_1m'];
+// RETIRED_STRATEGIES lives in ./entryGate (shared with the backtest).
 
 // S7 (s7_volume_surge) is a scout strategy — it needs its partner (S8) active before
 // it can progress past forming. S9's flag_break handcuff was removed 2026-07-12
@@ -76,8 +77,7 @@ const TECH_SECTORS = new Set(['XLK', 'XLC']);
 // longs into a downtrend were 35% WR. Live proof beats backtest — S4 keeps its gate.
 // S5/S6 stay exempt (no such adverse history). Re-add S4 here only if real fills prove
 // its counter-tape sweeps actually win.
-const REVERSAL_STRATEGIES = new Set(['ob_fvg_retest', 'mss_breakout']);
-const QUALIFIED_RVOL_MIN = 1.2;
+// REVERSAL_STRATEGIES / QUALIFIED_RVOL_MIN live in ./entryGate (shared with the backtest).
 const TECH_SYMBOLS = new Set([
   // Semis / AI hardware
   'NVDA','AMD','AVGO','MU','AMAT','LRCX','KLAC','INTC','QCOM','MRVL','ON','MCHP','ADI','SMCI','ARM','TSM','GFS','WOLF','ALGM','SMTC','SNDK','STX','LITE','VIAV','CIEN','GLW','TXN','NXPI',
@@ -292,20 +292,6 @@ function candleTrend(candles: Candle[]) {
 function computeAtr20(daily: Candle[]): number {
   if (daily.length < 2) return 0;
   const recent = daily.slice(-21);
-  let total = 0;
-  let count = 0;
-  for (let i = 1; i < recent.length; i++) {
-    const c = recent[i];
-    const p = recent[i - 1];
-    total += Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close));
-    count++;
-  }
-  return count > 0 ? total / count : 0;
-}
-
-function computeAtr(bars: Candle[], period = 14): number {
-  if (bars.length < 2) return 0;
-  const recent = bars.slice(-(period + 1));
   let total = 0;
   let count = 0;
   for (let i = 1; i < recent.length; i++) {
@@ -553,8 +539,7 @@ function buildRowFromAlpaca(
     direction,
     price: round(price, 2),
     score: scored.score,
-    qualified: basePass && scored.score >= 65 && meta.rvolEst >= QUALIFIED_RVOL_MIN && vwapAligned && trendAligned
-      && (REVERSAL_STRATEGIES.has(primaryStrategy?.strategyId ?? '') ? true : trend15mAligned),
+    qualified: isQualified({ basePass, score: scored.score, rvol: meta.rvolEst, vwapAligned, trendAligned, trend15mAligned, primaryStrategyId: primaryStrategy?.strategyId ?? '' }),
     reason: `${baseReason} | ${scored.reason}`,
     atr20: round(atr20, 3),
     atr15: round(atr15, 3),

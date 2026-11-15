@@ -110,6 +110,18 @@ row('15m-tape aligned (mandatory)', allTrades.filter((t) => t.tape15mAligned));
 // C: combined — the strict stack
 row('RVOL>=1.2 AND tape aligned', allTrades.filter((t) => t.rvolAtEntry >= 1.2 && t.tape15mAligned));
 
+// per-strategy: backtest vs REAL fills (the honest cross-check)
+console.log(`
+=== PER STRATEGY (backtest net vs real Alpaca-ledger P&L) ===`);
+const ids = [...new Set([...allTrades.map((t) => t.strategyId), ...real.filter((t) => !RETIRED.has(t.strategyId)).map((t) => t.strategyId)])].filter(Boolean).sort();
+for (const id of ids) {
+  const b = summarize(allTrades.filter((t) => t.strategyId === id));
+  const r = real.filter((t) => t.strategyId === id);
+  const rn = r.length, rw = r.filter((t) => +t.pnl > 0).length, rp = r.reduce((a, t) => a + (+t.pnl || 0), 0);
+  console.log('  ' + id.padEnd(22), 'BT n=' + String(b.n).padStart(3), 'WR ' + (b.wr + '%').padStart(4), 'net $' + String(b.pnl).padStart(6), 'PF ' + b.pf.toFixed(2).padStart(5),
+    ' | REAL n=' + String(rn).padStart(3), 'WR ' + ((rn ? Math.round(100 * rw / rn) : 0) + '%').padStart(4), 'pnl $' + String(Math.round(rp)).padStart(6));
+}
+
 // validation
 const realActive = real.filter((t) => !RETIRED.has(t.strategyId));
 const realWR = Math.round(100 * realActive.filter((t) => +t.pnl > 0).length / realActive.length);

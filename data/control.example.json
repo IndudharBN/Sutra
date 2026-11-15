@@ -1,0 +1,7 @@
+{
+  "_help": "Copy to data/control.json to take effect (read on every executor tick, no restart). Shrink-only: can block new entries or reduce size, never adds risk. Open positions keep their Alpaca bracket orders.",
+  "halt": false,
+  "reason": "why entries are paused",
+  "haltUntil": "2026-11-17T14:30:00Z",
+  "sizeMult": 0.5
+}
