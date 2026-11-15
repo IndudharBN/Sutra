@@ -32,6 +32,7 @@ const DAYS = Number(process.argv[2] || 35);
 // Cost model + exit model. Flags: --zero-costs (old free fills), --runner (legacy partial/runner exits).
 const ZERO = process.argv.includes('--zero-costs');
 const EXIT_MODE = process.argv.includes('--runner') ? 'partial_runner' : 'full_t1';
+const LIVE_GATES = !process.argv.includes('--legacy'); // --legacy = old permissive replay
 let COSTS; // undefined => engine default (DEFAULT_COSTS)
 if (ZERO) COSTS = { commissionPerShare: 0, halfSpreadBps: 0, stopSlipBps: 0, impactY: 0 };
 
@@ -76,7 +77,7 @@ for (const sym of universe) {
   const [b5, b1d] = await Promise.all([bars(sym, '5Min', DAYS), bars(sym, '1Day', 90)]);
   if (b5.length < 50) { console.log(`  ${sym}: insufficient bars (${b5.length}) — skip`); continue; }
   let res;
-  try { res = runBacktest(sym, b5, b1d, 100_000, { costs: COSTS, exitMode: EXIT_MODE }); } catch (e) { console.log(`  ${sym}: backtest error ${e.message}`); continue; }
+  try { res = runBacktest(sym, b5, b1d, 100_000, { costs: COSTS, exitMode: EXIT_MODE, liveGates: LIVE_GATES }); } catch (e) { console.log(`  ${sym}: backtest error ${e.message}`); continue; }
   const t = (res.trades || []).filter((tr) => !RETIRED.has(tr.strategyId));
   for (const tr of t) allTrades.push(tr);
   console.log(`  ${sym}: ${t.length} active trades`);

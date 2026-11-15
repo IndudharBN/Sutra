@@ -6,6 +6,18 @@ import { findOrderBlockZone, rejectionCandle } from '../scanner/smc';
 import type { SignalGroup, StrategyChecklistItem, StrategyId, StrategyInput, StrategySignal, TradePlan, WorkflowStage } from './workflowTypes';
 import { STRATEGY_LABELS, workflowStageRank } from './workflowTypes';
 
+// ── Injectable clock ─────────────────────────────────────────────────────────
+// Several strategy gates (session gate, 10:15/10:30/10:45 time gates, bar-age volume
+// projection) used to read the wall clock directly. That is correct live but wrong in a
+// historical replay: gates were evaluated against "now", so backtest results depended on
+// WHEN you ran them. The backtest sets this to each bar's close time. Default (null) =
+// real time, so live behaviour is unchanged.
+let clockOverride: (() => number) | null = null;
+export function setStrategyClock(fn: (() => number) | null): void { clockOverride = fn; }
+const clockMs = (): number => (clockOverride ? clockOverride() : Date.now());
+const clockDate = (): Date => new Date(clockMs());
+const etClock = (): Date => new Date(clockDate().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+
 const MIN_RR = 1.5;
 // 2.0 (was 2.5): 448-trade sample — only 1 trade ever reached a 2.5R target before EOD;
 // median winner closed +1.87%. A 2R take-profit is reachable inside the day session and
@@ -299,7 +311,7 @@ function structuralT2(
 
 // Returns 'closed' outside 9:30–16:00 ET, 'blackout' during 9:30–10:00 (first 30m), 'open' otherwise.
 function sessionGate(): 'open' | 'blackout' | 'closed' {
-  const now = new Date();
+  const now = clockDate();
   const day = now.getUTCDay();
   if (day === 0 || day === 6) return 'closed';
   const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
@@ -521,7 +533,7 @@ export function evaluateOrbRetest(input: StrategyInput): StrategySignal {
   const stop = enforceMinStop(dir, entry, intradayCappedStop(dir, entry, rawStop, (input.atr15 ?? input.atr20 * 0.3), input.vixLevel), (input.atr15 ?? input.atr20 * 0.3));
   // Hard gate: no S1 entries before 10:15 AM ET — ORB structure unreliable, H1 bar not closed,
   // institutional opening flow not absorbed. earlySession (9:45–10:15) still requires higher RVOL.
-  const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const etNow = etClock();
   const etMins = etNow.getHours() * 60 + etNow.getMinutes();
   const timeGateOk = etMins >= 10 * 60 + 15;
   const earlySession = etMins >= 9 * 60 + 45 && etMins < 10 * 60 + 15;
@@ -627,7 +639,7 @@ export function evaluateVwapPullback(input: StrategyInput): StrategySignal {
   // 10:30–10:40 — the qualified-gate unlock stampede — straight into the trend-flip chop
   // that killed 23 of them. The 10:30 print is the FIRST directional reading of the day,
   // not a confirmed one; S2 needs the reclaim to survive past it.
-  const etNowS2 = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const etNowS2 = etClock();
   const timeGateOk = etNowS2.getHours() * 60 + etNowS2.getMinutes() >= 10 * 60 + 45;
   const rvolOk = input.rvol >= 0.8;
   const rsOk = input.rsVsBenchmark >= 1.0;
@@ -852,7 +864,7 @@ export function evaluateLiquiditySweep(input: StrategyInput): StrategySignal {
   // POSITIVE. The "sweep" detected in opening-range chaos is mostly a false sweep that
   // rots flat to EOD (60 EOD losers at MFE <0.5R, -$1,831). Let the opening range
   // finish forming before trusting a reversal off it.
-  const etNowS4 = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const etNowS4 = etClock();
   const s4TimeGateOk = etNowS4.getHours() * 60 + etNowS4.getMinutes() >= 10 * 60 + 30;
   const tradePlan = swept && reclaimed && nearLevel && sweepWickOk && reclaimVolOk && s4TapeOk && s4ThrustOk && s4TimeGateOk ? planCandidate : null;
   const sweepDetail = sweptLevel !== null
@@ -956,7 +968,7 @@ export function evaluateObFvgRetest(input: StrategyInput): StrategySignal {
   const rvolThreshold = fvgPathOnly ? 1.2 : 1.0;                  // FVG solo: 1.2× filters dead-volume days; real fills are quiet absorption, not surges
   const rvolOk = input.rvol >= rvolThreshold;
   const fvgSizeOk = atFvg && gap ? (gap.gapHigh - gap.gapLow) >= input.atr20 * 0.25 : true;
-  const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const etNow = etClock();
   const etMins = etNow.getHours() * 60 + etNow.getMinutes();
   const lateSession = etMins >= 15 * 60;
   // OB entries require a rejection candle — price slicing through an OB without a wick/reversal
@@ -1091,7 +1103,7 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
   // Project bar to full 5m volume to compensate for mid-bar polling (scanner runs every ~60s).
   // A bar 90s in shows ~30% of its final volume — comparing raw to completed-bar average
   // requires 6–7× mid-session rate to pass, which never happens without a catalyst.
-  const barAgeMs = Date.now() - new Date(bar.time).getTime();
+  const barAgeMs = clockMs() - new Date(bar.time).getTime();
   const barProgress = Math.min(Math.max(barAgeMs / (5 * 60 * 1000), 0.1), 1.0);
   const projectedVol = bar.volume / barProgress;
   // 2.5× (was 2.0×): S7 went 1W/5L with avg stop -$131 — 2.0× projected let marginal
@@ -1263,7 +1275,7 @@ export function evaluateFlagBreak(input: StrategyInput): StrategySignal {
   // The scanner polls mid-bar, so the forming bar carries only a fraction of its final
   // volume — comparing raw partial volume against COMPLETED flag bars demanded a hidden
   // 3–6× real expansion and killed nearly every genuine break (S9: 1 trade in 19 days).
-  const s9BarAgeMs = Date.now() - new Date(trigger.time).getTime();
+  const s9BarAgeMs = clockMs() - new Date(trigger.time).getTime();
   const s9BarProgress = Math.min(Math.max(s9BarAgeMs / (5 * 60 * 1000), 0.1), 1.0);
   const projectedBreakVol = trigger.volume / s9BarProgress;
   // Break bar must show CLEAR urgency vs consolidation — 1.2× flag max (was 1.0×, which a
@@ -1516,7 +1528,7 @@ export function evaluateEma20Bounce15m(input: StrategyInput): StrategySignal {
   // Time gate: no S12 entries before 10:45 AM ET (1h15m into the session). A 15m
   // EMA20 trend isn't meaningful until the session has developed. Explicit clock
   // gate, same pattern as S1's 10:15 gate.
-  const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const etNow = etClock();
   const timeGateOk = etNow.getHours() * 60 + etNow.getMinutes() >= 10 * 60 + 45;
   const entry = input.price;
   const rawStop = dir === 'BULL'

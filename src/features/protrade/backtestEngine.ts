@@ -1,4 +1,5 @@
-import { evaluateStrategies } from './strategyEngine';
+import { evaluateStrategies, setStrategyClock } from './strategyEngine';
+import { RETIRED_STRATEGIES, baseFailures, computeAtr, isQualified, liveDirection, scoreRow } from './entryGate';
 import { DEFAULT_COSTS, commission, fillPrice } from './costs';
 import type { FillKind, TradingCosts } from './costs';
 import { computePositionSize, getRiskSettings } from '../../lib/riskManager';
@@ -150,6 +151,12 @@ export interface BacktestOptions {
    * 'partial_runner' is the legacy model: half off at T1, stop to breakeven, runner to T2.
    */
   exitMode?: 'full_t1' | 'partial_runner';
+  /**
+   * true (default): apply the live scanner/executor gates — retired-strategy filter, primary-signal
+   * selection, `qualified` (score/RVOL/VWAP/5m/15m), live direction rule, 15m-ATR stops, one entry per
+   * symbol per day, bar-time clock for time-of-day gates. false: legacy permissive replay.
+   */
+  liveGates?: boolean;
 }
 
 interface SettleInput {
@@ -218,6 +225,7 @@ export function runBacktest(
 ): BacktestResult {
   const costs = opts.costs ?? DEFAULT_COSTS;
   const mode = opts.exitMode ?? 'full_t1';
+  const liveGates = opts.liveGates ?? true;
   const { riskPerTradePct } = getRiskSettings();
   const trades: BacktestTrade[] = [];
   const regular5m = bars5m.filter((b) => b.time && isRegularSession(b.time));
@@ -237,6 +245,7 @@ export function runBacktest(
 
     // Lock direction at first eligible bar (10:00 AM) — prevents intraday direction flipping
     let lockedDirection: 'BULL' | 'BEAR' | 'NEUTRAL' | null = null;
+    let firedToday = false; // live executor fires a symbol at most once per day
     let openPos: {
       strategyId: StrategyId;
       direction: 'BULL' | 'BEAR';
@@ -318,8 +327,10 @@ export function runBacktest(
       }
 
       // ── Entry evaluation ───────────────────────────────────────────────────
-      // Skip first 15 min (OR formation) and last 30 min
-      if (barMins < 9 * 60 + 45 || barMins >= 15 * 60 + 30) continue;
+      if (liveGates && firedToday) continue;
+      // Legacy: skip first 15 min and last 30. Live: the decision is made when the bar CLOSES
+      // (bar start + 5m) and the executor trades 09:30-15:45 ET.
+      if (liveGates ? (barMins + 5 < 9 * 60 + 30 || barMins + 5 >= 15 * 60 + 45) : (barMins < 9 * 60 + 45 || barMins >= 15 * 60 + 30)) continue;
       // Need at least 3 bars (OR formation); prevDayBars5m already provides EMA context
       if (i < 3) continue;
 
@@ -332,16 +343,22 @@ export function runBacktest(
       if (!lockedDirection) {
         lockedDirection = computeDirection(allFive.slice(-60));
       }
-      const direction = lockedDirection;
-      if (direction === 'NEUTRAL') continue;
-
       const trend5m = candleTrend(allFive.slice(-30));
       const trend15m = candleTrend(fifteen);
       const vwap = vwapLatest(dayBars.slice(0, i + 1));
+      const prevCloseGap = prevDailyBar?.close ?? 0;
+      const gapPctLive = prevCloseGap > 0 ? (dayBars[0].open - prevCloseGap) / prevCloseGap * 100 : 0;
+      const direction = liveGates
+        ? liveDirection({ price, vwap, trend5m, trend15m, gapPct: gapPctLive, etMinutes: barMins + 5 })
+        : lockedDirection;
+      if (direction === 'NEUTRAL') continue;
       const vwapAligned = direction === 'BULL' ? price > vwap : price < vwap;
       const trendAligned = direction === 'BULL' ? trend5m === 'UP' : trend5m === 'DOWN';
       const trend15mAligned = direction === 'BULL' ? trend15m === 'UP' : trend15m === 'DOWN';
       const atrPct = atr20 > 0 && price > 0 ? (atr20 / price) * 100 : 2;
+      // 15m ATR anchors intraday stops live (falls back to 30% of daily ATR on thin data).
+      const atr15raw = computeAtr(fifteen, 14);
+      const atr15 = atr15raw > 0 ? atr15raw : atr20 * 0.3;
 
       const todayVol = dayBars.slice(0, i + 1).reduce((s, c) => s + c.volume, 0);
       const progress = Math.min(1, Math.max(0.05, (barMins - 9 * 60 - 30) / 390));
@@ -376,8 +393,31 @@ export function runBacktest(
         },
       };
 
-      const signals = evaluateStrategies(input);
-      const best = signals.find((s) => s.tradePlan && s.tradePlan.rr >= 1.5);
+      let best: ReturnType<typeof evaluateStrategies>[number] | undefined;
+      if (liveGates) {
+        // Bar-time clock so time-of-day gates and bar-age volume projection see the replay time.
+        const decisionMs = new Date(bar.time).getTime() + 5 * 60_000;
+        let signals: ReturnType<typeof evaluateStrategies>;
+        setStrategyClock(() => decisionMs);
+        try { signals = evaluateStrategies({ ...input, atr15, vixLevel: undefined }); } finally { setStrategyClock(null); }
+        // Live: primary = first non-retired signal; the row only trades if THAT signal has a plan.
+        const primary = signals.filter((s) => !RETIRED_STRATEGIES.includes(s.strategyId))[0];
+        if (!primary?.tradePlan) continue;
+        const dollarVolM = (price * todayVol) / 1_000_000;
+        const failures = baseFailures(price, atrPct, dollarVolM);
+        const score = scoreRow({
+          rvol, gapPct, atrPct, dollarVolM, vwapAligned, trendAligned, trend15mAligned,
+          smallFloat: todayVol > 0 && todayVol < 50_000_000,
+        });
+        if (!isQualified({
+          basePass: failures.length === 0, score, rvol, vwapAligned, trendAligned, trend15mAligned,
+          primaryStrategyId: primary.strategyId,
+        })) continue;
+        best = primary;
+      } else {
+        const signals = evaluateStrategies(input);
+        best = signals.find((s) => s.tradePlan && s.tradePlan.rr >= 1.5);
+      }
       if (!best?.tradePlan) continue;
 
       // Enter at next bar open to avoid lookahead bias
@@ -412,6 +452,7 @@ export function runBacktest(
         adv: prevDayVolume,
         sigmaDaily: entryPrice > 0 ? atr20 / entryPrice : 0,
       };
+      firedToday = true;
     }
 
     // Force-close any position still open at EOD
