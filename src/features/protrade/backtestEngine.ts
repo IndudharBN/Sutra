@@ -1,4 +1,6 @@
 import { evaluateStrategies } from './strategyEngine';
+import { DEFAULT_COSTS, commission, fillPrice } from './costs';
+import type { FillKind, TradingCosts } from './costs';
 import { computePositionSize, getRiskSettings } from '../../lib/riskManager';
 import { ema, vwapLatest } from '../scanner/indicators';
 import { closes, last, round } from '../scanner/ohlcv';
@@ -21,7 +23,9 @@ export interface BacktestTrade {
   outcome: 'target2' | 'target1' | 'breakeven' | 'stop' | 'eod';
   t1Hit: boolean;
   shares: number;
-  dollarPnl: number;
+  dollarPnl: number;   // NET of costs
+  grossPnl: number;    // before spread/slippage/commission
+  costs: number;       // grossPnl - dollarPnl
   pnlPct: number;
   rrActual: number;
   win: boolean;
@@ -43,6 +47,8 @@ export interface BacktestSummary {
   avgRR: number;
   totalPnlPct: number;
   totalDollarPnl: number;
+  totalGrossPnl: number;
+  totalCosts: number;
 }
 
 export interface BacktestResult {
@@ -59,6 +65,8 @@ export interface BacktestResult {
   avgRR: number;
   totalPnlPct: number;
   totalDollarPnl: number;
+  totalGrossPnl: number;
+  totalCosts: number;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -134,6 +142,62 @@ function computeAtr20(daily: Candle[]): number {
   return count > 0 ? total / count : 0;
 }
 
+export interface BacktestOptions {
+  /** Spread/slippage/commission model. Pass ZERO_COSTS for the old free-fill behaviour. */
+  costs?: TradingCosts;
+  /**
+   * 'full_t1' mirrors the live daemon (full exit at T1 as a resting limit, since 2026-08-27).
+   * 'partial_runner' is the legacy model: half off at T1, stop to breakeven, runner to T2.
+   */
+  exitMode?: 'full_t1' | 'partial_runner';
+}
+
+interface SettleInput {
+  direction: 'BULL' | 'BEAR';
+  entry: number;
+  stop: number;
+  t1: number;
+  t1Hit: boolean;
+  shares: number;
+  adv: number;
+  sigmaDaily: number;
+}
+
+// One place that turns an exit into P&L. Gross uses the idealised prices; net walks
+// every leg through the cost model (entry is a market fill; targets are resting limits;
+// stops and the EOD flatten are market fills).
+function settle(
+  p: SettleInput,
+  exitPrice: number,
+  exitKind: FillKind,
+  mode: 'full_t1' | 'partial_runner',
+  costs: TradingCosts,
+): { gross: number; net: number } {
+  const dir = p.direction === 'BULL' ? 1 : -1;
+  const entrySide = dir === 1 ? 'buy' : 'sell';
+  const exitSide = dir === 1 ? 'sell' : 'buy';
+  const ctx = { shares: p.shares, adv: p.adv, sigmaDaily: p.sigmaDaily };
+  const entryFill = fillPrice(entrySide, p.entry, 'market', ctx, costs);
+
+  // Legs: [qty, idealPrice, kind]
+  const legs: Array<[number, number, FillKind]> = [];
+  if (mode === 'partial_runner' && p.t1Hit) {
+    const half = Math.floor(p.shares / 2);
+    legs.push([half, p.t1, 'limit'], [p.shares - half, exitPrice, exitKind]);
+  } else {
+    legs.push([p.shares, exitPrice, exitKind]);
+  }
+
+  let gross = 0;
+  let net = 0;
+  for (const [qty, px, kind] of legs) {
+    gross += dir * (px - p.entry) * qty;
+    net += dir * (fillPrice(exitSide, px, kind, { ...ctx, shares: qty }, costs) - entryFill) * qty;
+  }
+  net -= commission(p.shares, costs) * 2;
+  return { gross: round(gross, 2), net: round(net, 2) };
+}
+
 const BACKTEST_STATUS: MarketDataProviderStatus = {
   provider: 'alpaca',
   mode: 'live',
@@ -150,7 +214,10 @@ export function runBacktest(
   bars5m: Candle[],
   dailyBars: Candle[],
   accountBalance = 100_000,
+  opts: BacktestOptions = {},
 ): BacktestResult {
+  const costs = opts.costs ?? DEFAULT_COSTS;
+  const mode = opts.exitMode ?? 'full_t1';
   const { riskPerTradePct } = getRiskSettings();
   const trades: BacktestTrade[] = [];
   const regular5m = bars5m.filter((b) => b.time && isRegularSession(b.time));
@@ -183,6 +250,8 @@ export function runBacktest(
       t1Hit: boolean;
       rvolAtEntry: number;
       tape15mAligned: boolean;
+      adv: number;
+      sigmaDaily: number;
     } | null = null;
 
     for (let i = 0; i < dayBars.length; i++) {
@@ -193,30 +262,34 @@ export function runBacktest(
       if (openPos) {
         const { direction, effectiveStop, t1, t2, target, entry, stop, strategyId, entryTime, t1Hit, rvolAtEntry, tape15mAligned } = openPos;
 
-        // Check T1 hit first (partial exit — move stop to breakeven)
-        if (!t1Hit) {
+        // Partial-runner model only: T1 moves the stop to breakeven and lets T2 run.
+        if (mode === 'partial_runner' && !t1Hit) {
           const hitT1 = direction === 'BULL' ? bar.high >= t1 : bar.low <= t1;
-          if (hitT1) {
-            openPos = { ...openPos, t1Hit: true, effectiveStop: entry }; // breakeven stop
-            // Don't close yet; continue to let T2 run
-          }
+          if (hitT1) openPos = { ...openPos, t1Hit: true, effectiveStop: entry };
         }
 
         const { t1Hit: t1HitNow, effectiveStop: effStop } = openPos;
-        const hitT2 = direction === 'BULL' ? bar.high >= t2 : bar.low <= t2;
         const hitStop = direction === 'BULL' ? bar.low <= effStop : bar.high >= effStop;
-        // T1-hit positions run to 4:00 PM close (free trade — stop at breakeven costs nothing)
-        const eod = t1HitNow ? false : barMins >= 15 * 60 + 55;
+        // Full-exit model: T1 is the take-profit. Conservative tie-break: stop wins a same-bar tie.
+        const hitFinal = mode === 'full_t1'
+          ? (direction === 'BULL' ? bar.high >= t1 : bar.low <= t1)
+          : (direction === 'BULL' ? bar.high >= t2 : bar.low <= t2);
+        // Partial-runner T1-hit positions run to the close (free trade); everything else flattens ~EOD.
+        const eod = mode === 'partial_runner' && t1HitNow ? false : barMins >= 15 * 60 + 55;
 
         let outcome: 'target2' | 'target1' | 'breakeven' | 'stop' | 'eod' | null = null;
         let exitPrice = bar.close;
+        let kind: FillKind = 'market';
 
-        if (hitT2 && !hitStop) {
-          outcome = 'target2';
-          exitPrice = t2;
+        if (hitFinal && !hitStop) {
+          outcome = mode === 'full_t1' ? 'target1' : 'target2';
+          exitPrice = mode === 'full_t1' ? t1 : t2;
+          kind = 'limit';
         } else if (hitStop) {
           outcome = t1HitNow ? 'breakeven' : 'stop';
-          exitPrice = effStop;
+          // A bar that opens through the stop fills at the open, not at the stop.
+          exitPrice = direction === 'BULL' ? Math.min(effStop, bar.open) : Math.max(effStop, bar.open);
+          kind = 'stop';
         } else if (eod) {
           outcome = 'eod';
           exitPrice = bar.close;
@@ -225,41 +298,23 @@ export function runBacktest(
         if (outcome) {
           const shares = computePositionSize(accountBalance, entry, stop);
           const risk = Math.abs(entry - stop);
-          let dollarPnl: number;
-          let pnlPct: number;
-
-          if (t1HitNow) {
-            // 50% exited at T1, 50% at final exit price
-            const half = Math.floor(shares / 2);
-            const remainder = shares - half;
-            const t1Gain = direction === 'BULL' ? (t1 - entry) * half : (entry - t1) * half;
-            const finalGain = direction === 'BULL' ? (exitPrice - entry) * remainder : (entry - exitPrice) * remainder;
-            dollarPnl = round(t1Gain + finalGain, 2);
-            pnlPct = shares > 0 ? round(dollarPnl / (entry * shares) * 100, 2) : 0;
-          } else {
-            const rawPnl = direction === 'BULL' ? (exitPrice - entry) * shares : (entry - exitPrice) * shares;
-            dollarPnl = round(rawPnl, 2);
-            pnlPct = round(
-              direction === 'BULL' ? (exitPrice - entry) / entry * 100 : (entry - exitPrice) / entry * 100,
-              2,
-            );
-          }
-
+          const { gross, net } = settle({ direction, entry, stop, t1, t1Hit: t1HitNow, shares, adv: openPos.adv, sigmaDaily: openPos.sigmaDaily }, exitPrice, kind, mode, costs);
           const reward = Math.abs(exitPrice - entry);
           trades.push({
             symbol, strategyId, direction, date,
             entryTime, entryPrice: entry, stopPrice: stop,
             t1Price: t1, t2Price: t2, targetPrice: target,
             exitTime: bar.time, exitPrice, outcome,
-            t1Hit: t1HitNow,
-            shares, dollarPnl, pnlPct,
+            t1Hit: t1HitNow || outcome === 'target1',
+            shares, dollarPnl: net, grossPnl: gross, costs: round(gross - net, 2),
+            pnlPct: shares > 0 ? round(net / (entry * shares) * 100, 2) : 0,
             rrActual: risk > 0 ? round(reward / risk, 2) : 0,
-            win: dollarPnl > 0,
+            win: net > 0,
             rvolAtEntry, tape15mAligned,
           });
           openPos = null;
         }
-        continue; 
+        continue;
       }
 
       // ── Entry evaluation ───────────────────────────────────────────────────
@@ -354,45 +409,30 @@ export function runBacktest(
         t1Hit: false,
         rvolAtEntry: round(rvol, 2),          // for offline filter A/B (RVOL floor)
         tape15mAligned: trend15mAligned,       // for offline filter A/B (tape gate)
+        adv: prevDayVolume,
+        sigmaDaily: entryPrice > 0 ? atr20 / entryPrice : 0,
       };
     }
 
     // Force-close any position still open at EOD
     if (openPos) {
       const lastBar = dayBars[dayBars.length - 1];
-      const { direction, entry, stop, t1, t2, target, strategyId, entryTime, t1Hit, rvolAtEntry, tape15mAligned } = openPos;
+      const { direction, entry, stop, t1, t2, target, strategyId, entryTime, t1Hit, rvolAtEntry, tape15mAligned, adv, sigmaDaily } = openPos;
       const exitPrice = lastBar.close;
       const risk = Math.abs(entry - stop);
       const reward = Math.abs(exitPrice - entry);
       const shares = computePositionSize(accountBalance, entry, stop);
-      let dollarPnl: number;
-      let pnlPct: number;
-
-      if (t1Hit) {
-        const half = Math.floor(shares / 2);
-        const remainder = shares - half;
-        const t1Gain = direction === 'BULL' ? (t1 - entry) * half : (entry - t1) * half;
-        const finalGain = direction === 'BULL' ? (exitPrice - entry) * remainder : (entry - exitPrice) * remainder;
-        dollarPnl = round(t1Gain + finalGain, 2);
-        pnlPct = shares > 0 ? round(dollarPnl / (entry * shares) * 100, 2) : 0;
-      } else {
-        const rawPnl = direction === 'BULL' ? (exitPrice - entry) * shares : (entry - exitPrice) * shares;
-        dollarPnl = round(rawPnl, 2);
-        pnlPct = round(
-          direction === 'BULL' ? (exitPrice - entry) / entry * 100 : (entry - exitPrice) / entry * 100,
-          2,
-        );
-      }
-
+      const { gross, net } = settle({ direction, entry, stop, t1, t1Hit, shares, adv, sigmaDaily }, exitPrice, 'market', mode, costs);
       trades.push({
         symbol, strategyId, direction, date,
         entryTime, entryPrice: entry, stopPrice: stop,
         t1Price: t1, t2Price: t2, targetPrice: target,
         exitTime: lastBar.time, exitPrice, outcome: 'eod',
         t1Hit,
-        shares, dollarPnl, pnlPct,
+        shares, dollarPnl: net, grossPnl: gross, costs: round(gross - net, 2),
+        pnlPct: shares > 0 ? round(net / (entry * shares) * 100, 2) : 0,
         rrActual: risk > 0 ? round(reward / risk, 2) : 0,
-        win: dollarPnl > 0,
+        win: net > 0,
         rvolAtEntry, tape15mAligned,
       });
     }
@@ -421,6 +461,8 @@ export function runBacktest(
       avgRR: round(avgRR, 2),
       totalPnlPct: round(st.reduce((s, t) => s + t.pnlPct, 0), 2),
       totalDollarPnl: round(st.reduce((s, t) => s + t.dollarPnl, 0), 2),
+      totalGrossPnl: round(st.reduce((s, t) => s + t.grossPnl, 0), 2),
+      totalCosts: round(st.reduce((s, t) => s + t.costs, 0), 2),
     };
   });
 
@@ -440,5 +482,7 @@ export function runBacktest(
     avgRR: round(avgRR, 2),
     totalPnlPct: round(trades.reduce((s, t) => s + t.pnlPct, 0), 2),
     totalDollarPnl: round(trades.reduce((s, t) => s + t.dollarPnl, 0), 2),
+    totalGrossPnl: round(trades.reduce((s, t) => s + t.grossPnl, 0), 2),
+    totalCosts: round(trades.reduce((s, t) => s + t.costs, 0), 2),
   };
 }

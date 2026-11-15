@@ -29,6 +29,11 @@ if (fs.existsSync(envFile)) for (const l of fs.readFileSync(envFile, 'utf8').spl
 const KEY = env.ALPACA_KEY, SEC = env.ALPACA_SECRET;
 const DATA = 'https://data.alpaca.markets';
 const DAYS = Number(process.argv[2] || 35);
+// Cost model + exit model. Flags: --zero-costs (old free fills), --runner (legacy partial/runner exits).
+const ZERO = process.argv.includes('--zero-costs');
+const EXIT_MODE = process.argv.includes('--runner') ? 'partial_runner' : 'full_t1';
+let COSTS; // undefined => engine default (DEFAULT_COSTS)
+if (ZERO) COSTS = { commissionPerShare: 0, halfSpreadBps: 0, stopSlipBps: 0, impactY: 0 };
 
 // The backtest engine is TypeScript in src/. We import it via tsx-less dynamic
 // import of the compiled form if present, else fail loud (we won't fake results).
@@ -59,7 +64,9 @@ const cnt = {};
 real.forEach((t) => { cnt[t.symbol] = (cnt[t.symbol] || 0) + 1; });
 const universe = Object.entries(cnt).sort((a, b) => b[1] - a[1]).slice(0, 20).map(([s]) => s);
 
-console.log(`Backtest baseline — ${universe.length} symbols, ${DAYS}d, REAL engine (evaluateStrategies)\n`);
+console.log(`[exit=${EXIT_MODE} costs=${ZERO ? 'ZERO' : 'default'}]`);
+console.log(`Backtest baseline — ${universe.length} symbols, ${DAYS}d, REAL engine (evaluateStrategies)
+`);
 
 const RETIRED = new Set(['vwap_pullback', 's7_volume_surge', 'orb_retest', 'sniper_1m']);
 
@@ -69,7 +76,7 @@ for (const sym of universe) {
   const [b5, b1d] = await Promise.all([bars(sym, '5Min', DAYS), bars(sym, '1Day', 90)]);
   if (b5.length < 50) { console.log(`  ${sym}: insufficient bars (${b5.length}) — skip`); continue; }
   let res;
-  try { res = runBacktest(sym, b5, b1d, 100_000); } catch (e) { console.log(`  ${sym}: backtest error ${e.message}`); continue; }
+  try { res = runBacktest(sym, b5, b1d, 100_000, { costs: COSTS, exitMode: EXIT_MODE }); } catch (e) { console.log(`  ${sym}: backtest error ${e.message}`); continue; }
   const t = (res.trades || []).filter((tr) => !RETIRED.has(tr.strategyId));
   for (const tr of t) allTrades.push(tr);
   console.log(`  ${sym}: ${t.length} active trades`);
@@ -81,11 +88,12 @@ function summarize(trades) {
   const pnl = trades.reduce((s, t) => s + Number(t.dollarPnl || 0), 0);
   const gw = trades.filter((t) => t.dollarPnl > 0).reduce((s, t) => s + t.dollarPnl, 0);
   const gl = Math.abs(trades.filter((t) => t.dollarPnl < 0).reduce((s, t) => s + t.dollarPnl, 0));
-  return { n, wr: n ? Math.round(100 * wins / n) : 0, pnl: Math.round(pnl), exp: n ? pnl / n : 0, pf: gl ? gw / gl : (gw > 0 ? 99 : 0) };
+  const gross = trades.reduce((s, t) => s + Number(t.grossPnl ?? t.dollarPnl ?? 0), 0);
+  return { n, gross: Math.round(gross), wr: n ? Math.round(100 * wins / n) : 0, pnl: Math.round(pnl), exp: n ? pnl / n : 0, pf: gl ? gw / gl : (gw > 0 ? 99 : 0) };
 }
 function row(label, trades) {
   const s = summarize(trades);
-  console.log('  ' + label.padEnd(34), 'n=' + String(s.n).padStart(4), 'WR ' + (s.wr + '%').padStart(4), '$' + String(s.pnl).padStart(7), 'exp $' + s.exp.toFixed(1).padStart(6), 'PF ' + s.pf.toFixed(2).padStart(5));
+  console.log('  ' + label.padEnd(34), 'n=' + String(s.n).padStart(4), 'WR ' + (s.wr + '%').padStart(4), 'gross $' + String(s.gross).padStart(7), 'net $' + String(s.pnl).padStart(7), 'exp $' + s.exp.toFixed(1).padStart(6), 'PF ' + s.pf.toFixed(2).padStart(5));
   return s;
 }
 
