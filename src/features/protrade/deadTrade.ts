@@ -8,7 +8,11 @@
 // It is an EXPERIMENT hook: nothing in the live daemon uses it.
 
 export interface DeadTradeRule {
-  /** Check once, at the first bar close at/after this ET minute-of-day (e.g. 750 = 12:30). */
+  /**
+   * Check once, at the first bar close at/after this ET minute-of-day (e.g. 750 = 12:30). ONLY trades that
+   * were already open BEFORE that time are judged; a trade entered after it is never judged by this rule
+   * (otherwise a 1pm entry would be 'dead' on its first bar: past 12:30 with no progress yet).
+   */
   atEtMin?: number;
   /** ...or once this many minutes after entry (used when atEtMin is omitted). */
   afterHoldMin?: number;
@@ -16,11 +20,15 @@ export interface DeadTradeRule {
   minProgressR?: number;
   /** Dead only if currently flat or losing (unrealized <= 0), regardless of past excursion. */
   requireLosing?: boolean;
+  /** Never judge a trade younger than this many minutes (default 30): too early to call it dead. */
+  minHoldMin?: number;
 }
 
 export interface DeadTradeCtx {
   /** ET minute-of-day at the CLOSE of the bar being evaluated. */
   etMinClose: number;
+  /** ET minute-of-day when the trade was entered. */
+  entryEtMin: number;
   /** Minutes since entry at that bar close. */
   heldMin: number;
   /** Best favourable excursion since entry, in R. */
@@ -31,7 +39,8 @@ export interface DeadTradeCtx {
 
 /** Is the time condition for the check satisfied yet? */
 export function deadCheckDue(rule: DeadTradeRule, ctx: DeadTradeCtx): boolean {
-  if (rule.atEtMin !== undefined) return ctx.etMinClose >= rule.atEtMin;
+  if (ctx.heldMin < (rule.minHoldMin ?? 30)) return false;
+  if (rule.atEtMin !== undefined) return ctx.entryEtMin < rule.atEtMin && ctx.etMinClose >= rule.atEtMin;
   if (rule.afterHoldMin !== undefined) return ctx.heldMin >= rule.afterHoldMin;
   return false;
 }

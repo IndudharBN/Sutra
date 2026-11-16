@@ -1,14 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import { deadCheckDue, isDeadTrade } from './deadTrade';
 
-const ctx = (o: Partial<{ etMinClose: number; heldMin: number; mfeR: number; unrealizedR: number }> = {}) => ({
-  etMinClose: 12 * 60 + 30, heldMin: 90, mfeR: 0.1, unrealizedR: -0.2, ...o,
+const ctx = (o: Partial<{ etMinClose: number; entryEtMin: number; heldMin: number; mfeR: number; unrealizedR: number }> = {}) => ({
+  etMinClose: 12 * 60 + 30, entryEtMin: 10 * 60 + 45, heldMin: 105, mfeR: 0.1, unrealizedR: -0.2, ...o,
 });
 
 describe('dead-trade rule', () => {
   it('is not due before the clock time', () => {
     expect(deadCheckDue({ atEtMin: 750 }, ctx({ etMinClose: 749 }))).toBe(false);
     expect(deadCheckDue({ atEtMin: 750 }, ctx({ etMinClose: 750 }))).toBe(true);
+  });
+
+  it('a trade entered AFTER the check time is never judged by a clock rule (the 1pm-entry case)', () => {
+    // entered 13:00, first bar closes 13:05: past 12:30, but it was not open at 12:30
+    expect(deadCheckDue({ atEtMin: 750 }, ctx({ entryEtMin: 13 * 60, etMinClose: 13 * 60 + 5, heldMin: 5 }))).toBe(false);
+    expect(isDeadTrade({ atEtMin: 750, minProgressR: 0.3 }, ctx({ entryEtMin: 13 * 60, etMinClose: 14 * 60, heldMin: 60, mfeR: 0 }))).toBe(false);
+  });
+
+  it('a trade entered 12:28 is not judged at 12:30: too young (min hold 30m)', () => {
+    expect(deadCheckDue({ atEtMin: 750 }, ctx({ entryEtMin: 12 * 60 + 28, etMinClose: 12 * 60 + 30, heldMin: 2 }))).toBe(false);
+    expect(deadCheckDue({ atEtMin: 750 }, ctx({ entryEtMin: 12 * 60, etMinClose: 12 * 60 + 35, heldMin: 35 }))).toBe(true);
   });
 
   it('hold-time variant uses minutes since entry', () => {

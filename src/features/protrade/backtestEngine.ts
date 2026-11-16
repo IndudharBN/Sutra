@@ -326,6 +326,7 @@ export function runBacktest(
             const R = Math.abs(entry - stop);
             const ctx = {
               etMinClose: barMins + 5,
+              entryEtMin: etMins(entryTime),
               heldMin,
               mfeR: R > 0 ? openPos.mfe / R : 0,
               unrealizedR: R > 0 ? (direction === 'BULL' ? bar.close - entry : entry - bar.close) / R : 0,
