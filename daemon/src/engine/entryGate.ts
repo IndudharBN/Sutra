@@ -14,7 +14,10 @@
 
 import type { Candle } from './ohlcv';
 
-export const RETIRED_STRATEGIES: string[] = ['vwap_pullback', 's7_volume_surge', 'orb_retest', 'sniper_1m'];
+// ema20_bounce (S8) retired 2026-11-16: 141 real fills since 2026-08-27, PF 0.68, -$2,411 (more than
+// the whole book's net loss), WR 40%, and PF 0.50 / WR 38% since the S4 fix; the replay agrees
+// (negative). Remove it from this list to re-trial it.
+export const RETIRED_STRATEGIES: string[] = ['vwap_pullback', 's7_volume_surge', 'orb_retest', 'sniper_1m', 'ema20_bounce'];
 export const REVERSAL_STRATEGIES = new Set(['ob_fvg_retest', 'mss_breakout']);
 export const QUALIFIED_RVOL_MIN = 1.2;
 export const QUALIFIED_MIN_SCORE = 65;
@@ -94,4 +97,40 @@ export function isQualified(i: {
     && i.vwapAligned
     && i.trendAligned
     && (REVERSAL_STRATEGIES.has(i.primaryStrategyId) ? true : i.trend15mAligned);
+}
+
+// ── DST-safe US-equity session clock ─────────────────────────────────────────
+// The session boundaries used to be hard-coded in UTC (13:30-20:00), which is only right
+// during daylight time. Since the Nov 2 change to EST the market is 14:30-21:00 UTC, so
+// RVOL's session-progress was overstated (RVOL deflated ~20-35% in the morning), pre-market
+// bars counted as "regular session" for opening ranges, and the "market closed" flag fired
+// at 15:00 ET. Everything session-related must be computed in America/New_York.
+const ET_PARTS = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', weekday: 'short', hour12: false,
+});
+export const RTH_OPEN_MIN = 9 * 60 + 30;
+export const RTH_CLOSE_MIN = 16 * 60;
+
+function etParts(t: Date | string | number): { minutes: number; weekday: string } {
+  let h = 0, m = 0, weekday = '';
+  for (const p of ET_PARTS.formatToParts(new Date(t))) {
+    if (p.type === 'hour') h = parseInt(p.value, 10) % 24;
+    else if (p.type === 'minute') m = parseInt(p.value, 10);
+    else if (p.type === 'weekday') weekday = p.value;
+  }
+  return { minutes: h * 60 + m, weekday };
+}
+
+/** Minutes since midnight, America/New_York. */
+export function etMinutes(t: Date | string | number): number { return etParts(t).minutes; }
+
+/** True outside Mon-Fri 09:30-16:00 ET (holidays not modelled). */
+export function isMarketClosedET(t: Date | string | number): boolean {
+  const { minutes, weekday } = etParts(t);
+  return weekday === 'Sat' || weekday === 'Sun' || minutes < RTH_OPEN_MIN || minutes >= RTH_CLOSE_MIN;
+}
+
+/** Fraction of the regular session elapsed, clamped to [0.05, 1] (for RVOL projection). */
+export function sessionProgress(t: Date | string | number): number {
+  return Math.min(1, Math.max(0.05, (etMinutes(t) - RTH_OPEN_MIN) / (RTH_CLOSE_MIN - RTH_OPEN_MIN)));
 }

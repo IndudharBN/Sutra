@@ -34,7 +34,7 @@ const ZERO = process.argv.includes('--zero-costs');
 const EXIT_MODE = process.argv.includes('--runner') ? 'partial_runner' : 'full_t1';
 const LIVE_GATES = !process.argv.includes('--legacy'); // --legacy = old permissive replay
 let COSTS; // undefined => engine default (DEFAULT_COSTS)
-if (ZERO) COSTS = { commissionPerShare: 0, halfSpreadBps: 0, stopSlipBps: 0, impactY: 0 };
+if (ZERO) COSTS = { commissionPerShare: 0, halfSpreadBps: 0, stopSlipBps: 0, impactY: 0, limitSlipBps: 0 };
 
 // The backtest engine is TypeScript in src/. We import it via tsx-less dynamic
 // import of the compiled form if present, else fail loud (we won't fake results).
@@ -63,13 +63,18 @@ const raw = JSON.parse(fs.readFileSync(path.join(ROOT, 'data', 'trades.json'), '
 const real = (Array.isArray(raw) ? raw : raw.trades || []).filter((t) => !t.phantom && t.id !== '__ALPACA_ANCHOR__' && t.status === 'Closed');
 const cnt = {};
 real.forEach((t) => { cnt[t.symbol] = (cnt[t.symbol] || 0) + 1; });
-const universe = Object.entries(cnt).sort((a, b) => b[1] - a[1]).slice(0, 20).map(([s]) => s);
+// --universe=live : every symbol the live book traded in the window (closer to the live scan breadth);
+// default: the 20 most-traded (fast).
+const UNIV_LIVE = process.argv.includes('--universe=live');
+const winCut = new Date(Date.now() - DAYS * 864e5).toISOString();
+if (UNIV_LIVE) { for (const k of Object.keys(cnt)) delete cnt[k]; real.filter((t) => t.openedAt >= winCut).forEach((t) => { cnt[t.symbol] = (cnt[t.symbol] || 0) + 1; }); }
+const universe = Object.entries(cnt).sort((a, b) => b[1] - a[1]).slice(0, UNIV_LIVE ? 200 : 20).map(([s]) => s);
 
 console.log(`[exit=${EXIT_MODE} costs=${ZERO ? 'ZERO' : 'default'}]`);
 console.log(`Backtest baseline — ${universe.length} symbols, ${DAYS}d, REAL engine (evaluateStrategies)
 `);
 
-const RETIRED = new Set(['vwap_pullback', 's7_volume_surge', 'orb_retest', 'sniper_1m']);
+const RETIRED = new Set(['vwap_pullback', 's7_volume_surge', 'orb_retest', 'sniper_1m', 'ema20_bounce']); // keep in sync with entryGate.RETIRED_STRATEGIES
 
 // Collect ALL active backtest trades once, then A/B candidate filters offline.
 const allTrades = [];
@@ -110,17 +115,25 @@ row('15m-tape aligned (mandatory)', allTrades.filter((t) => t.tape15mAligned));
 // C: combined — the strict stack
 row('RVOL>=1.2 AND tape aligned', allTrades.filter((t) => t.rvolAtEntry >= 1.2 && t.tape15mAligned));
 
-// per-strategy: backtest vs REAL fills (the honest cross-check)
+// per-strategy: backtest vs REAL fills over the SAME window, in PERCENT of notional so the
+// replay's risk-based sizing and live's multiplier/cap sizing don't distort the comparison.
 console.log(`
-=== PER STRATEGY (backtest net vs real Alpaca-ledger P&L) ===`);
-const ids = [...new Set([...allTrades.map((t) => t.strategyId), ...real.filter((t) => !RETIRED.has(t.strategyId)).map((t) => t.strategyId)])].filter(Boolean).sort();
+=== PER STRATEGY, same ${DAYS}d window (pnl% = net P&L / notional; \$ not comparable: different sizing) ===`);
+const realWin = real.filter((t) => t.openedAt >= winCut);
+const ids = [...new Set([...allTrades.map((t) => t.strategyId), ...realWin.map((t) => t.strategyId)])].filter((i) => i && !RETIRED.has(i)).sort();
+const meanPct = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
 for (const id of ids) {
-  const b = summarize(allTrades.filter((t) => t.strategyId === id));
-  const r = real.filter((t) => t.strategyId === id);
-  const rn = r.length, rw = r.filter((t) => +t.pnl > 0).length, rp = r.reduce((a, t) => a + (+t.pnl || 0), 0);
-  console.log('  ' + id.padEnd(22), 'BT n=' + String(b.n).padStart(3), 'WR ' + (b.wr + '%').padStart(4), 'net $' + String(b.pnl).padStart(6), 'PF ' + b.pf.toFixed(2).padStart(5),
-    ' | REAL n=' + String(rn).padStart(3), 'WR ' + ((rn ? Math.round(100 * rw / rn) : 0) + '%').padStart(4), 'pnl $' + String(Math.round(rp)).padStart(6));
+  const bt = allTrades.filter((t) => t.strategyId === id);
+  const rl = realWin.filter((t) => t.strategyId === id && t.notional > 0);
+  const bPct = bt.map((t) => Number(t.pnlPct));
+  const rPct = rl.map((t) => (+t.pnl / t.notional) * 100);
+  const rw = rl.filter((t) => +t.pnl > 0).length;
+  console.log('  ' + id.padEnd(20),
+    'BT n=' + String(bt.length).padStart(3), 'WR ' + ((bt.length ? Math.round(100 * bt.filter((t) => t.win).length / bt.length) : 0) + '%').padStart(4), 'mean ' + meanPct(bPct).toFixed(2).padStart(6) + '%',
+    ' | REAL n=' + String(rl.length).padStart(3), 'WR ' + ((rl.length ? Math.round(100 * rw / rl.length) : 0) + '%').padStart(4), 'mean ' + meanPct(rPct).toFixed(2).padStart(6) + '%');
 }
+console.log('  universe: ' + universe.length + ' symbols' + (UNIV_LIVE ? ' (live-traded)' : ' (top-20)'));
+fs.writeFileSync(path.join(ROOT, 'logs', 'backtest-trades-last.json'), JSON.stringify(allTrades));
 
 // validation
 const realActive = real.filter((t) => !RETIRED.has(t.strategyId));

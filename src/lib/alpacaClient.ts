@@ -1,5 +1,6 @@
 import { env } from './env';
 import type { Candle, CandleSet, Interval } from '../features/scanner/ohlcv';
+import { sessionProgress } from '../features/protrade/entryGate';
 
 // ── Alpaca timeframe mapping ──────────────────────────────────────────────────
 const ALPACA_TF: Record<Interval, string> = {
@@ -195,11 +196,7 @@ export interface SymbolMeta {
 }
 
 function sessionProgressFactor(): number {
-  const now = new Date();
-  const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const open = 13 * 60 + 30;
-  const close = 20 * 60;
-  return Math.min(1, Math.max(0.05, (utcMins - open) / (close - open)));
+  return sessionProgress(Date.now());
 }
 
 export async function fetchUniverseMeta(symbols: string[]): Promise<SymbolMeta[]> {

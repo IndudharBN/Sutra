@@ -2,6 +2,7 @@ import { atr, ema, vwapLatest } from './indicators';
 import { CandleSet, closes, last } from './ohlcv';
 import { detectFvg } from './fvg';
 import { findOrderBlockZone } from './smc';
+import { etMinutes } from '../protrade/entryGate';
 
 export interface HtfContext {
   direction: 'BULL' | 'BEAR' | 'NEUTRAL';
@@ -25,10 +26,10 @@ export interface HtfContext {
 function sessionWindowFromTime(time?: string): HtfContext['sessionWindow'] {
   if (!time) return 'morning';
   const date = new Date(time);
-  const minutes = date.getUTCHours() * 60 + date.getUTCMinutes();
-  if (minutes >= 13 * 60 + 30 && minutes < 13 * 60 + 45) return 'opening';
-  if (minutes >= 16 * 60 && minutes < 17 * 60) return 'lunch';
-  if (minutes >= 18 * 60) return 'afternoon';
+  const minutes = etMinutes(date);
+  if (minutes >= 9 * 60 + 30 && minutes < 9 * 60 + 45) return 'opening';
+  if (minutes >= 12 * 60 && minutes < 13 * 60) return 'lunch';
+  if (minutes >= 14 * 60) return 'afternoon';
   return 'morning';
 }
 

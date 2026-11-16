@@ -19,9 +19,9 @@
 //   - STOP exit vs planned stop (n=65): median 3.0 bps adverse, mean -3.3 bps (outliers fill BETTER),
 //     p75 12 bps. The half-spread already charged on a stop covers the median, so stopSlipBps = 0
 //     (the engine separately fills at the bar OPEN when a bar gaps through the stop).
-//   - TARGET exits: NOT clean limit fills — 37% at/above T1, the rest below it (e.g. exits between
-//     entry and T1 labelled 'Target'). Something closes winners before T1; that is an exit-logic
-//     difference to investigate, not slippage, so limit fills stay free here.
+//   - TARGET exits (n=63): median 5.5 bps WORSE than planned T1, net -$220 vs plan. Cause found:
+//     monitorLoop market-closes (closePaperPosition) when the daemon's price snapshot touches T1,
+//     cancelling Alpaca's resting limit. Modelled as limitSlipBps = 5 (live exit path unchanged).
 // Same costs hit every strategy, so relative comparisons are meaningful regardless.
 
 export interface TradingCosts {
@@ -33,6 +33,11 @@ export interface TradingCosts {
   stopSlipBps: number;
   /** Square-root-law impact coefficient (published fits 0.5-1.0); 0 disables. */
   impactY: number;
+  /**
+   * Adverse bps on 'limit' exits (profit targets). Measured 5.5 median on 63 real target exits: the
+   * daemon market-closes when its price snapshot touches T1 instead of waiting for the resting limit.
+   */
+  limitSlipBps: number;
 }
 
 export const DEFAULT_COSTS: TradingCosts = {
@@ -40,6 +45,7 @@ export const DEFAULT_COSTS: TradingCosts = {
   halfSpreadBps: 5,
   stopSlipBps: 0,
   impactY: 0.5,
+  limitSlipBps: 5,
 };
 
 export const ZERO_COSTS: TradingCosts = {
@@ -47,6 +53,7 @@ export const ZERO_COSTS: TradingCosts = {
   halfSpreadBps: 0,
   stopSlipBps: 0,
   impactY: 0,
+  limitSlipBps: 0,
 };
 
 export type FillKind = 'limit' | 'market' | 'stop';
@@ -71,7 +78,11 @@ export function fillPrice(
   ctx: FillContext,
   costs: TradingCosts,
 ): number {
-  if (kind === 'limit' || !(price > 0)) return price;
+  if (!(price > 0)) return price;
+  if (kind === 'limit') {
+    const slip = price * ((costs.limitSlipBps ?? 0) / 10_000);
+    return side === 'buy' ? price + slip : price - slip;
+  }
   const bps = costs.halfSpreadBps + (kind === 'stop' ? costs.stopSlipBps : 0);
   let adverse = price * (bps / 10_000);
   if (costs.impactY > 0 && ctx.adv && ctx.adv > 0 && ctx.sigmaDaily && ctx.sigmaDaily > 0 && ctx.shares > 0) {

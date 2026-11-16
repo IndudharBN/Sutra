@@ -4,8 +4,10 @@ import { DEFAULT_COSTS, ZERO_COSTS, commission, fillPrice } from './costs';
 describe('trading costs', () => {
   const ctx = { shares: 100 };
 
-  it('limit fills are free', () => {
-    expect(fillPrice('sell', 50, 'limit', ctx, DEFAULT_COSTS)).toBe(50);
+  it('limit fills pay only the measured limit slippage (spread/impact never)', () => {
+    expect(fillPrice('sell', 50, 'limit', ctx, ZERO_COSTS)).toBe(50);
+    expect(fillPrice('sell', 100, 'limit', ctx, DEFAULT_COSTS)).toBeCloseTo(99.95, 6);
+    expect(fillPrice('buy', 100, 'limit', ctx, DEFAULT_COSTS)).toBeCloseTo(100.05, 6);
   });
 
   it('market fills move against the trader on both sides', () => {

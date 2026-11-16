@@ -5,18 +5,15 @@ import { betaAdjustedSizingMult } from '../portfolioRisk';
 import { STRATEGY_CODES } from './workflowTypes';
 
 // ─── Per-strategy conviction sizing ──────────────────────────────────────────
-// Earned by realized performance over 448 paper trades (May 20–Jul 1 2026):
-//   S4 liquidity_sweep  64.1% WR, PF 8.24, +$69.5/trade → 2.0×  (~6% risk/trade)
-//   S6 mss_breakout     59.0% WR, PF 2.16, +$10.8/trade → 1.333× (~4% risk/trade)
-//   S8 ema20_bounce     48.3% WR, PF 1.81, +$7.8/trade  → 1.333× (~4% risk/trade)
-// Multipliers are relative to the base riskPerTradePct (3% default) — the %
-// figures above hold only at that base. Everything else stays at 1.0× — size
-// scales with proven edge only. Revisit after the tightened gates
-// (S1/S2/S5/S7/S9/S11/S12/S14) have fresh forward data.
+// The old multipliers (S4 2.0x, S6 1.333x, S8 1.333x) were "earned" on May 20-Jul 1 P&L,
+// which was the fictional pre-Jul-24 ledger. REAL Alpaca fills since 2026-08-27 (full-T1 era):
+//   S4 liquidity_sweep  n=62  PF 0.78  -$702   -> boost REMOVED (2.0x -> 1.0x)
+//   S8 ema20_bounce     n=141 PF 0.68  -$2,411 -> RETIRED (see entryGate.RETIRED_STRATEGIES)
+//   S6 mss_breakout     n=117 PF 1.28  +$1,244 -> keeps 1.333x for now, t~0.5 = NOT proven;
+//                                                  revisit at the next review, cut if PF < 1.
+// Size scales with proven edge only.
 const STRATEGY_SIZE_MULT: Record<string, number> = {
-  liquidity_sweep: 2.0,
   mss_breakout: 4 / 3,
-  ema20_bounce: 4 / 3,
 };
 
 // Absolute per-strategy notional ceiling (USD). User directive 2026-07-02: S4 tops

@@ -2,6 +2,7 @@ import { env } from './env';
 import path from 'path';
 import fs from 'fs';
 import type { Candle, CandleSet, Interval } from './engine/ohlcv';
+import { sessionProgress } from './engine/entryGate';
 
 const ALPACA_TF: Record<Interval, string> = {
   '1m': '1Min', '5m': '5Min', '15m': '15Min', '1h': '1Hour', '1d': '1Day',
@@ -308,11 +309,7 @@ export interface SymbolMeta {
 }
 
 function sessionProgressFactor(): number {
-  const now = new Date();
-  const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const open = 13 * 60 + 30;
-  const close = 20 * 60;
-  return Math.min(1, Math.max(0.05, (utcMins - open) / (close - open)));
+  return sessionProgress(Date.now());
 }
 
 export async function fetchUniverseMeta(symbols: string[]): Promise<SymbolMeta[]> {

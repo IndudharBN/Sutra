@@ -5,6 +5,7 @@ import { closes, last, round } from './ohlcv';
 import { findOrderBlockZone, rejectionCandle } from './smc';
 import type { SignalGroup, StrategyChecklistItem, StrategyId, StrategyInput, StrategySignal, TradePlan, WorkflowStage } from './workflowTypes';
 import { STRATEGY_LABELS, workflowStageRank } from './workflowTypes';
+import { RTH_CLOSE_MIN, RTH_OPEN_MIN, etMinutes } from './entryGate';
 
 // ── Injectable clock ─────────────────────────────────────────────────────────
 // Several strategy gates (session gate, 10:15/10:30/10:45 time gates, bar-age volume
@@ -314,9 +315,9 @@ function sessionGate(): 'open' | 'blackout' | 'closed' {
   const now = clockDate();
   const day = now.getUTCDay();
   if (day === 0 || day === 6) return 'closed';
-  const utcMins = now.getUTCHours() * 60 + now.getUTCMinutes();
-  if (utcMins < 13 * 60 + 30 || utcMins >= 20 * 60) return 'closed';
-  if (utcMins < 13 * 60 + 45) return 'blackout'; // 9:45 AM ET
+  const etMin = etMinutes(now);
+  if (etMin < RTH_OPEN_MIN || etMin >= RTH_CLOSE_MIN) return 'closed';
+  if (etMin < 9 * 60 + 45) return 'blackout'; // 9:45 AM ET
   return 'open';
 }
 
@@ -425,8 +426,7 @@ function todayOpeningRange(candles: Candle[]): ReturnType<typeof openingRange> {
   const todayRTH = candles.filter((c) => {
     const d = new Date(c.time);
     const date = d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-    const utcMins = d.getUTCHours() * 60 + d.getUTCMinutes();
-    return date === todayET && utcMins >= 13 * 60 + 30;
+    return date === todayET && etMinutes(d) >= RTH_OPEN_MIN;
   });
   return openingRange(todayRTH, 3);
 }
@@ -458,7 +458,7 @@ function rsi14(cls: number[]): number {
 function rthBarCount(candles: Candle[]): number {
   return candles.filter((c) => {
     const d = new Date(c.time);
-    return d.getUTCHours() * 60 + d.getUTCMinutes() >= 13 * 60 + 30;
+    return etMinutes(d) >= RTH_OPEN_MIN;
   }).length;
 }
 
@@ -467,7 +467,7 @@ function adrExhausted(candles: Candle[], atr20: number): boolean {
   if (atr20 <= 0) return false;
   const rth = candles.filter((c) => {
     const d = new Date(c.time);
-    return d.getUTCHours() * 60 + d.getUTCMinutes() >= 13 * 60 + 30;
+    return etMinutes(d) >= RTH_OPEN_MIN;
   });
   if (!rth.length) return false;
   const hi = Math.max(...rth.map((c) => c.high));
@@ -1093,7 +1093,7 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
   const todayRTH = candles.five.filter((c) => {
     const d = new Date(c.time);
     return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === todayET
-      && d.getUTCHours() * 60 + d.getUTCMinutes() >= 13 * 60 + 30;
+      && etMinutes(d) >= RTH_OPEN_MIN;
   });
   const midSessionBars = todayRTH.length > 7 ? todayRTH.slice(6, -1) : [];
   const volSample = midSessionBars.length >= 4 ? midSessionBars : candles.five.slice(-21, -1);

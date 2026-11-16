@@ -6,7 +6,7 @@ import { ema, sessionCandles, sessionVwap, sessionVwapSlope } from './indicators
 import type { Candle, CandleSet } from './ohlcv';
 import { closes, last, round } from './ohlcv';
 import { evaluateStrategies } from './strategyEngine';
-import { RETIRED_STRATEGIES, computeAtr, isQualified } from './entryGate';
+import { RETIRED_STRATEGIES, computeAtr, isMarketClosedET, isQualified } from './entryGate';
 import { stampGroupClassification } from './confluenceClassifier';
 import type { MarketDataProviderStatus, StrategySignal, WorkflowStage } from './workflowTypes';
 import { workflowStageRank } from './workflowTypes';
@@ -406,9 +406,7 @@ function scoreRow(input: {
 function dataProviderStatus(fetchedAt?: string): MarketDataProviderStatus {
   const lastUpdated = fetchedAt || new Date().toISOString();
   const ageSeconds = Math.max(0, Math.round((Date.now() - new Date(lastUpdated).getTime()) / 1000));
-  const utcMins = new Date().getUTCHours() * 60 + new Date().getUTCMinutes();
-  const dow = new Date().getUTCDay();
-  const marketClosed = dow === 0 || dow === 6 || utcMins < 13 * 60 + 30 || utcMins >= 20 * 60;
+  const marketClosed = isMarketClosedET(Date.now());
   const stale = ageSeconds > 90 || marketClosed;
   return {
     provider: 'alpaca',
