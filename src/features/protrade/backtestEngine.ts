@@ -1,5 +1,7 @@
 import { evaluateStrategies, setStrategyClock, setStrategyTuning } from './strategyEngine';
 import type { StrategyTuning } from './strategyEngine';
+import { deadCheckDue, isDeadTrade } from './deadTrade';
+import type { DeadTradeRule } from './deadTrade';
 import { RETIRED_STRATEGIES, baseFailures, computeAtr, isQualified, liveDirection, scoreRow } from './entryGate';
 import { DEFAULT_COSTS, commission, fillPrice } from './costs';
 import type { FillKind, TradingCosts } from './costs';
@@ -22,7 +24,7 @@ export interface BacktestTrade {
   targetPrice: number;
   exitTime: string;
   exitPrice: number;
-  outcome: 'target2' | 'target1' | 'breakeven' | 'stop' | 'eod';
+  outcome: 'target2' | 'target1' | 'breakeven' | 'stop' | 'eod' | 'dead';
   t1Hit: boolean;
   shares: number;
   dollarPnl: number;   // NET of costs
@@ -160,6 +162,10 @@ export interface BacktestOptions {
   liveGates?: boolean;
   /** Offline stop-width experiments (see StrategyTuning). Omitted = live defaults. */
   tuning?: Partial<StrategyTuning>;
+  /** Experiment: exit trades that have made no progress by a given time (see deadTrade.ts). */
+  deadTrade?: DeadTradeRule;
+  /** Experiment: take no new entries once the bar CLOSE is at/after this ET minute-of-day (720 = 12:00). */
+  noEntryAfterMin?: number;
 }
 
 interface SettleInput {
@@ -264,6 +270,8 @@ export function runBacktest(
       tape15mAligned: boolean;
       adv: number;
       sigmaDaily: number;
+      mfe: number;          // best favourable excursion since entry, in price units
+      deadChecked: boolean; // dead-trade rule is evaluated once
     } | null = null;
 
     for (let i = 0; i < dayBars.length; i++) {
@@ -289,7 +297,7 @@ export function runBacktest(
         // Partial-runner T1-hit positions run to the close (free trade); everything else flattens ~EOD.
         const eod = mode === 'partial_runner' && t1HitNow ? false : barMins >= 15 * 60 + 55;
 
-        let outcome: 'target2' | 'target1' | 'breakeven' | 'stop' | 'eod' | null = null;
+        let outcome: 'target2' | 'target1' | 'breakeven' | 'stop' | 'eod' | 'dead' | null = null;
         let exitPrice = bar.close;
         let kind: FillKind = 'market';
 
@@ -305,6 +313,31 @@ export function runBacktest(
         } else if (eod) {
           outcome = 'eod';
           exitPrice = bar.close;
+        }
+
+        // Still open after stop/target/EOD checks: track excursion, then apply the dead-trade rule.
+        if (!outcome) {
+          const fav = direction === 'BULL' ? bar.high - entry : entry - bar.low;
+          if (fav > openPos.mfe) openPos = { ...openPos, mfe: fav };
+          const dRule = opts.deadTrade;
+          if (dRule && !openPos.deadChecked) {
+            const closeMs = new Date(bar.time).getTime() + 5 * 60_000;
+            const heldMin = (closeMs - new Date(entryTime).getTime()) / 60_000;
+            const R = Math.abs(entry - stop);
+            const ctx = {
+              etMinClose: barMins + 5,
+              heldMin,
+              mfeR: R > 0 ? openPos.mfe / R : 0,
+              unrealizedR: R > 0 ? (direction === 'BULL' ? bar.close - entry : entry - bar.close) / R : 0,
+            };
+            if (deadCheckDue(dRule, ctx)) {
+              openPos = { ...openPos, deadChecked: true };
+              if (isDeadTrade(dRule, ctx)) {
+                outcome = 'dead';
+                exitPrice = bar.close;
+              }
+            }
+          }
         }
 
         if (outcome) {
@@ -334,6 +367,7 @@ export function runBacktest(
       // Legacy: skip first 15 min and last 30. Live: the decision is made when the bar CLOSES
       // (bar start + 5m) and the executor trades 09:30-15:45 ET.
       if (liveGates ? (barMins + 5 < 9 * 60 + 30 || barMins + 5 >= 15 * 60 + 45) : (barMins < 9 * 60 + 45 || barMins >= 15 * 60 + 30)) continue;
+      if (opts.noEntryAfterMin !== undefined && barMins + 5 >= opts.noEntryAfterMin) continue;
       // Need at least 3 bars (OR formation); prevDayBars5m already provides EMA context
       if (i < 3) continue;
 
@@ -455,6 +489,8 @@ export function runBacktest(
         tape15mAligned: trend15mAligned,       // for offline filter A/B (tape gate)
         adv: prevDayVolume,
         sigmaDaily: entryPrice > 0 ? atr20 / entryPrice : 0,
+        mfe: 0,
+        deadChecked: false,
       };
       firedToday = true;
     }

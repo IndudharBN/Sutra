@@ -40,7 +40,14 @@ async function bars(symbol, tf, days) {
   const end = new Date().toISOString();
   const start = new Date(Date.now() - days * 864e5).toISOString();
   const url = `https://data.alpaca.markets/v2/stocks/${symbol}/bars?timeframe=${tf}&start=${start}&end=${end}&limit=10000&adjustment=raw&feed=iex`;
-  const r = await fetch(url, { headers: H });
+  // Retry transient network failures (a dropped socket killed the first full run after 5 symbols).
+  let r;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try { r = await fetch(url, { headers: H }); break; } catch (e) {
+      if (attempt === 4) { console.log(`  ${symbol}: fetch failed after 4 tries (${e.cause?.code || e.message}) — skipping`); return []; }
+      await new Promise((res) => setTimeout(res, 1500 * attempt));
+    }
+  }
   if (!r.ok) return [];
   return ((await r.json()).bars || []).map((b) => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c, volume: b.v }));
 }
