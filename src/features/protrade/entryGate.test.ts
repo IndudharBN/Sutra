@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RETIRED_STRATEGIES, etMinutes, isMarketClosedET, isQualified, sessionProgress } from './entryGate';
+import { RETIRED_STRATEGIES, etDateKey, etMinutes, isMarketClosedET, isQualified, sessionProgress } from './entryGate';
 
 describe('DST-safe session clock', () => {
   it('9:30 ET is minute 570 in both EDT and EST', () => {
@@ -36,5 +36,37 @@ describe('qualification', () => {
   });
   it('S8 ema20_bounce is retired', () => {
     expect(RETIRED_STRATEGIES).toContain('ema20_bounce');
+  });
+});
+
+describe('arithmetic ET converter matches Intl (2024-2029, incl. every DST boundary)', () => {
+  const FMT = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: 'numeric', minute: 'numeric', hour12: false });
+  const ref = (ms: number) => {
+    const o: Record<string, string> = {};
+    for (const p of FMT.formatToParts(new Date(ms))) o[p.type] = p.value;
+    return { minutes: (parseInt(o.hour, 10) % 24) * 60 + parseInt(o.minute, 10), date: `${o.year}-${o.month}-${o.day}` };
+  };
+  it('agrees on a dense sweep and around every transition', () => {
+    const samples: number[] = [];
+    for (let t = Date.UTC(2024, 0, 1); t < Date.UTC(2030, 0, 1); t += 41 * 60_000 + 7_000) samples.push(t);
+    for (let y = 2024; y <= 2029; y++) {
+      const firstSun = (m: number) => 1 + ((7 - new Date(Date.UTC(y, m, 1)).getUTCDay()) % 7);
+      for (const edge of [Date.UTC(y, 2, firstSun(2) + 7, 7, 0), Date.UTC(y, 10, firstSun(10), 6, 0)]) {
+        for (let d = -3; d <= 3; d++) samples.push(edge + d * 60_000);
+      }
+    }
+    let bad = 0;
+    for (const ms of samples) {
+      const r = ref(ms);
+      if (etMinutes(ms) !== r.minutes || etDateKey(ms) !== r.date) bad++;
+    }
+    expect(bad).toBe(0);
+  });
+  it('is fast: 200k conversions well under a second', () => {
+    const t0 = performance.now();
+    let x = 0;
+    for (let i = 0; i < 200_000; i++) x += etMinutes(1_700_000_000_000 + i * 60_000);
+    expect(x).toBeGreaterThan(0);
+    expect(performance.now() - t0).toBeLessThan(1000);
   });
 });

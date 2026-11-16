@@ -2,7 +2,7 @@ import { atr, ema, vwapLatest } from './indicators';
 import { CandleSet, closes, last } from './ohlcv';
 import { detectFvg } from './fvg';
 import { findOrderBlockZone } from './smc';
-import { etMinutes } from './entryGate';
+import { etDateKey, etMinutes } from './entryGate';
 
 export interface HtfContext {
   direction: 'BULL' | 'BEAR' | 'NEUTRAL';
@@ -60,18 +60,13 @@ export function getHtfContextFromCandles(candles: CandleSet): HtfContext {
   // Restrict zone detection to today's ET session only.
   // Splits into premarket (last 4 bars, 8:30-9:30 AM ET) + session bars that grow through the day.
   // This prevents inheriting unfilled FVGs / OBs from the prior session.
-  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const todayET = etDateKey(Date.now());
   const MARKET_OPEN_MIN = 9 * 60 + 30; // 9:30 AM ET in minutes
 
-  function etMinOfDay(isoTime: string): number {
-    const parts = new Date(isoTime)
-      .toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false })
-      .split(':');
-    return parseInt(parts[0]) * 60 + parseInt(parts[1]);
-  }
+  const etMinOfDay = (isoTime: string): number => etMinutes(isoTime);
 
   const m15Today = m15.filter(
-    (c) => new Date(c.time).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === todayET,
+    (c) => etDateKey(c.time) === todayET,
   );
   const m15Premarket = m15Today.filter((c) => etMinOfDay(c.time) < MARKET_OPEN_MIN);
   const m15Session   = m15Today.filter((c) => etMinOfDay(c.time) >= MARKET_OPEN_MIN);

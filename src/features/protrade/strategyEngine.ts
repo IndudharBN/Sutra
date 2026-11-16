@@ -5,7 +5,7 @@ import { closes, last, round } from '../scanner/ohlcv';
 import { findOrderBlockZone, rejectionCandle } from '../scanner/smc';
 import type { SignalGroup, StrategyChecklistItem, StrategyId, StrategyInput, StrategySignal, TradePlan, WorkflowStage } from './workflowTypes';
 import { STRATEGY_LABELS, workflowStageRank } from './workflowTypes';
-import { RTH_CLOSE_MIN, RTH_OPEN_MIN, etMinutes } from './entryGate';
+import { RTH_CLOSE_MIN, RTH_OPEN_MIN, etDateKey, etMinutes } from './entryGate';
 
 // ── Injectable clock ─────────────────────────────────────────────────────────
 // Several strategy gates (session gate, 10:15/10:30/10:45 time gates, bar-age volume
@@ -422,11 +422,9 @@ function openingRange(candles: Candle[], bars = 3) {
 // Needed when candles.five contains prior-day bars prepended for EMA context.
 function todayOpeningRange(candles: Candle[]): ReturnType<typeof openingRange> {
   if (!candles.length) return null;
-  const todayET = new Date(last(candles).time).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const todayET = etDateKey(last(candles).time);
   const todayRTH = candles.filter((c) => {
-    const d = new Date(c.time);
-    const date = d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-    return date === todayET && etMinutes(d) >= RTH_OPEN_MIN;
+    return etDateKey(c.time) === todayET && etMinutes(c.time) >= RTH_OPEN_MIN;
   });
   return openingRange(todayRTH, 3);
 }
@@ -1089,11 +1087,10 @@ function checkS7VolumeSurge(input: StrategyInput): StrategySignal | null {
   // Mid-session volume baseline: exclude the first 6 RTH bars (9:30–10:00 AM open period).
   // Opening bars carry 3–5× normal volume and inflate the average, making 2× impossible to hit mid-session.
   // Fallback to rolling 20 bars when not enough mid-session history exists.
-  const todayET = new Date(bar.time).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const todayET = etDateKey(bar.time);
   const todayRTH = candles.five.filter((c) => {
-    const d = new Date(c.time);
-    return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === todayET
-      && etMinutes(d) >= RTH_OPEN_MIN;
+    return etDateKey(c.time) === todayET
+      && etMinutes(c.time) >= RTH_OPEN_MIN;
   });
   const midSessionBars = todayRTH.length > 7 ? todayRTH.slice(6, -1) : [];
   const volSample = midSessionBars.length >= 4 ? midSessionBars : candles.five.slice(-21, -1);

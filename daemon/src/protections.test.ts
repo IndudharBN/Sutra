@@ -45,6 +45,14 @@ describe('protections', () => {
     expect(evaluateProtections({ ...base, trades }).ok).toBe(true);
   });
 
+  it('ledger anchor / zero-qty reconciliation rows never count as losses (2026-11-16 false halt)', () => {
+    const anchor = closed(60 * 24 * 4, -6111, { id: '__ALPACA_ANCHOR__', outcome: 'Anchor', quantity: 0 });
+    const r = evaluateProtections({ ...base, trades: [anchor] });
+    expect(r.ok).toBe(true);
+    expect(r.sizeMult).toBe(1);
+    expect(evaluateProtections({ ...base, trades: [closed(600, -6111, { quantity: 0 })] }).ok).toBe(true);
+  });
+
   it('rolling drawdown halves size at -1% and halts at -2.5%', () => {
     const half = evaluateProtections({ ...base, trades: [closed(60 * 24 * 3, -1200)] });
     expect(half.ok).toBe(true);

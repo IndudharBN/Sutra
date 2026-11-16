@@ -12,8 +12,9 @@
 
 import fs from 'fs';
 import path from 'path';
+import { etDateKey } from './engine/entryGate';
 
-export interface ClosedTradeLite { closedAt?: string; pnl?: number | null; status?: string; phantom?: boolean }
+export interface ClosedTradeLite { id?: string; closedAt?: string; pnl?: number | null; status?: string; phantom?: boolean; outcome?: string; quantity?: number }
 export interface ControlFile { halt?: boolean; reason?: string; haltUntil?: string; sizeMult?: number }
 
 export interface ProtectionConfig {
@@ -34,7 +35,7 @@ export const DEFAULT_PROTECTIONS: ProtectionConfig = {
 
 export interface ProtectionResult { ok: boolean; sizeMult: number; reasons: string[] }
 
-const etDay = (ms: number) => new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+const etDay = (ms: number) => etDateKey(ms);
 
 export function evaluateProtections(input: {
   nowMs: number;
@@ -60,8 +61,13 @@ export function evaluateProtections(input: {
     reasons.push(`control sizeMult x${c.sizeMult}`);
   }
 
+  // Only REAL closed trades count. The ledger also holds a '__ALPACA_ANCHOR__' reconciliation row
+  // (qty 0, outcome 'Anchor', pnl -$6,111 on 2026-11-12) that restates history to match Alpaca; counting
+  // it produced a false -7.89% drawdown and blocked every entry on 2026-11-16.
+  const isRealTrade = (t: ClosedTradeLite) =>
+    t.id !== '__ALPACA_ANCHOR__' && t.outcome !== 'Anchor' && (t.quantity === undefined || t.quantity > 0);
   const closed = input.trades
-    .filter((t) => t.status === 'Closed' && !t.phantom && t.closedAt && typeof t.pnl === 'number')
+    .filter((t) => t.status === 'Closed' && !t.phantom && isRealTrade(t) && t.closedAt && typeof t.pnl === 'number')
     .map((t) => ({ ms: Date.parse(t.closedAt as string), pnl: t.pnl as number }))
     .filter((t) => Number.isFinite(t.ms))
     .sort((a, b) => a.ms - b.ms);

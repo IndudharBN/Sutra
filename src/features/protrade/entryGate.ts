@@ -105,29 +105,49 @@ export function isQualified(i: {
 // RVOL's session-progress was overstated (RVOL deflated ~20-35% in the morning), pre-market
 // bars counted as "regular session" for opening ranges, and the "market closed" flag fired
 // at 15:00 ET. Everything session-related must be computed in America/New_York.
-const ET_PARTS = new Intl.DateTimeFormat('en-US', {
-  timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', weekday: 'short', hour12: false,
-});
 export const RTH_OPEN_MIN = 9 * 60 + 30;
 export const RTH_CLOSE_MIN = 16 * 60;
 
-function etParts(t: Date | string | number): { minutes: number; weekday: string } {
-  let h = 0, m = 0, weekday = '';
-  for (const p of ET_PARTS.formatToParts(new Date(t))) {
-    if (p.type === 'hour') h = parseInt(p.value, 10) % 24;
-    else if (p.type === 'minute') m = parseInt(p.value, 10);
-    else if (p.type === 'weekday') weekday = p.value;
+// Pure-arithmetic US Eastern time (2007+ rules: DST from 2nd Sunday of March 02:00 EST to 1st Sunday
+// of November 02:00 EDT). The scanner converts thousands of candle timestamps per cycle; going through
+// Intl / toLocaleString for each one (it builds a formatter every call) was ~60% of a full scan's CPU
+// and starved the event loop. This is ~100x cheaper and is verified against Intl in entryGate.test.ts.
+const DST_CACHE = new Map<number, [number, number]>();
+function dstWindowUtc(year: number): [number, number] {
+  let w = DST_CACHE.get(year);
+  if (!w) {
+    const firstSun = (month: number) => 1 + ((7 - new Date(Date.UTC(year, month, 1)).getUTCDay()) % 7);
+    w = [
+      Date.UTC(year, 2, firstSun(2) + 7, 7, 0),  // 02:00 EST = 07:00 UTC
+      Date.UTC(year, 10, firstSun(10), 6, 0),    // 02:00 EDT = 06:00 UTC
+    ];
+    DST_CACHE.set(year, w);
   }
-  return { minutes: h * 60 + m, weekday };
+  return w;
+}
+function etShifted(t: Date | string | number): number {
+  const ms = typeof t === 'number' ? t : new Date(t).getTime();
+  const [start, end] = dstWindowUtc(new Date(ms).getUTCFullYear());
+  return ms + (ms >= start && ms < end ? -4 : -5) * 3_600_000;
 }
 
 /** Minutes since midnight, America/New_York. */
-export function etMinutes(t: Date | string | number): number { return etParts(t).minutes; }
+export function etMinutes(t: Date | string | number): number {
+  const sh = etShifted(t);
+  return Math.floor((((sh % 86_400_000) + 86_400_000) % 86_400_000) / 60_000);
+}
+
+/** 'YYYY-MM-DD' calendar date in America/New_York. */
+export function etDateKey(t: Date | string | number): string {
+  return new Date(etShifted(t)).toISOString().slice(0, 10);
+}
 
 /** True outside Mon-Fri 09:30-16:00 ET (holidays not modelled). */
 export function isMarketClosedET(t: Date | string | number): boolean {
-  const { minutes, weekday } = etParts(t);
-  return weekday === 'Sat' || weekday === 'Sun' || minutes < RTH_OPEN_MIN || minutes >= RTH_CLOSE_MIN;
+  const sh = etShifted(t);
+  const dow = new Date(sh).getUTCDay();
+  const minutes = Math.floor((((sh % 86_400_000) + 86_400_000) % 86_400_000) / 60_000);
+  return dow === 0 || dow === 6 || minutes < RTH_OPEN_MIN || minutes >= RTH_CLOSE_MIN;
 }
 
 /** Fraction of the regular session elapsed, clamped to [0.05, 1] (for RVOL projection). */

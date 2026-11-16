@@ -1,4 +1,5 @@
 import { Candle, closes, highs, last, lows, round, volumes } from './ohlcv';
+import { RTH_OPEN_MIN, etDateKey, etMinutes } from './entryGate';
 
 export function ema(values: number[], period: number) {
   if (!values.length) return [];
@@ -87,13 +88,8 @@ export function vwapSlope(candles: Candle[], lookback = 3, period = 20) {
 
 // Filter candles to today's regular session (9:30 AM ET onwards only)
 export function sessionCandles(candles: Candle[]): Candle[] {
-  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  return candles.filter(c => {
-    const d = new Date(c.time);
-    if (d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) !== todayET) return false;
-    const etLocal = new Date(d.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    return etLocal.getHours() * 60 + etLocal.getMinutes() >= 9 * 60 + 30;
-  });
+  const todayET = etDateKey(Date.now());
+  return candles.filter((c) => etDateKey(c.time) === todayET && etMinutes(c.time) >= RTH_OPEN_MIN);
 }
 
 // Cumulative session VWAP from 9:30 AM — single anchor for the whole day

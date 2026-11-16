@@ -31,6 +31,7 @@ $def.Settings.DisallowStartIfOnBatteries = $false
 $def.Settings.StopIfGoingOnBatteries     = $false
 $def.Settings.ExecutionTimeLimit         = 'PT0S'  # no time limit
 $def.Settings.MultipleInstances          = 2       # ignore new instance if already running
+$def.Settings.Priority                    = 4       # NORMAL. Task Scheduler's default (7) is BELOW_NORMAL and children inherit it
 
 # Trigger 1: workstation UNLOCK (TASK_TRIGGER_SESSION_STATE_CHANGE = 11)
 $tUnlock             = $def.Triggers.Create(11)

@@ -6,7 +6,7 @@ import { ema, sessionCandles, sessionVwap, sessionVwapSlope } from './indicators
 import type { Candle, CandleSet } from './ohlcv';
 import { closes, last, round } from './ohlcv';
 import { evaluateStrategies } from './strategyEngine';
-import { RETIRED_STRATEGIES, computeAtr, isMarketClosedET, isQualified } from './entryGate';
+import { RETIRED_STRATEGIES, computeAtr, etDateKey, etMinutes, isMarketClosedET, isQualified } from './entryGate';
 import { stampGroupClassification } from './confluenceClassifier';
 import type { MarketDataProviderStatus, StrategySignal, WorkflowStage } from './workflowTypes';
 import { workflowStageRank } from './workflowTypes';
@@ -228,8 +228,7 @@ function candleTrend(candles: Candle[], minVwapDist = 0) {
   if (candles.length < 2) return 'FLAT' as const;
 
   // Current ET time — determines which phase of the session we're in
-  const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  const etMins = etNow.getHours() * 60 + etNow.getMinutes();
+  const etMins = etMinutes(Date.now());
 
   // ── Phase 1: 9:30–10:30 AM ET ───────────────────────────────────────────────
   // Session VWAP has <12 candles — too sparse to be a reliable anchor.
@@ -240,14 +239,13 @@ function candleTrend(candles: Candle[], minVwapDist = 0) {
     const session = sessionCandles(candles);
     if (session.length < 2) return 'FLAT' as const;
 
-    const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const todayET = etDateKey(Date.now());
     const todayOpen = session[0].open;
 
     // Yesterday's last close: walk backwards to find most recent non-today bar
     let prevClose = todayOpen;
     for (let i = candles.length - 1; i >= 0; i--) {
-      const d = new Date(candles[i].time);
-      if (d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) !== todayET) {
+      if (etDateKey(candles[i].time) !== todayET) {
         prevClose = candles[i].close;
         break;
       }
@@ -319,11 +317,11 @@ function computePrevDay(daily: Candle[]): { high: number; low: number; close: nu
 }
 
 function etHour(isoTime: string): number {
-  return parseInt(new Date(isoTime).toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }), 10);
+  return Math.floor(etMinutes(isoTime) / 60);
 }
 
 function etMinute(isoTime: string): number {
-  return parseInt(new Date(isoTime).toLocaleString('en-US', { timeZone: 'America/New_York', minute: '2-digit' }), 10);
+  return etMinutes(isoTime) % 60;
 }
 
 function isPremarket(isoTime: string): boolean {
