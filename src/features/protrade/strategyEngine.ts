@@ -17,6 +17,24 @@ let clockOverride: (() => number) | null = null;
 export function setStrategyClock(fn: (() => number) | null): void { clockOverride = fn; }
 const clockMs = (): number => (clockOverride ? clockOverride() : Date.now());
 const clockDate = (): Date => new Date(clockMs());
+// ── Stop-width tuning (offline experiments only) ─────────────────────────────
+// Defaults equal the former constants, so live behaviour is unchanged. The backtest overrides these
+// per run to sweep stop width without forking the engine.
+export interface StrategyTuning {
+  /** Ceiling on stop width = 15m ATR x noiseFloor(vix) x this. Tighter of structural/ceiling wins. */
+  intradayAtrMult: number;
+  /** Floor on stop width, in multiples of 15m ATR. */
+  minStopAtr: number;
+  /** Floor on stop width, as a fraction of price. */
+  minStopPct: number;
+}
+const DEFAULT_TUNING: StrategyTuning = { intradayAtrMult: 4, minStopAtr: 0.5, minStopPct: 0.005 };
+let tuning: StrategyTuning = { ...DEFAULT_TUNING };
+export function setStrategyTuning(t: Partial<StrategyTuning> | null): void {
+  tuning = t ? { ...DEFAULT_TUNING, ...t } : { ...DEFAULT_TUNING };
+}
+export function getStrategyTuning(): StrategyTuning { return { ...tuning }; }
+
 const etClock = (): Date => new Date(clockDate().toLocaleString('en-US', { timeZone: 'America/New_York' }));
 
 const MIN_RR = 1.5;
@@ -30,8 +48,7 @@ const T2_ATR_CAP = 0.8;
 const T2_PCT_CAP = 0.03;
 const T1_RR = 1.5;           // runner trail ratchet level (stop lifts BE → T1); 1R partial handled by the daemon monitor
 const STOP_BUFFER_ATR = 0.5; // breathing room beyond anchor extreme
-const MIN_STOP_ATR = 0.5;    // stop must be ≥ 50% of daily ATR from entry
-const MIN_STOP_PCT = 0.005;  // stop must be ≥ 0.5% of price — catches atr20=0 (no daily data)
+// MIN_STOP_ATR (0.5 x 15m ATR) and MIN_STOP_PCT (0.5% of price — catches atr20=0) live in `tuning` above.
 
 function noiseFloor(vixLevel?: number | null) {
   if (!vixLevel) return 0.75;
@@ -165,9 +182,8 @@ function planFromLevelsT1T2(
 // 0.75 noiseFloor = ~0.3% stop — too tight, wicked out. INTRADAY_ATR_MULT scales the
 // cap to a sane width: net ≈ 15mATR × 3 at base VIX → cap ~1.2% of price (p25 0.95%,
 // p75 1.79%). Tight enough to ~triple realized R:R, wide enough to survive 5m noise.
-const INTRADAY_ATR_MULT = 4;
-function intradayCappedStop(direction: 'BULL' | 'BEAR', entry: number, rawStop: number, atrIntraday: number, vixLevel?: number | null): number {
-  const nf = noiseFloor(vixLevel) * INTRADAY_ATR_MULT;
+export function intradayCappedStop(direction: 'BULL' | 'BEAR', entry: number, rawStop: number, atrIntraday: number, vixLevel?: number | null): number {
+  const nf = noiseFloor(vixLevel) * tuning.intradayAtrMult;
   const capDist = atrIntraday * nf;
   if (!(capDist > 0)) return rawStop; // no valid 15m ATR — fall back to structural stop
   const cap = direction === 'BULL' ? entry - capDist : entry + capDist;
@@ -179,8 +195,8 @@ function intradayCappedStop(direction: 'BULL' | 'BEAR', entry: number, rawStop: 
 // or structural zone (OB/FVG/sweep) sits too close to entry.
 // Takes the looser of: structural stop vs. min-distance floor (more room wins).
 // atrIntraday = 15m ATR; the 0.5%-of-price floor still catches a near-zero ATR.
-function enforceMinStop(direction: 'BULL' | 'BEAR', entry: number, stop: number, atrIntraday: number): number {
-  const minDist = Math.max(atrIntraday * MIN_STOP_ATR, entry * MIN_STOP_PCT);
+export function enforceMinStop(direction: 'BULL' | 'BEAR', entry: number, stop: number, atrIntraday: number): number {
+  const minDist = Math.max(atrIntraday * tuning.minStopAtr, entry * tuning.minStopPct);
   if (direction === 'BULL') {
     const enforced = Math.min(stop, entry - minDist);
     // Reject zero/negative/NaN stops (bad OB zone data where ob.low = 0 or NaN)

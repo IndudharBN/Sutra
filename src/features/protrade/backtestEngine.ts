@@ -1,4 +1,5 @@
-import { evaluateStrategies, setStrategyClock } from './strategyEngine';
+import { evaluateStrategies, setStrategyClock, setStrategyTuning } from './strategyEngine';
+import type { StrategyTuning } from './strategyEngine';
 import { RETIRED_STRATEGIES, baseFailures, computeAtr, isQualified, liveDirection, scoreRow } from './entryGate';
 import { DEFAULT_COSTS, commission, fillPrice } from './costs';
 import type { FillKind, TradingCosts } from './costs';
@@ -157,6 +158,8 @@ export interface BacktestOptions {
    * symbol per day, bar-time clock for time-of-day gates. false: legacy permissive replay.
    */
   liveGates?: boolean;
+  /** Offline stop-width experiments (see StrategyTuning). Omitted = live defaults. */
+  tuning?: Partial<StrategyTuning>;
 }
 
 interface SettleInput {
@@ -399,7 +402,8 @@ export function runBacktest(
         const decisionMs = new Date(bar.time).getTime() + 5 * 60_000;
         let signals: ReturnType<typeof evaluateStrategies>;
         setStrategyClock(() => decisionMs);
-        try { signals = evaluateStrategies({ ...input, atr15, vixLevel: undefined }); } finally { setStrategyClock(null); }
+        setStrategyTuning(opts.tuning ?? null);
+        try { signals = evaluateStrategies({ ...input, atr15, vixLevel: undefined }); } finally { setStrategyClock(null); setStrategyTuning(null); }
         // Live: primary = first non-retired signal; the row only trades if THAT signal has a plan.
         const primary = signals.filter((s) => !RETIRED_STRATEGIES.includes(s.strategyId))[0];
         if (!primary?.tradePlan) continue;
