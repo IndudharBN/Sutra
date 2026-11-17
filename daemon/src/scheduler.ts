@@ -365,15 +365,28 @@ async function carryGuard(): Promise<void> {
 // closing fill (see ledgerSync.ts for the safety rules). Without this, positions that were flattened
 // by a queued/overnight order left ghost Open rows that ate the notional budget and sector/beta caps.
 let ledgerSyncRunning = false;
+const orphanWarnedAt = new Map<string, number>();
 async function syncLedgerToBroker(): Promise<void> {
   if (ledgerSyncRunning) return;
   ledgerSyncRunning = true;
   try {
     const open = loadTrades().filter((t: PaperTrade) => t.status === 'Open');
-    if (open.length === 0) return;
     // Any failure to read the broker => do nothing (never assume flat).
     const positions = await getPaperPositions();
     const positionSymbols = new Set((positions ?? []).map((p) => p.symbol.toUpperCase()));
+
+    // ORPHANS: held at the broker but absent from the ledger (e.g. an order placed outside the daemon, or a
+    // fill-booking failure). The EOD flatten still closes them, but they carry risk the gates cannot see, so
+    // say so loudly (once per 30 min per symbol).
+    const ledgerSyms = new Set(open.map((t: PaperTrade) => t.symbol.toUpperCase()));
+    for (const p of positions ?? []) {
+      const sym = p.symbol.toUpperCase();
+      if (ledgerSyms.has(sym)) continue;
+      if (Date.now() - (orphanWarnedAt.get(sym) ?? 0) < 30 * 60_000) continue;
+      orphanWarnedAt.set(sym, Date.now());
+      console.warn(`[sync] ORPHAN position at broker with no Open ledger row: ${sym} qty ${p.qty} (unrealized $${Number(p.unrealized_pl).toFixed(0)}) - untracked by risk gates; EOD flatten will close it`);
+    }
+    if (open.length === 0) return;
     const pendingOrderSymbols = await getOpenOrderSymbols();
     const candidates = [...new Set(open.map((t: PaperTrade) => t.symbol.toUpperCase()))]
       .filter((sym) => !positionSymbols.has(sym) && !pendingOrderSymbols.has(sym));
