@@ -15,6 +15,9 @@ describe('daemon/UI engine parity', () => {
   it('strategyEngine.ts is identical apart from imports', () => {
     expect(norm('../../../daemon/src/engine/strategyEngine.ts')).toBe(norm('./strategyEngine.ts'));
   });
+  it('deadTrade.ts is identical apart from imports', () => {
+    expect(norm('../../../daemon/src/engine/deadTrade.ts')).toBe(norm('./deadTrade.ts'));
+  });
   it('entryGate.ts is identical apart from imports', () => {
     expect(norm('../../../daemon/src/engine/entryGate.ts')).toBe(norm('./entryGate.ts'));
   });

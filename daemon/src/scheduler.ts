@@ -12,6 +12,7 @@ import { checkSectorConcentration, checkPortfolioBeta } from './portfolioRisk';
 import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperPosition, closeAllPaperPositions, awaitEntryFill, getRecentFilledOrders, getOpenOrderSymbols, queueClosePosition } from './alpacaBroker';
 import { planLedgerSync, planCarryClose, findClosingFill, closePnl, classifyExit } from './ledgerSync';
 import type { SyncTrade, SyncFill } from './ledgerSync';
+import { planShadowDead } from './shadow';
 import { env } from './env';
 import { emit } from './httpServer';
 import { loadTrades, saveTrades, appendLedger } from './tradeStore';
@@ -418,6 +419,31 @@ async function syncLedgerToBroker(): Promise<void> {
   }
 }
 
+// ── Shadow mode: dead-trade exit rules A (12:30 ET) / B (13:30 ET) ─────────────
+// Records what each rule WOULD have done on every open trade. Writes only the optional `shadow` field on the
+// ledger row — never an order, never an exit. See shadow.ts and scripts/shadow-deadtrade-report.mjs.
+function shadowTick(): void {
+  try {
+    const snapshot = getCurrentSnapshot();
+    if (!snapshot) return;
+    const priceBySymbol = new Map<string, number>(snapshot.rows.map((r: { symbol: string; price: number }) => [r.symbol, r.price]));
+    const updates = planShadowDead(loadTrades(), priceBySymbol, Date.now());
+    if (updates.length === 0) return;
+    const ts = loadTrades();
+    let changed = false;
+    for (const u of updates) {
+      const i = ts.findIndex((t: PaperTrade) => t.id === u.id && t.status === 'Open');
+      if (i === -1) continue;
+      ts[i] = { ...ts[i], shadow: { ...(ts[i].shadow ?? {}), [u.rule]: u.check } };
+      changed = true;
+      if (u.check.dead) console.log(`[shadow] rule ${u.rule} WOULD exit ${ts[i].symbol}: best move ${u.check.mfeR}R, now ${u.check.unrealizedR}R @ ${u.check.price} (no action taken)`);
+    }
+    if (changed) saveTrades(ts);
+  } catch (err) {
+    console.warn('[shadow] tick error:', (err as Error).message);
+  }
+}
+
 async function eodClose(): Promise<void> {
   const state = getState();
   const today = toETDate();
@@ -652,6 +678,9 @@ export function startScheduler(): void {
   };
   setInterval(syncTick, 30_000);
   setTimeout(syncTick, 25_000);
+
+  // Shadow dead-trade rules: log-only, market hours.
+  setInterval(() => { if (isMarketHours()) shadowTick(); }, 60_000);
 
   // State save every 30s
   setInterval(() => {

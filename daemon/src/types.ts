@@ -16,6 +16,15 @@ export type StrategyId =
 
 export type SignalGroup = 'GOLD' | 'BLUE' | 'TREND' | 'FVG' | 'BREAKOUT' | 'PULLBACK' | 'MOMENTUM' | 'SIDEWAYS' | 'UNCLASSIFIED';
 
+/** Shadow-mode verdict of a dead-trade exit rule on an OPEN trade (advisory only; never drives an order). */
+export interface ShadowDeadCheck {
+  dead: boolean;          // the rule would have exited the trade at `at`
+  at: string;             // ISO time of the check
+  price: number;          // price at the check (what the exit would have filled near)
+  unrealizedR: number;    // open P&L in R at the check
+  mfeR: number;           // best favourable excursion so far, in R
+}
+
 export interface PaperTrade {
   id: string;
   symbol: string;
@@ -61,6 +70,10 @@ export interface PaperTrade {
   rvolAtEntry?: number;
   tape15mAligned?: boolean;
   newsFreshMin?: number | null;
+  /** Shadow dead-trade rule verdicts by rule key ('A' = 12:30 ET, 'B' = 13:30 ET). Analysis only. */
+  shadow?: Record<string, ShadowDeadCheck>;
+  /** ET date the row was last reconciled to broker fills. */
+  reconciled?: string;
 }
 
 export interface RiskSettings {
