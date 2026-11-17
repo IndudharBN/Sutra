@@ -9,7 +9,9 @@ import { buildPaperTrade, canPaperTradeRow } from './engine/buildPaperTrade';
 import { isTideBlocked } from './engine/isTideBlocked';
 import { checkGroupCircuitBreaker, checkStrategyCircuitBreaker, checkDailyLossLimit, recordGroupTradeResult, recordTradeResult } from './riskManager';
 import { checkSectorConcentration, checkPortfolioBeta } from './portfolioRisk';
-import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperPosition, closeAllPaperPositions, awaitEntryFill, getRecentFilledOrders } from './alpacaBroker';
+import { getPaperAccount, getPaperPositions, placePaperBracketOrder, closePaperPosition, closeAllPaperPositions, awaitEntryFill, getRecentFilledOrders, getOpenOrderSymbols, queueClosePosition } from './alpacaBroker';
+import { planLedgerSync, planCarryClose, findClosingFill, closePnl, classifyExit } from './ledgerSync';
+import type { SyncTrade, SyncFill } from './ledgerSync';
 import { env } from './env';
 import { emit } from './httpServer';
 import { loadTrades, saveTrades, appendLedger } from './tradeStore';
@@ -138,7 +140,28 @@ async function monitorLoop(): Promise<void> {
               console.log(`[monitor] ${after.symbol} RECONCILED — real exit ${fill.avgPrice} pnl=$${finalPnl} (planned was $${after.pnl?.toFixed(2)})`);
             }
           } else {
-            console.warn(`[monitor] ${after.symbol} exit fill unavailable — ledger keeps planned pnl=$${after.pnl?.toFixed(2)}`);
+            // The close call found nothing to fill (typically the position was already flat: closed by a
+            // resting bracket leg or by a queued overnight order). Look for the REAL closing fill before
+            // settling for the monitor's planned price.
+            let recovered = false;
+            if (idx !== -1) {
+              try {
+                const fills = await getRecentFilledOrders(after.symbol);
+                const t = ts[idx];
+                const cf = findClosingFill(t as unknown as SyncTrade, fills as unknown as SyncFill[]);
+                if (cf) {
+                  const px = Number(cf.filled_avg_price);
+                  const r = closePnl(t as unknown as SyncTrade, px);
+                  ts[idx] = { ...t, exitPrice: Number(px.toFixed(4)), pnl: r.pnl, pnlPercent: r.pnlPercent, closedAt: cf.filled_at as string };
+                  saveTrades(ts);
+                  emit('trade_closed', ts[idx]);
+                  finalPnl = r.pnl;
+                  recovered = true;
+                  console.log(`[monitor] ${after.symbol} position already flat — booked REAL closing fill ${px} pnl=$${r.pnl}`);
+                }
+              } catch { /* fall through to planned pnl */ }
+            }
+            if (!recovered) console.warn(`[monitor] ${after.symbol} exit fill unavailable — ledger keeps planned pnl=$${after.pnl?.toFixed(2)}`);
           }
           recordGroupTradeResult((after.signalGroup ?? 'UNCLASSIFIED') as import('./types').SignalGroup, finalPnl);
           recordTradeResult(after.strategyId ?? 'unknown', finalPnl, accountBalance);
@@ -312,10 +335,83 @@ function snapshotPrice(s?: {
   return null;
 }
 
+// ── After-close carry guard ────────────────────────────────────────────────
+// After 16:00 ET nothing can fill until the next open. The old behaviour re-ran cancel-all + close-all
+// every 30 s all night (log spam, and a window at the open where a position could have no order).
+// Now: queue a close ONCE per position that has no order at all, never cancel/resubmit.
+const carryQueued = new Set<string>();
+let lastCarryCheckMs = 0;
+async function carryGuard(): Promise<void> {
+  if (Date.now() - lastCarryCheckMs < 120_000) return;
+  lastCarryCheckMs = Date.now();
+  try {
+    const positions = await getPaperPositions();
+    if (!positions || positions.length === 0) return;
+    const pending = await getOpenOrderSymbols();
+    const toQueue = planCarryClose(positions.map((p) => p.symbol), pending, carryQueued);
+    for (const sym of toQueue) {
+      const ok = await queueClosePosition(sym);
+      if (ok) carryQueued.add(sym);
+      console.log(`[eod] after close: ${ok ? 'queued' : 'FAILED to queue'} market close for ${sym} (fills at next open)`);
+    }
+    if (toQueue.length === 0) console.log(`[eod] after close: ${positions.length} position(s) held, all already have a queued/working order — not touching them`);
+  } catch (err) {
+    console.warn('[eod] carry guard error:', (err as Error).message);
+  }
+}
+
+// ── Ledger <-> broker sync ───────────────────────────────────────────────
+// Alpaca is the source of truth. Close ledger rows whose position is gone at the broker, at the REAL
+// closing fill (see ledgerSync.ts for the safety rules). Without this, positions that were flattened
+// by a queued/overnight order left ghost Open rows that ate the notional budget and sector/beta caps.
+let ledgerSyncRunning = false;
+async function syncLedgerToBroker(): Promise<void> {
+  if (ledgerSyncRunning) return;
+  ledgerSyncRunning = true;
+  try {
+    const open = loadTrades().filter((t: PaperTrade) => t.status === 'Open');
+    if (open.length === 0) return;
+    // Any failure to read the broker => do nothing (never assume flat).
+    const positions = await getPaperPositions();
+    const positionSymbols = new Set((positions ?? []).map((p) => p.symbol.toUpperCase()));
+    const pendingOrderSymbols = await getOpenOrderSymbols();
+    const candidates = [...new Set(open.map((t: PaperTrade) => t.symbol.toUpperCase()))]
+      .filter((sym) => !positionSymbols.has(sym) && !pendingOrderSymbols.has(sym));
+    if (candidates.length === 0) return;
+    const fillsBySymbol: Record<string, SyncFill[]> = {};
+    for (const sym of candidates) fillsBySymbol[sym] = (await getRecentFilledOrders(sym)) as unknown as SyncFill[];
+
+    const plan = planLedgerSync({ openTrades: open as unknown as SyncTrade[], positionSymbols, pendingOrderSymbols, fillsBySymbol, nowMs: Date.now() });
+    if (plan.unresolved.length) console.warn(`[sync] flat at broker but no closing fill found yet for: ${[...new Set(plan.unresolved)].join(', ')} — rows left OPEN`);
+    if (plan.closes.length === 0) return;
+
+    // Re-read after the awaits and apply synchronously so we never clobber a concurrent write.
+    const ts = loadTrades();
+    let applied = 0;
+    for (const c of plan.closes) {
+      const idx = ts.findIndex((t: PaperTrade) => t.id === c.id && t.status === 'Open');
+      if (idx === -1) continue;
+      ts[idx] = { ...ts[idx], status: 'Closed', outcome: c.outcome, exitPrice: Number(c.exitPrice.toFixed(4)), pnl: c.pnl, pnlPercent: c.pnlPercent, closedAt: c.closedAt, reconciled: toETDate() } as PaperTrade;
+      appendLedger('broker_sync_close', ts[idx]);
+      emit('trade_closed', ts[idx]);
+      applied++;
+      console.log(`[sync] ${c.symbol} closed in ledger at REAL fill ${c.exitPrice} (${c.outcome}${c.carry ? ', overnight carry' : ''}) pnl=$${c.pnl}`);
+    }
+    if (applied) saveTrades(ts);
+  } catch (err) {
+    console.warn('[sync] ledger sync skipped:', (err as Error).message);
+  } finally {
+    ledgerSyncRunning = false;
+  }
+}
+
 async function eodClose(): Promise<void> {
   const state = getState();
   const today = toETDate();
   if (state.eodFiredDate === today) return;
+
+  // Market closed: nothing can fill until the next open. Queue closes once, don't churn.
+  if (etMinutes() >= 16 * 60) { await carryGuard(); return; }
 
   const trades = loadTrades();
   const openTrades = trades.filter((t: { status: string }) => t.status === 'Open');
@@ -534,6 +630,15 @@ export function startScheduler(): void {
   setInterval(() => {
     if (isEODWindow()) eodClose().catch((err) => console.error('[eod] close error:', (err as Error).message));
   }, 30_000);
+
+  // Ledger <-> broker sync: 09:31 -> 16:10 ET on trading days (first pass shortly after startup).
+  const syncTick = () => {
+    const m = etMinutes();
+    if (!isTradingDay() || m < 9 * 60 + 30 || m >= 16 * 60 + 10) return;
+    syncLedgerToBroker().catch(() => {/* logged inside */});
+  };
+  setInterval(syncTick, 30_000);
+  setTimeout(syncTick, 25_000);
 
   // State save every 30s
   setInterval(() => {

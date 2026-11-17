@@ -361,7 +361,8 @@ export function startHttpServer(): void {
     process.exit(1);
   });
 
-  server.listen(env.DAEMON_PORT, () => {
-    console.log(`[httpServer] listening on port ${env.DAEMON_PORT} — REST + ws://localhost:${env.DAEMON_PORT}/ws`);
+  // Loopback only: the API is unauthenticated (place orders, wipe ledger, close positions). Never expose it to the LAN.
+  server.listen(env.DAEMON_PORT, '127.0.0.1', () => {
+    console.log(`[httpServer] listening on 127.0.0.1:${env.DAEMON_PORT} (loopback only) — REST + ws://localhost:${env.DAEMON_PORT}/ws`);
   });
 }

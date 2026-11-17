@@ -58,7 +58,7 @@ if (-not (Test-CmdLine 'powershell.exe' 'watchdog-external') -and -not (Test-Cmd
 # -- UI (3006): plain hidden vite. --strictPort => never silently hops to 3007.
 if (-not (Test-Listening 3006)) {
     # Direct node + -Redirect* (a cmd /c "..>>log" wrapper died silently here). Logs overwrite per start.
-    Start-Process -FilePath 'node' -ArgumentList 'node_modules\vite\bin\vite.js', '--port=3006', '--host=0.0.0.0', '--strictPort' `
+    Start-Process -FilePath 'node' -ArgumentList 'node_modules\vite\bin\vite.js', '--port=3006', '--host=127.0.0.1', '--strictPort' `
         -WorkingDirectory $root -WindowStyle Hidden `
         -RedirectStandardOutput "$root\logs\ui-out.log" -RedirectStandardError "$root\logs\ui-error.log" | Out-Null
 }

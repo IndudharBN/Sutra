@@ -101,7 +101,10 @@ export async function placePaperBracketOrder(params: {
   return paperFetch<AlpacaOrderResult>('/v2/orders', {
     method: 'POST',
     body: JSON.stringify({
-      symbol, qty: String(qty), side, type: 'market', time_in_force: 'day',
+      // GTC (was 'day'): day brackets EXPIRE at the close, so if the daemon/PC is down at 15:50 the position
+      // carries overnight with NO stop (Oct 15->16: -$6.2k in one gap). GTC legs keep protecting it; the EOD
+      // flatten cancels them (cancel_orders) in the normal case, and OCO cancels the sibling on any fill.
+      symbol, qty: String(qty), side, type: 'market', time_in_force: 'gtc',
       order_class: 'bracket',
       take_profit: { limit_price: target.toFixed(2) },
       stop_loss: { stop_price: stop.toFixed(2), limit_price: stopLimitPrice.toFixed(2) },
@@ -210,6 +213,27 @@ export async function closePaperPosition(symbol: string): Promise<FillResult> {
     if (closeOrder?.id) return await awaitEntryFill(closeOrder.id);
   } catch { /* no position / already flat */ }
   return { filled: false, qty: 0, avgPrice: 0, status: 'no_position' };
+}
+
+// Upper-case symbols that have ANY open/pending order (bracket legs and queued closes included).
+export async function getOpenOrderSymbols(): Promise<Set<string>> {
+  type O = { symbol: string; legs?: O[] };
+  const orders = await paperFetch<O[]>('/v2/orders?status=open&limit=500&nested=true');
+  const out = new Set<string>();
+  const walk = (o: O): void => { out.add(o.symbol.toUpperCase()); (o.legs ?? []).forEach(walk); };
+  (orders ?? []).forEach(walk);
+  return out;
+}
+
+// Submit a close for ONE position without touching any other order (unlike closePaperPosition, which
+// cancels the symbol's orders first). Used after the close, when orders can only queue for the open.
+export async function queueClosePosition(symbol: string): Promise<boolean> {
+  try {
+    const o = await paperFetch<{ id: string }>(`/v2/positions/${encodeURIComponent(symbol)}`, { method: 'DELETE' });
+    return Boolean(o?.id);
+  } catch {
+    return false;
+  }
 }
 
 export async function getPaperAccount(): Promise<AlpacaAccount> {

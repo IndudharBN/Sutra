@@ -6,8 +6,8 @@ import { describe, it } from 'vitest';
 import { runBacktest } from './backtestEngine';
 import type { Candle } from '../scanner/ohlcv';
 
-const ALPACA_KEY = 'PKXSJL7R4BX23O573BAZ5DT6RV';
-const ALPACA_SECRET = 'BSAMcoo17ffRveSnEKzweV6tspN2pjvC4xaSVaG5YaD3';
+const ALPACA_KEY = process.env.ALPACA_KEY ?? '';
+const ALPACA_SECRET = process.env.ALPACA_SECRET ?? '';
 const DATA_URL = 'https://data.alpaca.markets';
 const SYMBOLS = ['NVDA', 'TSLA', 'AMD'];
 const ACCOUNT = 100_000;
@@ -40,7 +40,8 @@ function bar(label: string, value: number, total: number): string {
   return '█'.repeat(Math.round(pct * 10)) + '░'.repeat(10 - Math.round(pct * 10));
 }
 
-describe('Backtest diagnostic (post-fix)', () => {
+// Needs live Alpaca data: skipped unless ALPACA_KEY / ALPACA_SECRET are set in the environment.
+describe.skipIf(!ALPACA_KEY || !ALPACA_SECRET)('Backtest diagnostic (post-fix)', () => {
   it('runs 30-day backtest for NVDA, TSLA, AMD', async () => {
     console.log(`\n${'═'.repeat(70)}`);
     console.log('  SUTRA BACKTEST — POST-FIX (proximity gates + structural stops)');

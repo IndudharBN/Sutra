@@ -1,6 +1,10 @@
+import fs from 'fs';
+// Credentials come from the gitignored daemon/.env.daemon (or the environment) — never hardcode them.
+const _env = {};
+try { for (const l of fs.readFileSync(new URL('./daemon/.env.daemon', import.meta.url), 'utf8').split(/\r?\n/)) { const m = l.match(/^\s*(ALPACA_[A-Z_]+)\s*=\s*(.+?)\s*$/); if (m) _env[m[1]] = m[2]; } } catch { /* fall back to process.env */ }
 // Quick diagnostic: fetch live data for 3 stocks and show exactly what's failing
-const ALPACA_KEY    = 'PKXSJL7R4BX23O573BAZ5DT6RV';
-const ALPACA_SECRET = 'BSAMcoo17ffRveSnEKzweV6tspN2pjvC4xaSVaG5YaD3';
+const ALPACA_KEY    = process.env.ALPACA_KEY || _env.ALPACA_KEY;
+const ALPACA_SECRET = process.env.ALPACA_SECRET || _env.ALPACA_SECRET;
 const DATA_URL      = 'https://data.alpaca.markets';
 const SYMBOLS       = ['NVDA', 'TSLA', 'AMD', 'META', 'AAPL'];
 const MIN_RR        = 1.5;

@@ -17,7 +17,7 @@
 # ============================================================================
 
 $Port          = 3001
-$HealthUrl     = "http://localhost:$Port/api/health"
+$HealthUrl     = "http://127.0.0.1:$Port/api/health"
 $IntervalSec   = 30      # how often to poll
 $TimeoutSec    = 8       # per-request timeout
 $FailsToKill   = 3       # consecutive failures before killing (~90s of wedge)
@@ -82,6 +82,22 @@ function Invoke-EodFlatten {
         $pos = Invoke-RestMethod -Uri "$AlpacaBase/v2/positions" -Headers $AlpacaHeaders -TimeoutSec 10 -ErrorAction Stop
     } catch { Write-Host "[watchdog] $(Get-Date -Format HH:mm:ss) EOD: could not read positions ($($_.Exception.Message))"; return }
     $pos = @($pos); if ($pos.Count -eq 0) { Write-Host "[watchdog] $(Get-Date -Format HH:mm:ss) EOD: no open positions - daemon already flat OK"; return }
+
+    # AFTER the close nothing can fill until the next open. Queue ONE close per position that has no order
+    # at all - never cancel+resubmit (the old loop did it every poll all evening and could leave a position
+    # order-less at the open). The daemon's carry guard does the same; both are idempotent.
+    if ((Get-ETMinutes) -ge (16 * 60)) {
+        try { $openOrders = @(Invoke-RestMethod -Uri "$AlpacaBase/v2/orders?status=open&limit=500&nested=true" -Headers $AlpacaHeaders -TimeoutSec 10 -ErrorAction Stop) } catch { return }
+        $have = @{}
+        foreach ($o in $openOrders) { $have[$o.symbol.ToUpper()] = 1; foreach ($l in @($o.legs)) { if ($l) { $have[$l.symbol.ToUpper()] = 1 } } }
+        foreach ($p in $pos) {
+            if ($have.ContainsKey($p.symbol.ToUpper())) { continue }
+            try { Invoke-RestMethod -Uri "$AlpacaBase/v2/positions/$($p.symbol)" -Method Delete -Headers $AlpacaHeaders -TimeoutSec 15 -ErrorAction Stop | Out-Null
+                  Write-Host "[watchdog] $(Get-Date -Format HH:mm:ss) after close: queued market close for $($p.symbol) (fills at next open)" }
+            catch { Write-Host "[watchdog] $(Get-Date -Format HH:mm:ss) after close: could not queue $($p.symbol): $($_.Exception.Message)" }
+        }
+        return
+    }
 
     Write-Host "[watchdog] $(Get-Date -Format HH:mm:ss) EOD SAFETY FLATTEN - $($pos.Count) position(s) still open, closing at market:"
     foreach ($p in $pos) { Write-Host "    $($p.symbol) $($p.side) $($p.qty) (unrealized $($p.unrealized_pl))" }
