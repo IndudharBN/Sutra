@@ -1,6 +1,5 @@
 import React from 'react';
 import { BarChart3, CheckCircle2, ChevronDown, Eye, RefreshCcw, Settings, ShieldCheck, TrendingUp, X } from 'lucide-react';
-import { placePaperBracketOrder, closePaperPosition, getPaperAccount } from '../lib/alpacaBroker';
 import { computeNotional } from '../lib/riskManager';
 import { type ProTradeRow, type ProTradeSnapshot } from '../features/protrade/proTradeScannerApi';
 import {
@@ -1782,18 +1781,11 @@ export function ProTradeScannerScreen() {
     try {
       setApprovalBusy(true);
       setApprovalMessage('');
-      const approveGroup = row.primaryStrategy?.signalGroup ?? 'UNCLASSIFIED';
-      const approveGroupMult = row.primaryStrategy?.groupSizeMult ?? 1.0;
-      const orderNotional = computeNotional(accountBalance, plan.entry, plan.stop, approveGroup, approveGroupMult);
-      const order = await placePaperBracketOrder({
-        symbol: row.symbol,
-        direction: row.direction === 'BEAR' ? 'BEAR' : 'BULL',
-        entry: plan.entry,
-        stop: plan.stop,
-        target: plan.target,
-        notional: orderNotional,
-      });
-      setApprovalMessage(`Alpaca paper bracket submitted: ${order.id.slice(0, 8)} · ${row.symbol} ${order.side.toUpperCase()} ${order.qty} shares`);
+      // The DAEMON is the only thing that places orders: its endpoint books the ledger row and the Alpaca bracket
+      // together. (This used to call Alpaca straight from the browser, which left a position the ledger never saw.)
+      const trade = await daemonClient.paperTrade(row.symbol) as PaperTrade;
+      setPaperTrades((current) => [trade, ...current]);
+      setApprovalMessage(`Paper trade sent via daemon: ${row.symbol} ${trade.direction} entry ${fmtMoney(trade.entry)} stop ${fmtMoney(trade.stop)}`);
       // Refresh snapshot from daemon after manual approve
       daemonClient.getState().then((s: Record<string, unknown>) => { if (s['trades']) setPaperTrades(s['trades'] as PaperTrade[]); }).catch(() => {});
     } catch (err) {
@@ -1838,9 +1830,8 @@ export function ProTradeScannerScreen() {
         setMonitorDate(todayET());
         const earningsNote = row.earningsDays !== null && Math.abs(row.earningsDays) <= 1 ? ` ⚠ ${row.earningsStatus}` : '';
         setApprovalMessage(`Paper trade opened for ${row.symbol}: entry ${fmtMoney(t.entry)}, stop ${fmtMoney(t.stop)}, T1 ${fmtMoney(t.target1)}, T2 ${fmtMoney(t.target2)}.${earningsNote}`);
-        // Mirror to Alpaca
-        placePaperBracketOrder({ symbol: t.symbol, direction: t.direction === 'BEAR' ? 'BEAR' : 'BULL', entry: t.entry, stop: t.stop, target: t.target, notional: t.notional })
-          .catch((err: unknown) => console.warn('Alpaca paper order skipped:', err instanceof Error ? err.message : err));
+        // NOTE: no browser-side Alpaca order here. The daemon endpoint already placed the bracket; mirroring it from
+        // the browser doubled the position at the broker while the ledger recorded one.
       })
       .catch((err: unknown) => setApprovalMessage(`Paper trade failed: ${err instanceof Error ? err.message : String(err)}`));
   }
@@ -1880,8 +1871,7 @@ export function ProTradeScannerScreen() {
         setPaperTrades((current) => current.map((item) => item.id === t.id ? t : item));
       })
       .catch((err: unknown) => setApprovalMessage(`Close failed: ${err instanceof Error ? err.message : String(err)}`));
-    // Mirror to Alpaca
-    closePaperPosition(trade.symbol).catch(() => {});
+    // The daemon's /close endpoint already closes the position at Alpaca; no second browser-side close.
   }
 
   return (
